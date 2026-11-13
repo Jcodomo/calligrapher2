@@ -714,15 +714,16 @@ fn build_strokes(text: &str, p: &Params) -> (Vec<RibbonStroke>, f32, f32) {
                 let shape_jit = p.variation + p.vary * 0.6;
 
                 if let (Some((px, py)), true) = (prev_exit, prev_connects && g.connects) {
-                    let ex = gx;
                     let ey = g.entry_y;
-                    // cursive valley: dip toward the baseline between letters
+                    // Build the join in THIS glyph's local space (finalize offsets by gx).
+                    // px is absolute (previous gx + exit hint), so localise it.
+                    let lp = px - gx; // previous exit x, local (negative, to the left)
                     let dip = (py.min(ey) - 0.14).max(-0.05);
                     let conn = vec![
-                        Pt::new(px, py),
-                        Pt::new(px + (ex - px) * 0.35, dip + 0.05),
-                        Pt::new(px + (ex - px) * 0.65, dip + 0.05),
-                        Pt::new(ex, ey),
+                        Pt::new(lp, py),
+                        Pt::new(lp * 0.65, dip + 0.05),
+                        Pt::new(lp * 0.35, dip + 0.05),
+                        Pt::new(0.0, ey),
                     ];
                     let cxf = Xf { size: 1.0, base_off, rot: 0.0, pivot: 0.0 };
                     out.push(RibbonStroke {
