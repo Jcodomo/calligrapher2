@@ -31,6 +31,10 @@ The WASM/JS boundary is a tiny C ABI: `alloc`, `dealloc`, `generate`,
   Marker / Signature), Speed, Legibility, Thickness.
 - **Realism toggles:** Vary each letter, Natural movement, Inkflow (pen
   pressure), Tilt each letter.
+- **Import a signature image:** upload or paste a photo/scan of a signature; it
+  is traced to a clean, recolorable, scalable vector (marching-squares + RDP),
+  usable on documents and exportable. "Match style" estimates the sample's
+  slant and weight for typing. (For signatures you are authorized to use.)
 - **Sign / write on a document:** upload a **PDF** (rendered with pdf.js) or an
   image, drag the writing to position it, pick the page, and export.
 - **Scan & finish:** scanned look (rotation-free vignette + page blemishes),

@@ -55,7 +55,10 @@ const STYLES = {
 };
 
 let ink = INKS[0], paper = PAPERS[0], texIdx = 1, align = 0, mode = "writing";
-const toggles = { vary: true, natural: true, inkflow: true, tilt: false, cursivecaps: false, transparent: false, scanned: false };
+const toggles = { vary: true, natural: true, inkflow: true, tilt: false, cursivecaps: false, usesig: false, transparent: false, scanned: false };
+
+// Imported-signature state (traced from an uploaded/pasted image).
+let sigImg = null, sigSVG = "", sigBox = { w: 0, h: 0 }, sigMetrics = null;
 
 // document background + placement
 let doc = null;            // { img:Image, w, h, type }
@@ -136,6 +139,7 @@ const LABELS = {
   font_px: v => v, slant: v => v + "°", contrast: v => v + "%", spacing: v => (v / 100).toFixed(2),
   line_spacing: v => (v / 100).toFixed(2), tex_intensity: v => v + "%", blemish: v => v + "%",
   blur: v => v / 10 + "px", sharpen: v => v + "%", resolution: v => v + "×", place_scale: v => v + "%",
+  sig_threshold: v => v,
 };
 function refreshLabels() { for (const id in LABELS) { const el = $(id + "_v"); if (el && $(id)) el.textContent = LABELS[id](+$(id).value); } }
 
@@ -187,6 +191,10 @@ function previewFilter() {
 
 let rawSVG = "", hwW = 800, hwH = 300;
 function makeHandwriting(forWidth) {
+  if (toggles.usesig && sigSVG) {
+    hwW = sigBox.w; hwH = sigBox.h;
+    return sigSVG.replace("<svg ", `<svg style="color:${ink}" `);
+  }
   let svg = engineSVG(textForEngine(), params(forWidth));
   if (mode === "signature") svg = addFlourish(svg);
   svg = svg.replace("<svg ", `<svg style="color:${ink}" `);
@@ -410,6 +418,147 @@ function applyState(s) {
 function loadHash() { if (!location.hash.length) return; try { applyState(JSON.parse(decodeURIComponent(atob(location.hash.slice(1))))); } catch {} }
 async function copyLink() { syncHash(); try { await navigator.clipboard.writeText(location.href); flash("Shareable link copied."); } catch { errEl.textContent = "Copy the URL from the address bar."; } }
 function flash(m) { errEl.textContent = m; errEl.className = "err ok"; setTimeout(() => { errEl.textContent = ""; errEl.className = "err"; }, 1800); }
+
+// ---- signature image -> vector --------------------------------------------
+
+$("sig_btn").onclick = () => $("sig_file").click();
+$("sig_file").onchange = (e) => { const f = e.target.files[0]; if (f) loadSigFile(f); };
+$("sig_threshold").addEventListener("input", () => { refreshLabels(); processSignature(); render(); });
+$("sig_clear").onclick = () => { sigImg = null; sigSVG = ""; toggles.usesig = false; syncToggles(); $("sig_controls").style.display = "none"; render(); };
+$("sig_match").onclick = () => {
+  if (!sigMetrics) return;
+  const set = (id, v) => { const e = $(id); e.value = v; e.dispatchEvent(new Event("input")); };
+  set("slant", sigMetrics.slant); set("thickness", sigMetrics.thickness);
+  toggles.usesig = false; syncToggles(); render(true); flash("Applied the signature's slant & weight.");
+};
+document.addEventListener("paste", (e) => {
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  for (const it of items) if (it.type && it.type.startsWith("image/")) { loadSigFile(it.getAsFile()); e.preventDefault(); break; }
+});
+function loadSigFile(f) {
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  const img = new Image();
+  img.onload = () => {
+    sigImg = img; processSignature();
+    if (sigSVG) { $("sig_controls").style.display = ""; toggles.usesig = true; syncToggles(); render(); }
+    URL.revokeObjectURL(url);
+  };
+  img.onerror = () => { errEl.textContent = "Could not read that image."; };
+  img.src = url;
+}
+
+function processSignature() {
+  if (!sigImg) return;
+  const maxD = 700;
+  let w = sigImg.naturalWidth, h = sigImg.naturalHeight;
+  const sc = Math.min(1, maxD / Math.max(w, h)); w = Math.max(1, Math.round(w * sc)); h = Math.max(1, Math.round(h * sc));
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const cx = c.getContext("2d"); cx.drawImage(sigImg, 0, 0, w, h);
+  const d = cx.getImageData(0, 0, w, h).data;
+  const thr = +$("sig_threshold").value;
+  const mask = new Uint8Array(w * h);
+  let area = 0, sumX = 0, sumY = 0, sumXY = 0, sumYY = 0, minx = w, miny = h, maxx = 0, maxy = 0;
+  for (let i = 0, p = 0; i < mask.length; i++, p += 4) {
+    const a = d[p + 3], lum = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+    if (a > 10 && lum < thr) {
+      mask[i] = 1; const x = i % w, y = (i / w) | 0;
+      area++; sumX += x; sumY += y; sumXY += x * y; sumYY += y * y;
+      if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+    }
+  }
+  if (area < 24) { sigSVG = ""; errEl.textContent = "No dark ink found — adjust the threshold slider."; return; }
+  let loops = marchingSquares(mask, w, h).map((L) => simplifyLoop(L, 1.1)).filter((L) => L.length > 3);
+  // slant estimate: regression x = a*y + b over ink pixels
+  const n = area, meanX = sumX / n, meanY = sumY / n;
+  const a = (sumXY - n * meanX * meanY) / ((sumYY - n * meanY * meanY) || 1);
+  const slant = Math.max(-10, Math.min(30, Math.round(-a * 42)));
+  // weight estimate: 2*area / perimeter relative to ink height
+  let perim = 0;
+  for (const L of loops) for (let i = 1; i < L.length; i++) perim += Math.hypot(L[i][0] - L[i - 1][0], L[i][1] - L[i - 1][1]);
+  const strokeW = perim > 0 ? (2 * area) / perim : 4, bh = (maxy - miny) || 1;
+  const thickness = Math.max(10, Math.min(90, Math.round((strokeW / bh) * 620)));
+  sigMetrics = { slant, thickness };
+  const vbw = maxx - minx + 2, vbh = maxy - miny + 2;
+  let body = "";
+  for (const L of loops) {
+    let s = "M" + (L[0][0] - minx + 1).toFixed(1) + " " + (L[0][1] - miny + 1).toFixed(1);
+    for (let i = 1; i < L.length; i++) s += "L" + (L[i][0] - minx + 1).toFixed(1) + " " + (L[i][1] - miny + 1).toFixed(1);
+    body += '<path d="' + s + 'Z"/>';
+  }
+  sigSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="${vbw}" height="${vbh}" viewBox="0 0 ${vbw} ${vbh}" fill="currentColor" stroke="none"><g fill-rule="evenodd">${body}</g></svg>`;
+  sigBox = { w: vbw, h: vbh };
+  errEl.textContent = "";
+}
+
+// Marching squares over a binary mask -> array of closed loops of points.
+function marchingSquares(mask, w, h) {
+  const val = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : mask[y * w + x]);
+  const segs = [];
+  const push = (p, q) => segs.push([p[0], p[1], q[0], q[1]]);
+  for (let y = 0; y < h - 1; y++) for (let x = 0; x < w - 1; x++) {
+    const tl = val(x, y), tr = val(x + 1, y), br = val(x + 1, y + 1), bl = val(x, y + 1);
+    const idx = tl | (tr << 1) | (br << 2) | (bl << 3);
+    if (idx === 0 || idx === 15) continue;
+    const T = [x + 0.5, y], R = [x + 1, y + 0.5], B = [x + 0.5, y + 1], L = [x, y + 0.5];
+    switch (idx) {
+      case 1: case 14: push(L, T); break;
+      case 2: case 13: push(T, R); break;
+      case 3: case 12: push(L, R); break;
+      case 4: case 11: push(R, B); break;
+      case 6: case 9: push(T, B); break;
+      case 7: case 8: push(L, B); break;
+      case 5: push(L, T); push(R, B); break;
+      case 10: push(T, R); push(L, B); break;
+    }
+  }
+  const key = (x, y) => x + "," + y;
+  const ends = new Map();
+  segs.forEach((s, i) => { for (const k of [key(s[0], s[1]), key(s[2], s[3])]) { if (!ends.has(k)) ends.set(k, []); ends.get(k).push(i); } });
+  const used = new Array(segs.length).fill(false), loops = [];
+  for (let i = 0; i < segs.length; i++) {
+    if (used[i]) continue;
+    const s0 = segs[i]; let curKey = key(s0[0], s0[1]), cur = i; const loop = [[s0[0], s0[1]]];
+    let guard = 0;
+    while (cur !== -1 && !used[cur] && guard++ < 1e6) {
+      used[cur] = true; const s = segs[cur];
+      const aK = key(s[0], s[1]), bK = key(s[2], s[3]);
+      const nextKey = curKey === aK ? bK : aK;
+      const parts = nextKey.split(",");
+      loop.push([+parts[0], +parts[1]]);
+      curKey = nextKey;
+      const cand = (ends.get(nextKey) || []).filter((j) => !used[j]);
+      cur = cand.length ? cand[0] : -1;
+    }
+    if (loop.length > 3) loops.push(loop);
+  }
+  return loops;
+}
+// Simplify a closed loop by splitting at the point farthest from its start,
+// so RDP has two distinct anchors (RDP alone collapses a closed ring).
+function simplifyLoop(loop, eps) {
+  if (loop.length < 6) return loop;
+  let far = 0, fd = -1;
+  for (let i = 1; i < loop.length; i++) {
+    const d = Math.hypot(loop[i][0] - loop[0][0], loop[i][1] - loop[0][1]);
+    if (d > fd) { fd = d; far = i; }
+  }
+  const first = rdp(loop.slice(0, far + 1), eps);
+  const second = rdp(loop.slice(far), eps);
+  return first.slice(0, -1).concat(second);
+}
+// Ramer-Douglas-Peucker polyline simplification.
+function rdp(pts, eps) {
+  if (pts.length < 3) return pts;
+  let idx = 0, dmax = 0; const a = pts[0], b = pts[pts.length - 1];
+  const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const dd = Math.abs((pts[i][0] - a[0]) * dy - (pts[i][1] - a[1]) * dx) / len;
+    if (dd > dmax) { dmax = dd; idx = i; }
+  }
+  if (dmax > eps) return rdp(pts.slice(0, idx + 1), eps).slice(0, -1).concat(rdp(pts.slice(idx), eps));
+  return [a, b];
+}
 
 // ---- boot ----------------------------------------------------------------
 
