@@ -27,8 +27,10 @@ The WASM/JS boundary is a tiny C ABI: `alloc`, `dealloc`, `generate`,
 
 - **Modes:** Writing (multi-line, word-wrapped) and Signature (single line with
   a flourish swash).
-- **Original-style controls:** Style (Random / Casual / Formal / Neat / Scrawl /
-  Marker / Signature), Speed, Legibility, Thickness.
+- **Original-style controls:** Speed, Legibility, Thickness, and a Style preset
+  library (Random, Casual, Neat, Formal, Elegant, Script, Signature, Rounded,
+  Hurried, Scrawl, Spiky, Architect, Marker, Kid) — each sets the full control
+  set and realism toggles.
 - **Realism toggles:** Vary each letter, Natural movement, Inkflow (pen
   pressure), Tilt each letter.
 - **Import a signature image:** upload or paste a photo/scan of a signature; it
