@@ -28,7 +28,7 @@ function engineSVG(text, p) {
   const len = wasm.generate(
     inPtr, bytes.length, p.width, p.height, p.font_px, p.slant_deg, p.variation,
     p.weight, p.contrast, p.spacing, p.line_spacing, p.align, p.tilt, p.vary,
-    p.inkflow, p.natural, lo, hi
+    p.inkflow, p.natural, p.caps_cursive, lo, hi
   );
   const svg = dec.decode(new Uint8Array(wasm.memory.buffer, wasm.result_ptr(), len));
   wasm.dealloc(inPtr, bytes.length || 1);
@@ -55,7 +55,7 @@ const STYLES = {
 };
 
 let ink = INKS[0], paper = PAPERS[0], texIdx = 1, align = 0, mode = "writing";
-const toggles = { vary: true, natural: true, inkflow: true, tilt: false, transparent: false, scanned: false };
+const toggles = { vary: true, natural: true, inkflow: true, tilt: false, cursivecaps: false, transparent: false, scanned: false };
 
 // document background + placement
 let doc = null;            // { img:Image, w, h, type }
@@ -153,19 +153,25 @@ function params(forWidth) {
     line_spacing: +$("line_spacing").value / 100, align,
     tilt: toggles.tilt ? 0.6 : 0, vary: toggles.vary ? 0.8 : 0,
     inkflow: toggles.inkflow ? 0.85 : 0, natural: toggles.tilt ? 0 : (toggles.natural ? 0.7 : 0),
+    caps_cursive: (mode === "signature" || toggles.cursivecaps) ? 1 : 0,
     seed: +$("seed").value,
   };
 }
 
-// Append a flourish swash under signatures.
+// Append flourish swashes under a signature: a looping underline + lead-in curl.
 function addFlourish(svg) {
   const w = +(svg.match(/width="(\d+)"/) || [])[1] || 800;
   const h = +(svg.match(/height="(\d+)"/) || [])[1] || 200;
-  const y = h * 0.74, x0 = w * 0.08, x1 = w * 0.92, sw = Math.max(2, +$("thickness").value / 14);
-  const d = `M${x0} ${y} C ${w * 0.3} ${y + h * 0.12}, ${w * 0.55} ${y - h * 0.16}, ${x1} ${y - h * 0.02} ` +
-    `S ${w * 0.8} ${y + h * 0.1}, ${w * 0.7} ${y + h * 0.04}`;
-  const path = `<path d="${d}" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round"/>`;
-  return svg.replace("</g></svg>", path + "</g></svg>");
+  const base = h * 0.70, sw = Math.max(1.6, +$("thickness").value / 16);
+  const under =
+    `M ${w * 0.14} ${base} C ${w * 0.04} ${base + h * 0.15}, ${w * 0.5} ${base + h * 0.16}, ${w * 0.80} ${base - h * 0.02} ` +
+    `S ${w * 1.03} ${base - h * 0.12}, ${w * 0.90} ${base + h * 0.06} ` +
+    `S ${w * 0.72} ${base + h * 0.02}, ${w * 0.82} ${base - h * 0.05}`;
+  const lead = `M ${w * 0.02} ${base - h * 0.04} q ${w * 0.05} ${-h * 0.13}, ${w * 0.11} ${-h * 0.02}`;
+  const paths =
+    `<path d="${under}" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/>` +
+    `<path d="${lead}" fill="none" stroke="currentColor" stroke-width="${(sw * 0.85).toFixed(2)}" stroke-linecap="round"/>`;
+  return svg.replace("</g></svg>", paths + "</g></svg>");
 }
 
 function previewFilter() {

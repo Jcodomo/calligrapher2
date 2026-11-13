@@ -513,8 +513,130 @@ fn digit(c: char) -> Option<Glyph> {
     Some(g)
 }
 
-fn glyph_any(c: char) -> Option<Glyph> {
-    lower(c).or_else(|| upper(c)).or_else(|| digit(c))
+/// Original flowing cursive capitals (used for signatures / cursive-caps mode).
+/// Mostly single-stroke forms that connect into the following letter.
+fn upper_cursive(c: char) -> Option<Glyph> {
+    let h = ASCENDER;
+    let g = match c {
+        'A' => Glyph { strokes: vec![s(&[
+            (0.05, 0.10), (0.33, 1.55), (0.45, h), (0.50, 0.12),
+            (0.30, 0.44), (0.52, 0.40), (0.74, 0.12), (0.92, 0.30)])],
+            advance: 1.00, entry_y: 0.10, exit_y: 0.30, connects: true },
+        'B' => Glyph { strokes: vec![s(&[
+            (0.16, 0.06), (0.12, 1.3), (0.22, h), (0.52, 1.62), (0.40, 1.22),
+            (0.22, 1.0), (0.60, 0.86), (0.68, 0.48), (0.42, 0.08), (0.16, 0.14),
+            (0.5, 0.10), (0.74, 0.24)])],
+            advance: 0.92, entry_y: 0.06, exit_y: 0.24, connects: true },
+        'C' => Glyph { strokes: vec![s(&[
+            (0.60, 1.30), (0.78, 1.60), (0.52, 1.64), (0.24, 1.42),
+            (0.12, 0.80), (0.32, 0.14), (0.66, 0.08), (0.88, 0.32)])],
+            advance: 0.92, entry_y: 0.6, exit_y: 0.14, connects: true },
+        'D' => Glyph { strokes: vec![s(&[
+            (0.14, 0.06), (0.10, 1.3), (0.2, h), (0.3, 1.5), (0.22, 0.1),
+            (0.5, 0.06), (0.86, 0.5), (0.86, 1.02), (0.5, 1.5), (0.26, 1.46),
+            (0.5, 0.10), (0.74, 0.24)])],
+            advance: 1.0, entry_y: 0.06, exit_y: 0.24, connects: true },
+        'E' => Glyph { strokes: vec![s(&[
+            (0.80, 1.5), (0.5, 1.62), (0.22, 1.42), (0.40, 1.16), (0.18, 0.94),
+            (0.44, 0.84), (0.16, 0.5), (0.3, 0.12), (0.66, 0.06), (0.86, 0.3)])],
+            advance: 0.9, entry_y: 0.5, exit_y: 0.14, connects: true },
+        'F' => Glyph { strokes: vec![
+            s(&[(0.84, 1.55), (0.42, 1.62), (0.30, 1.2), (0.26, 0.0), (0.08, 0.38)]),
+            s(&[(0.08, 1.0), (0.62, 0.98)])],
+            advance: 0.78, entry_y: 0.5, exit_y: 0.0, connects: false },
+        'G' => Glyph { strokes: vec![s(&[
+            (0.88, 1.38), (0.56, 1.62), (0.24, 1.42), (0.14, 0.8), (0.34, 0.14),
+            (0.66, 0.08), (0.84, 0.36), (0.80, 0.62), (0.52, 0.60)])],
+            advance: 0.98, entry_y: 0.6, exit_y: 0.6, connects: true },
+        'H' => Glyph { strokes: vec![
+            s(&[(0.06, 0.06), (0.18, 1.5), (0.30, h), (0.22, 0.08), (0.26, 0.82),
+                (0.64, 0.92), (0.70, 1.5), (0.80, h), (0.68, 0.06), (0.86, 0.24)])],
+            advance: 1.0, entry_y: 0.06, exit_y: 0.24, connects: true },
+        'I' => Glyph { strokes: vec![s(&[
+            (0.52, h), (0.30, 1.52), (0.46, 1.0), (0.34, 0.2),
+            (0.5, 0.06), (0.18, 0.1), (0.46, 0.22)])],
+            advance: 0.6, entry_y: 0.4, exit_y: 0.22, connects: true },
+        'J' => Glyph { strokes: vec![s(&[
+            (0.66, h), (0.42, 1.52), (0.58, 1.0), (0.52, 0.0),
+            (0.36, DESCENDER), (0.14, -0.5), (0.0, -0.2)])],
+            advance: 0.62, entry_y: 0.5, exit_y: 0.1, connects: false },
+        'K' => Glyph { strokes: vec![
+            s(&[(0.08, 0.08), (0.2, 1.5), (0.32, h), (0.24, 0.06)]),
+            s(&[(0.76, 1.5), (0.30, 0.68), (0.5, 0.58), (0.70, 0.06), (0.88, 0.26)])],
+            advance: 0.92, entry_y: 0.08, exit_y: 0.26, connects: true },
+        'L' => Glyph { strokes: vec![s(&[
+            (0.56, 1.5), (0.26, 1.34), (0.38, 0.92), (0.22, 0.1), (0.14, 0.4),
+            (0.30, 0.16), (0.56, 0.06), (0.86, 0.16)])],
+            advance: 0.88, entry_y: 0.5, exit_y: 0.16, connects: true },
+        'M' => Glyph { strokes: vec![s(&[
+            (0.04, 0.06), (0.04, 0.9), (0.12, 1.55), (0.20, h), (0.20, 0.1),
+            (0.38, 1.3), (0.5, 1.34), (0.50, 0.12), (0.60, 1.3), (0.74, 1.5),
+            (0.82, h), (0.80, 0.06), (0.94, 0.22)])],
+            advance: 1.1, entry_y: 0.06, exit_y: 0.22, connects: true },
+        'N' => Glyph { strokes: vec![s(&[
+            (0.04, 0.06), (0.06, 1.5), (0.16, h), (0.18, 0.12), (0.62, 1.4),
+            (0.72, 1.5), (0.74, 0.1), (0.80, 1.4), (0.94, 1.4)])],
+            advance: 1.02, entry_y: 0.06, exit_y: 1.4, connects: false },
+        'O' => Glyph { strokes: vec![s(&[
+            (0.64, 1.56), (0.34, 1.52), (0.14, 1.04), (0.2, 0.34), (0.5, 0.05),
+            (0.82, 0.34), (0.88, 1.0), (0.64, 1.46), (0.42, 1.5), (0.56, 1.22)])],
+            advance: 1.0, entry_y: 0.5, exit_y: 1.2, connects: false },
+        'P' => Glyph { strokes: vec![s(&[
+            (0.08, 0.06), (0.18, 1.5), (0.28, h), (0.24, 0.08), (0.28, 1.3),
+            (0.66, 1.4), (0.76, 1.04), (0.4, 0.84), (0.2, 0.9)])],
+            advance: 0.88, entry_y: 0.06, exit_y: 0.9, connects: false },
+        'Q' => Glyph { strokes: vec![
+            s(&[(0.64, 1.56), (0.34, 1.52), (0.14, 1.04), (0.2, 0.34), (0.5, 0.05),
+                (0.82, 0.34), (0.86, 1.0), (0.6, 1.46), (0.4, 1.5)]),
+            s(&[(0.56, 0.42), (0.9, 0.0), (1.02, 0.22)])],
+            advance: 1.02, entry_y: 0.5, exit_y: 0.2, connects: true },
+        'R' => Glyph { strokes: vec![s(&[
+            (0.08, 0.06), (0.18, 1.5), (0.28, h), (0.24, 0.08), (0.28, 1.3),
+            (0.66, 1.4), (0.74, 1.06), (0.38, 0.86), (0.26, 0.86),
+            (0.56, 0.6), (0.80, 0.1), (0.96, 0.28)])],
+            advance: 0.96, entry_y: 0.06, exit_y: 0.28, connects: true },
+        'S' => Glyph { strokes: vec![s(&[
+            (0.76, 1.3), (0.58, 1.6), (0.3, 1.58), (0.22, 1.26), (0.5, 1.0),
+            (0.62, 0.58), (0.56, 0.18), (0.3, 0.04), (0.1, 0.2), (0.16, 0.44)])],
+            advance: 0.8, entry_y: 0.6, exit_y: 0.4, connects: true },
+        'T' => Glyph { strokes: vec![
+            s(&[(0.2, 1.46), (0.42, 1.6), (0.62, 1.52), (0.84, 1.6)]),
+            s(&[(0.52, 1.56), (0.42, 0.3), (0.3, 0.04), (0.12, 0.18)])],
+            advance: 0.86, entry_y: 0.6, exit_y: 0.2, connects: true },
+        'U' => Glyph { strokes: vec![s(&[
+            (0.06, 1.5), (0.1, 0.4), (0.3, 0.04), (0.5, 0.18), (0.56, 1.5),
+            (0.56, 0.12), (0.72, 0.0), (0.9, 0.2)])],
+            advance: 0.94, entry_y: 1.5, exit_y: 0.2, connects: true },
+        'V' => Glyph { strokes: vec![s(&[
+            (0.04, 1.44), (0.1, 1.56), (0.44, 0.06), (0.74, 1.5),
+            (0.8, 1.56), (0.78, 1.3)])],
+            advance: 0.86, entry_y: 1.44, exit_y: 1.3, connects: false },
+        'W' => Glyph { strokes: vec![s(&[
+            (0.04, 1.5), (0.2, 0.06), (0.36, 1.26), (0.52, 0.06),
+            (0.68, 1.26), (0.84, 0.06), (0.98, 1.5)])],
+            advance: 1.08, entry_y: 1.5, exit_y: 1.5, connects: false },
+        'X' => Glyph { strokes: vec![
+            s(&[(0.08, 1.46), (0.18, 1.56), (0.84, 0.06)]),
+            s(&[(0.82, 1.5), (0.14, 0.06), (0.02, 0.2)])],
+            advance: 0.92, entry_y: 1.46, exit_y: 0.1, connects: false },
+        'Y' => Glyph { strokes: vec![s(&[
+            (0.08, 1.48), (0.12, 1.56), (0.46, 0.72), (0.52, 1.5), (0.5, 0.0),
+            (0.36, DESCENDER), (0.14, -0.5), (0.02, -0.18)])],
+            advance: 0.86, entry_y: 1.48, exit_y: 0.1, connects: false },
+        'Z' => Glyph { strokes: vec![s(&[
+            (0.1, 1.38), (0.3, 1.6), (0.6, 1.5), (0.2, 0.1), (0.52, 0.16),
+            (0.48, DESCENDER), (0.3, -0.42), (0.14, -0.3)])],
+            advance: 0.78, entry_y: 0.6, exit_y: 0.1, connects: false },
+        _ => return None,
+    };
+    Some(g)
+}
+
+fn glyph_any(c: char, cursive_caps: bool) -> Option<Glyph> {
+    lower(c)
+        .or_else(|| if cursive_caps { upper_cursive(c) } else { None })
+        .or_else(|| upper(c))
+        .or_else(|| digit(c))
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +659,7 @@ struct Params {
     vary: f32,    // per-letter size/shape variation (0..1)
     inkflow: f32, // along-stroke pressure modulation (0..1)
     natural: f32, // per-word baseline / start drift (0..1)
+    caps_cursive: bool, // use flowing cursive capitals
     seed: u64,
 }
 
@@ -563,7 +686,7 @@ fn build_strokes(text: &str, p: &Params) -> (Vec<RibbonStroke>, f32, f32) {
         for (wi, word) in words.iter().enumerate() {
             let mut w_adv = 0.0;
             for ch in word.chars() {
-                if let Some(g) = glyph_any(ch) {
+                if let Some(g) = glyph_any(ch, p.caps_cursive) {
                     w_adv += g.advance + p.spacing;
                 }
             }
@@ -578,7 +701,7 @@ fn build_strokes(text: &str, p: &Params) -> (Vec<RibbonStroke>, f32, f32) {
             let mut prev_connects = false;
 
             for ch in word.chars() {
-                let g = match glyph_any(ch) {
+                let g = match glyph_any(ch, p.caps_cursive) {
                     Some(g) => g,
                     None => continue,
                 };
@@ -821,6 +944,7 @@ pub extern "C" fn generate(
     vary: f32,
     inkflow: f32,
     natural: f32,
+    caps_cursive: f32,
     seed_lo: u32,
     seed_hi: u32,
 ) -> usize {
@@ -843,6 +967,7 @@ pub extern "C" fn generate(
         vary,
         inkflow,
         natural,
+        caps_cursive: caps_cursive > 0.5,
         seed: ((seed_hi as u64) << 32) | seed_lo as u64,
     };
     let bytes = render_svg(&text, &p).into_bytes().into_boxed_slice();
@@ -873,7 +998,7 @@ mod tests {
             width: 800.0, height: 300.0, font_px: 60.0, slant_deg: 8.0,
             variation: 0.5, weight: 3.5, contrast: 0.6, spacing: 0.04,
             line_spacing: 1.0, align: 0.0, tilt: 0.0, vary: 0.0,
-            inkflow: 0.0, natural: 0.0, seed: 42,
+            inkflow: 0.0, natural: 0.0, caps_cursive: false, seed: 42,
         }
     }
     #[test]
