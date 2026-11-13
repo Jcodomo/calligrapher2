@@ -25,18 +25,24 @@ The WASM/JS boundary is a tiny C ABI: `alloc`, `dealloc`, `generate`,
 
 ## Features
 
-- Live preview with multi-line text and word-wrap to the canvas width.
-- Controls: size, slant, variation, weight, nib contrast, letter spacing, line
-  height, seed, and **left / centre / right alignment**.
-- Style presets: Casual, Formal, Scrawl, Marker.
-- "New hand" reseeds for a fresh variation of the same text.
-- Ink & paper **swatches plus custom colour pickers**; blank / ruled / grid
-  paper guides; dark/light-aware UI.
-- **Write-on animation** (left-to-right reveal, baked into the exported SVG).
-- Export **SVG** (vector) and **PNG** (2×, optional transparent background), or
-  copy SVG markup.
-- **Shareable links** — the full composition is encoded in the URL, so a link
-  reproduces the exact piece.
+- **Modes:** Writing (multi-line, word-wrapped) and Signature (single line with
+  a flourish swash).
+- **Original-style controls:** Style (Random / Casual / Formal / Neat / Scrawl /
+  Marker / Signature), Speed, Legibility, Thickness.
+- **Realism toggles:** Vary each letter, Natural movement, Inkflow (pen
+  pressure), Tilt each letter.
+- **Sign / write on a document:** upload a **PDF** (rendered with pdf.js) or an
+  image, drag the writing to position it, pick the page, and export.
+- **Scan & finish:** scanned look (rotation-free vignette + page blemishes),
+  blemish amount, blur, sharpness (unsharp mask), and export resolution (1–4×).
+- **Page look:** ink & paper swatches + custom colour pickers; procedural paper
+  textures (fiber / grain / cold-press / canvas / crumple) with intensity;
+  blank / ruled / grid guides.
+- **Write-on animation** with adjustable speed, baked into exported SVG.
+- **Export** PNG, **PDF** (jsPDF), and SVG; **shareable links** encode the whole
+  composition in the URL.
+- Advanced: size, slant, nib contrast, spacing, line height, alignment, seed,
+  transparent PNG background.
 
 ## Build
 

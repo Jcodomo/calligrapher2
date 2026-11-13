@@ -532,7 +532,11 @@ struct Params {
     contrast: f32,
     spacing: f32,
     line_spacing: f32,
-    align: f32, // 0 = left, 0.5 = centre, 1.0 = right
+    align: f32,   // 0 = left, 0.5 = centre, 1.0 = right
+    tilt: f32,    // per-letter random rotation amount (0..1)
+    vary: f32,    // per-letter size/shape variation (0..1)
+    inkflow: f32, // along-stroke pressure modulation (0..1)
+    natural: f32, // per-word baseline / start drift (0..1)
     seed: u64,
 }
 
@@ -579,8 +583,12 @@ fn build_strokes(text: &str, p: &Params) -> (Vec<RibbonStroke>, f32, f32) {
                     None => continue,
                 };
                 let gx = pen_x;
-                let size_jitter = 1.0 + p.variation * 0.05 * value_noise(p.seed ^ 0x51, gx * 3.1);
-                let base_jitter = p.variation * 0.045 * value_noise(p.seed ^ 0x99, gx * 2.3);
+                let vn = value_noise(p.seed ^ 0x51, gx * 3.1);
+                let size_jitter = 1.0 + (p.variation * 0.05 + p.vary * 0.10) * vn;
+                let base_off = p.variation * 0.045 * value_noise(p.seed ^ 0x99, gx * 2.3)
+                    + p.natural * 0.12 * value_noise(p.seed ^ 0xA1, gx * 0.6);
+                let tilt_ang = (p.tilt * 0.22 + p.vary * 0.05) * value_noise(p.seed ^ 0x77, gx * 4.7);
+                let shape_jit = p.variation + p.vary * 0.6;
 
                 if let (Some((px, py)), true) = (prev_exit, prev_connects && g.connects) {
                     let ex = gx;
@@ -593,16 +601,18 @@ fn build_strokes(text: &str, p: &Params) -> (Vec<RibbonStroke>, f32, f32) {
                         Pt::new(px + (ex - px) * 0.65, dip + 0.05),
                         Pt::new(ex, ey),
                     ];
+                    let cxf = Xf { size: 1.0, base_off, rot: 0.0, pivot: 0.0 };
                     out.push(RibbonStroke {
-                        pts: finalize(&catmull_rom(&conn, 8), gx, pen_y, 1.0, base_jitter, p),
+                        pts: finalize(&catmull_rom(&conn, 8), gx, pen_y, &cxf, p.variation, p),
                         line: cur_line,
                     });
                 }
 
+                let xf = Xf { size: size_jitter, base_off, rot: tilt_ang, pivot: g.advance * 0.5 };
                 for st in &g.strokes {
                     let dense = catmull_rom(&st.pts, 12);
                     out.push(RibbonStroke {
-                        pts: finalize(&dense, gx, pen_y, size_jitter, base_jitter, p),
+                        pts: finalize(&dense, gx, pen_y, &xf, shape_jit, p),
                         line: cur_line,
                     });
                 }
@@ -655,19 +665,31 @@ fn build_strokes(text: &str, p: &Params) -> (Vec<RibbonStroke>, f32, f32) {
     (out, max_x.max(pen_x) + margin, total_h.max(ASCENDER + 1.0))
 }
 
+/// Per-letter placement transform.
+struct Xf {
+    size: f32,
+    base_off: f32,
+    rot: f32,    // radians, rotation about the glyph's own centre
+    pivot: f32,  // glyph-space x of the rotation pivot
+}
+
 /// Transform a glyph-space polyline into page em-space.
-fn finalize(pts: &[Pt], ox: f32, baseline: f32, size: f32, base_off: f32, p: &Params) -> Vec<Pt> {
+fn finalize(pts: &[Pt], ox: f32, baseline: f32, xf: &Xf, jitter: f32, p: &Params) -> Vec<Pt> {
     let slant = (p.slant_deg * PI / 180.0).tan();
+    let (sr, cr) = xf.rot.sin_cos();
     let mut out = Vec::with_capacity(pts.len());
     for (i, q) in pts.iter().enumerate() {
-        let mut x = q.x * size;
-        let mut y = q.y * size;
+        // per-letter rotation about (pivot, x-height/2)
+        let rx = q.x - xf.pivot;
+        let ry = q.y - 0.45;
+        let mut x = (rx * cr - ry * sr + xf.pivot) * xf.size;
+        let mut y = (rx * sr + ry * cr + 0.45) * xf.size;
         let t = i as f32 * 0.35 + ox * 5.0;
-        x += p.variation * 0.018 * value_noise(p.seed ^ 0x1234, t);
-        y += p.variation * 0.018 * value_noise(p.seed ^ 0x5678, t + 10.0);
+        x += jitter * 0.018 * value_noise(p.seed ^ 0x1234, t);
+        y += jitter * 0.018 * value_noise(p.seed ^ 0x5678, t + 10.0);
         x += y * slant;
         let px = ox + x;
-        let py = baseline - (y + base_off);
+        let py = baseline - (y + xf.base_off);
         out.push(Pt::new(px, py));
     }
     out
@@ -693,8 +715,16 @@ fn stroke_to_path(rs: &RibbonStroke, p: &Params) -> String {
     let mut widths = Vec::with_capacity(n);
     for i in 0..n {
         let fast = (sp[i] / smax).clamp(0.0, 1.0);
-        let w = p.weight * (1.0 - p.contrast * 0.6 * fast);
-        widths.push(w.max(p.weight * 0.3));
+        let mut w = p.weight * (1.0 - p.contrast * 0.6 * fast);
+        if p.inkflow > 0.0 {
+            // slowly varying pen pressure along the stroke
+            let press = 1.0 + p.inkflow * 0.40 * value_noise(p.seed ^ 0xBEEF, i as f32 * 0.25);
+            // taper the very start and end, like a pen lifting on/off the page
+            let edge = (i.min(n - 1 - i) as f32 / (n as f32 * 0.14).max(1.0)).clamp(0.0, 1.0);
+            let taper = 1.0 - p.inkflow * 0.70 * (1.0 - edge);
+            w *= press * taper;
+        }
+        widths.push(w.max(p.weight * 0.22));
     }
     let mut left = Vec::with_capacity(n);
     let mut right = Vec::with_capacity(n);
@@ -787,6 +817,10 @@ pub extern "C" fn generate(
     spacing: f32,
     line_spacing: f32,
     align: f32,
+    tilt: f32,
+    vary: f32,
+    inkflow: f32,
+    natural: f32,
     seed_lo: u32,
     seed_hi: u32,
 ) -> usize {
@@ -805,6 +839,10 @@ pub extern "C" fn generate(
         spacing,
         line_spacing,
         align,
+        tilt,
+        vary,
+        inkflow,
+        natural,
         seed: ((seed_hi as u64) << 32) | seed_lo as u64,
     };
     let bytes = render_svg(&text, &p).into_bytes().into_boxed_slice();
@@ -834,7 +872,8 @@ mod tests {
         Params {
             width: 800.0, height: 300.0, font_px: 60.0, slant_deg: 8.0,
             variation: 0.5, weight: 3.5, contrast: 0.6, spacing: 0.04,
-            line_spacing: 1.0, align: 0.0, seed: 42,
+            line_spacing: 1.0, align: 0.0, tilt: 0.0, vary: 0.0,
+            inkflow: 0.0, natural: 0.0, seed: 42,
         }
     }
     #[test]
