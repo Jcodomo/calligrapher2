@@ -450,25 +450,36 @@ function loadSigFile(f) {
 
 function processSignature() {
   if (!sigImg) return;
-  const maxD = 700;
+  const maxD = 880;
   let w = sigImg.naturalWidth, h = sigImg.naturalHeight;
   const sc = Math.min(1, maxD / Math.max(w, h)); w = Math.max(1, Math.round(w * sc)); h = Math.max(1, Math.round(h * sc));
   const c = document.createElement("canvas"); c.width = w; c.height = h;
   const cx = c.getContext("2d"); cx.drawImage(sigImg, 0, 0, w, h);
   const d = cx.getImageData(0, 0, w, h).data;
-  const thr = +$("sig_threshold").value;
-  const mask = new Uint8Array(w * h);
+  const lum = new Float32Array(w * h), alpha = new Uint8Array(w * h);
+  for (let i = 0, p = 0; i < w * h; i++, p += 4) { lum[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2]; alpha[i] = d[p + 3]; }
+  // Adaptive (Bradley) threshold via an integral image — robust to shadows / uneven paper.
+  const integ = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) { let rs = 0; for (let x = 0; x < w; x++) { rs += lum[y * w + x]; integ[(y + 1) * (w + 1) + (x + 1)] = integ[y * (w + 1) + (x + 1)] + rs; } }
+  const rad = Math.max(6, Math.round(Math.min(w, h) * 0.08));
+  const localMean = (x, y) => {
+    const x0 = Math.max(0, x - rad), y0 = Math.max(0, y - rad), x1 = Math.min(w - 1, x + rad), y1 = Math.min(h - 1, y + rad);
+    const A = integ[y0 * (w + 1) + x0], B = integ[y0 * (w + 1) + (x1 + 1)], C = integ[(y1 + 1) * (w + 1) + x0], D = integ[(y1 + 1) * (w + 1) + (x1 + 1)];
+    return (D - B - C + A) / ((x1 - x0 + 1) * (y1 - y0 + 1));
+  };
+  const margin = (1 - (+$("sig_threshold").value) / 255) * 44 + 4;
+  let mask = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; if (alpha[i] > 10 && lum[i] < 205 && localMean(x, y) - lum[i] > margin) mask[i] = 1; }
+  mask = despeckle(mask, w, h);
   let area = 0, sumX = 0, sumY = 0, sumXY = 0, sumYY = 0, minx = w, miny = h, maxx = 0, maxy = 0;
-  for (let i = 0, p = 0; i < mask.length; i++, p += 4) {
-    const a = d[p + 3], lum = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
-    if (a > 10 && lum < thr) {
-      mask[i] = 1; const x = i % w, y = (i / w) | 0;
-      area++; sumX += x; sumY += y; sumXY += x * y; sumYY += y * y;
-      if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
-    }
-  }
-  if (area < 24) { sigSVG = ""; errEl.textContent = "No dark ink found — adjust the threshold slider."; return; }
-  let loops = marchingSquares(mask, w, h).map((L) => simplifyLoop(L, 1.1)).filter((L) => L.length > 3);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[y * w + x]) { area++; sumX += x; sumY += y; sumXY += x * y; sumYY += y * y; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; }
+  if (area < 24) { sigSVG = ""; errEl.textContent = "No clear ink found — adjust the threshold or use a cleaner image."; return; }
+  const minArea = Math.max(8, w * h * 0.00004);
+  let loops = marchingSquares(mask, w, h).map((L) => {
+    if (L.length > 1 && L[0][0] === L[L.length - 1][0] && L[0][1] === L[L.length - 1][1]) L = L.slice(0, -1);
+    return simplifyLoop(chaikin(chaikin(L)), 1.0);
+  }).filter((L) => L.length > 3 && polyArea(L) > minArea);
+  if (!loops.length) { sigSVG = ""; errEl.textContent = "Could not trace clean strokes — try a higher-contrast image."; return; }
   // slant estimate: regression x = a*y + b over ink pixels
   const n = area, meanX = sumX / n, meanY = sumY / n;
   const a = (sumXY - n * meanX * meanY) / ((sumYY - n * meanY * meanY) || 1);
@@ -533,6 +544,37 @@ function marchingSquares(mask, w, h) {
     if (loop.length > 3) loops.push(loop);
   }
   return loops;
+}
+// Remove isolated speckle pixels and fill pinhole gaps (3x3 neighbourhood).
+function despeckle(mask, w, h) {
+  const out = mask.slice();
+  const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : mask[y * w + x]);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let n = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (dx || dy) n += at(x + dx, y + dy);
+    const i = y * w + x;
+    if (mask[i] && n < 2) out[i] = 0;
+    else if (!mask[i] && n >= 7) out[i] = 1;
+  }
+  return out;
+}
+// Chaikin corner-cutting on a closed ring — rounds the pixel stair-steps.
+function chaikin(pts) {
+  const n = pts.length;
+  if (n < 4) return pts;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    out.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25]);
+    out.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+  }
+  return out;
+}
+// Absolute polygon area (shoelace) — used to drop tiny speckle contours.
+function polyArea(pts) {
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; s += a[0] * b[1] - b[0] * a[1]; }
+  return Math.abs(s) / 2;
 }
 // Simplify a closed loop by splitting at the point farthest from its start,
 // so RDP has two distinct anchors (RDP alone collapses a closed ring).
