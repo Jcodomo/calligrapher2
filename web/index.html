@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Calligrapher 2.0</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --text:#e8eaf0; --muted:#9aa3b2; --accent:#7c5cff; --accent2:#00c2a8;
+    --ink:#1b1b1f; --paper:#fbfaf6;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#eef0f4; --panel:#ffffff; --panel2:#f4f5f8; --line:#dfe3ea;
+           --text:#1a1d24; --muted:#5b6475; }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--text);
+    font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+  .app{display:grid;grid-template-columns:340px 1fr;height:100vh}
+  @media (max-width:820px){ .app{grid-template-columns:1fr;height:auto} }
+
+  .panel{background:var(--panel);border-right:1px solid var(--line);
+    padding:18px;overflow-y:auto}
+  h1{font-size:18px;margin:0 0 2px}
+  h1 b{color:var(--accent)}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:16px}
+  textarea{width:100%;min-height:84px;resize:vertical;background:var(--panel2);
+    color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;
+    font-size:14px}
+  .group{margin-top:16px}
+  .group h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 8px}
+  .row{display:flex;align-items:center;gap:10px;margin:8px 0}
+  .row label{flex:0 0 96px;color:var(--muted);font-size:12px}
+  .row input[type=range]{flex:1;accent-color:var(--accent)}
+  .row .val{flex:0 0 44px;text-align:right;font-variant-numeric:tabular-nums;color:var(--text)}
+  .swatches{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .sw{width:26px;height:26px;border-radius:50%;border:2px solid transparent;cursor:pointer}
+  .sw.sel{border-color:var(--text)}
+  input[type=color]{width:30px;height:30px;padding:0;border:1px solid var(--line);
+    border-radius:8px;background:none;cursor:pointer}
+  .seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .seg button{flex:1;background:var(--panel2);color:var(--muted);border:0;padding:8px;
+    cursor:pointer;font-size:13px}
+  .seg button.sel{background:var(--accent);color:#fff}
+  .presets{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .presets button,.btn{background:var(--panel2);color:var(--text);
+    border:1px solid var(--line);border-radius:10px;padding:9px 10px;cursor:pointer;font-size:13px}
+  .presets button:hover,.btn:hover{border-color:var(--accent)}
+  .btn.ghost{background:transparent}
+  .actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+  .actions .full{grid-column:1 / -1}
+  select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    border-radius:10px;padding:8px}
+  .toggle{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;margin-top:8px}
+  .stage{position:relative;display:flex;align-items:center;justify-content:center;
+    padding:24px;overflow:auto}
+  .sheet{background:var(--paper);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.35);
+    color:var(--ink);max-width:100%;background-repeat:repeat;background-position:0 0}
+  .sheet.ruled{background-image:linear-gradient(to bottom,transparent 0,transparent calc(100% - 1px),#9ab7d422 100%);background-size:100% 2.3em}
+  .sheet.grid{background-image:
+      linear-gradient(to bottom,transparent 0,transparent calc(100% - 1px),#9ab7d422 100%),
+      linear-gradient(to right,transparent 0,transparent calc(100% - 1px),#9ab7d418 100%);
+    background-size:100% 2.3em,2.3em 100%}
+  .credit{position:absolute;bottom:10px;right:16px;color:var(--muted);font-size:11px}
+  .seedline{display:flex;gap:8px;align-items:center}
+  .seedline input{flex:1;background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    border-radius:8px;padding:7px}
+  .err{color:#ff6b6b;font-size:12px;margin-top:8px;white-space:pre-wrap;min-height:1em}
+  .ok{color:var(--accent2)}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="panel">
+    <h1>Calligrapher <b>2.0</b></h1>
+    <div class="sub">Original Rust + WebAssembly handwriting engine.</div>
+
+    <textarea id="text" spellcheck="false">The quick brown fox
+jumps over the lazy dog</textarea>
+
+    <div class="group">
+      <h2>Style</h2>
+      <div class="presets" id="presets"></div>
+    </div>
+
+    <div class="group">
+      <h2>Align</h2>
+      <div class="seg" id="align">
+        <button data-a="0" class="sel">Left</button>
+        <button data-a="0.5">Center</button>
+        <button data-a="1">Right</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h2>Hand</h2>
+      <div class="row"><label>Size</label><input id="font_px" type="range" min="28" max="140" value="64"><span class="val" id="font_px_v"></span></div>
+      <div class="row"><label>Slant</label><input id="slant" type="range" min="-10" max="30" value="9"><span class="val" id="slant_v"></span></div>
+      <div class="row"><label>Variation</label><input id="variation" type="range" min="0" max="100" value="55"><span class="val" id="variation_v"></span></div>
+      <div class="row"><label>Weight</label><input id="weight" type="range" min="10" max="90" value="36"><span class="val" id="weight_v"></span></div>
+      <div class="row"><label>Nib</label><input id="contrast" type="range" min="0" max="100" value="60"><span class="val" id="contrast_v"></span></div>
+      <div class="row"><label>Spacing</label><input id="spacing" type="range" min="-10" max="40" value="4"><span class="val" id="spacing_v"></span></div>
+      <div class="row"><label>Line</label><input id="line_spacing" type="range" min="70" max="200" value="105"><span class="val" id="line_spacing_v"></span></div>
+    </div>
+
+    <div class="group">
+      <h2>Ink</h2>
+      <div class="swatches" id="ink"></div>
+    </div>
+    <div class="group">
+      <h2>Paper</h2>
+      <div class="swatches" id="paper"></div>
+      <div class="row" style="margin-top:10px"><label>Guide</label>
+        <select id="paper_style"><option value="blank">Blank</option><option value="ruled">Ruled</option><option value="grid">Grid</option></select></div>
+      <label class="toggle"><input type="checkbox" id="animate"> animate write-on</label>
+      <label class="toggle"><input type="checkbox" id="transparent"> transparent PNG background</label>
+    </div>
+
+    <div class="group">
+      <h2>Seed</h2>
+      <div class="seedline">
+        <input id="seed" type="number" value="1337" />
+        <button class="btn" id="reroll">New hand</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h2>Export &amp; share</h2>
+      <div class="actions">
+        <button class="btn" id="svg">Download SVG</button>
+        <button class="btn" id="png">Download PNG</button>
+        <button class="btn" id="copysvg">Copy SVG</button>
+        <button class="btn" id="share">Copy link</button>
+      </div>
+      <div class="err" id="err"></div>
+    </div>
+  </aside>
+
+  <main class="stage">
+    <div class="sheet" id="sheet"></div>
+    <div class="credit">Calligrapher 2.0 · yours to deploy</div>
+  </main>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
