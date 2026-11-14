@@ -122,7 +122,7 @@ function buildNeuralSVG(lines, p) {
   const H = Math.ceil(margin * 2 + lineGap * Math.max(0, lines.length - 1) + p.font_px * 2.4);
   let body = "";
   lines.forEach((L, li) => {
-    const baseY = margin + p.font_px * 1.5 + li * lineGap;
+    const topY = margin + p.font_px * 0.5 + li * lineGap; // top of this line's band
     const shiftX = margin + (maxW - L.width * S) * (p.align || 0);
     L.strokes.forEach((stroke, si) => {
       if (stroke.length < 2) return;
@@ -131,11 +131,13 @@ function buildNeuralSVG(lines, p) {
       const ca = Math.cos(ang), sa = Math.sin(ang);
       const pts = [];
       for (let k = 0; k < stroke.length; k++) {
-        let ex = stroke[k].x, ey = stroke[k].y; // em
+        let ex = stroke[k].x, ey = stroke[k].y; // em (y up: ascenders larger)
         if (vary) { ex += 0.012 * vary * vnoise(p.seed ^ 0x1234, (li * 50 + si) * 3 + k * 0.4); ey += 0.012 * vary * vnoise(p.seed ^ 0x5678, (li * 50 + si) * 3 + k * 0.4 + 10); }
         if (tilt) { const rx = ex - cx, ry = ey - cy; ex = cx + rx * ca - ry * sa; ey = cy + rx * sa + ry * ca; }
         const px = ex * S, py = ey * S;
-        let y = baseY - py;
+        // offsetsToStrokes gives py=0 at the ascender top and py=max at the descender;
+        // SVG y grows downward, so place ascenders near the band top.
+        let y = topY + py;
         if (natural) y += natural * 0.10 * p.font_px * vnoise(p.seed ^ 0xA1, (shiftX + px) * 0.012 + li * 3);
         pts.push({ x: shiftX + px + py * slant, y });
       }
@@ -146,23 +148,26 @@ function buildNeuralSVG(lines, p) {
     `fill="currentColor" stroke="none"><g>${body}</g></svg>`;
 }
 
-let neuralPending = null;
+const neuralInflight = new Set();
+let neuralLatestKey = null;
 function neuralSVG(text, p) {
   const bias = neuralBias(), seed = p.seed;
   const key = text + "|" + bias.toFixed(3) + "|" + seed;
+  neuralLatestKey = key; // the most recently requested render always wins
   const cached = neuralCache.get(key);
   if (cached) return buildNeuralSVG(cached, p);
-  if (neuralPending !== key) {
-    neuralPending = key;
+  if (!neuralInflight.has(key)) {
+    neuralInflight.add(key);
     (async () => {
       try {
         nStatus().textContent = "Writing…";
         const lineTexts = (mode === "signature") ? [text] : text.split("\n");
         const lines = await sampleLines(lineTexts, bias, seed);
         neuralCache.set(key, lines);
-        nStatus().textContent = "";
-        if (neuralPending === key) { neuralPending = null; render(false); }
-      } catch (e) { neuralPending = null; nStatus().textContent = "Neural model unavailable: " + (e.message || e); }
+        neuralInflight.delete(key);
+        if (neuralLatestKey === key) { nStatus().textContent = ""; render(false); }
+        else if (neuralInflight.size === 0) nStatus().textContent = "";
+      } catch (e) { neuralInflight.delete(key); nStatus().textContent = "Neural model unavailable: " + (e.message || e); }
     })();
   }
   const W = Math.max(480, p.width || 800);
