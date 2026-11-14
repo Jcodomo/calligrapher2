@@ -55,7 +55,7 @@ function render(strokesInfo) {
     if (pts.length < 2) continue;
     d += 'M' + pts.map(p => `${(p.x*S+pad).toFixed(1)},${(baseY - p.y*S).toFixed(1)}`).join(' L') + ' ';
   }
-  svg.innerHTML = `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
+  svg.innerHTML = `<path d="${d}" fill="none" stroke="#111" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
 }
 
 document.getElementById('go').addEventListener('click', async () => {

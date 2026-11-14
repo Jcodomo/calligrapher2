@@ -217,7 +217,7 @@ export class NeuralHand {
         let phi = 0;
         for (let k = 0; k < K_ATTN; k++) {
           const d = kappa[k] - u;
-          phi += alpha[k] * Math.exp(-beta[k] * d * d);
+          phi += alpha[k] * Math.exp(-(d * d) / beta[k]); // upstream: exp(-(kappa-u)^2 / beta)
         }
         if (phi > phiMax) { phiMax = phi; phiArgmax = u; }
         newW[cs[u]] += phi; // attention_values are one-hot(cs[u])
