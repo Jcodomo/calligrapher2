@@ -1,0 +1,109 @@
+{
+"vars": {
+"Variable": {
+"shape": [],
+"offset": 0,
+"count": 1
+},
+"Variable_1": {
+"shape": [],
+"offset": 4,
+"count": 1
+},
+"Variable_2": {
+"shape": [],
+"offset": 8,
+"count": 1
+},
+"rnn/LSTMAttentionCell/attention/biases": {
+"shape": [
+30
+],
+"offset": 12,
+"count": 30
+},
+"rnn/LSTMAttentionCell/attention/weights": {
+"shape": [
+476,
+30
+],
+"offset": 132,
+"count": 14280
+},
+"rnn/LSTMAttentionCell/lstm_cell/bias": {
+"shape": [
+1600
+],
+"offset": 57252,
+"count": 1600
+},
+"rnn/LSTMAttentionCell/lstm_cell/kernel": {
+"shape": [
+476,
+1600
+],
+"offset": 63652,
+"count": 761600
+},
+"rnn/LSTMAttentionCell/lstm_cell_1/bias": {
+"shape": [
+1600
+],
+"offset": 3110052,
+"count": 1600
+},
+"rnn/LSTMAttentionCell/lstm_cell_1/kernel": {
+"shape": [
+876,
+1600
+],
+"offset": 3116452,
+"count": 1401600
+},
+"rnn/LSTMAttentionCell/lstm_cell_2/bias": {
+"shape": [
+1600
+],
+"offset": 8722852,
+"count": 1600
+},
+"rnn/LSTMAttentionCell/lstm_cell_2/kernel": {
+"shape": [
+876,
+1600
+],
+"offset": 8729252,
+"count": 1401600
+},
+"rnn/gmm/biases": {
+"shape": [
+121
+],
+"offset": 14335652,
+"count": 121
+},
+"rnn/gmm/weights": {
+"shape": [
+400,
+121
+],
+"offset": 14336136,
+"count": 48400
+}
+},
+"order": [
+"Variable",
+"Variable_1",
+"Variable_2",
+"rnn/LSTMAttentionCell/attention/biases",
+"rnn/LSTMAttentionCell/attention/weights",
+"rnn/LSTMAttentionCell/lstm_cell/bias",
+"rnn/LSTMAttentionCell/lstm_cell/kernel",
+"rnn/LSTMAttentionCell/lstm_cell_1/bias",
+"rnn/LSTMAttentionCell/lstm_cell_1/kernel",
+"rnn/LSTMAttentionCell/lstm_cell_2/bias",
+"rnn/LSTMAttentionCell/lstm_cell_2/kernel",
+"rnn/gmm/biases",
+"rnn/gmm/weights"
+]
+}

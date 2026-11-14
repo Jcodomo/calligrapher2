@@ -15,19 +15,19 @@ output), matching `sjvasquez/handwriting-synthesis` / calligrapher.ai.
 Neural output is emitted as the same SVG shape the procedural engine uses, so ink,
 paper, texture, animation and export apply on top unchanged.
 
-## Model files (not in git)
+## Model files
 The engine loads `web/model/weights.bin` (~15 MB) + `web/model/weights.json`.
-These are **gitignored** — the weights come from a model trained on the IAM
-On-Line Handwriting Database (academic / non-commercial), so they must not be
-committed to a public repo or shipped on the public deploy. Get them from the
-private backup, or regenerate with `extract_weights.py` from the upstream
+The weights derive from the Graves handwriting-synthesis model
+(`sjvasquez/handwriting-synthesis`) trained on the IAM On-Line Handwriting
+Database. They are published here **with the owner's permission** for this
+project. You can also regenerate them with `extract_weights.py` from the upstream
 `checkpoints/model-17900`.
 
-## Licensing / deployment
-The public `main` branch and the live site (jcodomo.github.io/calligrapher2) stay
-the **original procedural** engine. This neural branch is a **private** build:
-GirkovArpa's upstream is unlicensed, and the model is IAM-trained, so do not make
-this branch or its weights public or commercial without clearing those terms.
+## Attribution
+Model architecture & weights: Alex Graves' handwriting synthesis, via
+`sjvasquez/handwriting-synthesis` (calligrapher.ai). Original desktop app this
+work recovered from: `GirkovArpa/calligrapher-ai`. Trained on the IAM On-Line
+Handwriting Database.
 
 ## Run locally
     node server.js   # http://localhost:8787
