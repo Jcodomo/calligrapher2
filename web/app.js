@@ -35,6 +35,88 @@ function engineSVG(text, p) {
   return svg;
 }
 
+// ---- neural engine (Graves RNN, upstream pretrained weights) --------------
+// Both tiers use this. The geometry (per-line strokes) is cached by text+bias+seed;
+// styling (size, slant, thickness, ink, paper, animation, export) is applied cheaply
+// on top and reuses the same SVG shape the procedural engine emits.
+let NEURAL = null, neuralHand = null, neuralReady = null;
+const neuralCache = new Map();
+const nStatus = () => $("neural_status");
+
+async function ensureNeural() {
+  if (neuralHand) return neuralHand;
+  if (!neuralReady) {
+    neuralReady = (async () => {
+      nStatus().textContent = "Loading neural model (~15 MB, once)…";
+      NEURAL = await import("./neural.js");
+      neuralHand = await NEURAL.NeuralHand.load("./model/");
+      nStatus().textContent = "";
+      return neuralHand;
+    })().catch((e) => { neuralReady = null; nStatus().textContent = "Neural model unavailable: " + (e.message || e); throw e; });
+  }
+  return neuralReady;
+}
+
+function neuralBias() { return 0.2 + (+$("legibility").value / 100) * 1.25; } // legibility -> sampling bias
+
+function buildNeuralSVG(lines, p) {
+  const S = p.font_px * 0.62;
+  const slant = Math.tan((p.slant_deg || 0) * Math.PI / 180);
+  const lineGap = p.font_px * 1.9 * (p.line_spacing || 1.08);
+  const margin = p.font_px * 0.5;
+  const sw = Math.max(1, p.weight * (p.font_px / 64) * 1.35);
+  let maxW = 0;
+  for (const L of lines) maxW = Math.max(maxW, L.width * S);
+  const W = Math.ceil(maxW + margin * 2);
+  const H = Math.ceil(margin * 2 + lineGap * Math.max(0, lines.length - 1) + p.font_px * 2.2);
+  let body = "";
+  lines.forEach((L, i) => {
+    const baseY = margin + p.font_px * 1.5 + i * lineGap;
+    const shiftX = margin + (maxW - L.width * S) * (p.align || 0);
+    for (const stroke of L.strokes) {
+      if (stroke.length < 2) continue;
+      let d = "";
+      for (let k = 0; k < stroke.length; k++) {
+        const px = stroke[k].x * S, py = stroke[k].y * S;
+        d += (k ? "L" : "M") + (shiftX + px + py * slant).toFixed(1) + "," + (baseY - py).toFixed(1) + " ";
+      }
+      body += `<path d="${d.trim()}"/>`;
+    }
+  });
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" ` +
+    `fill="none" stroke="currentColor" stroke-width="${sw.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"><g>${body}</g></svg>`;
+}
+
+let neuralPending = null;
+function neuralSVG(text, p) {
+  const bias = neuralBias(), seed = p.seed;
+  const key = text + "|" + bias.toFixed(3) + "|" + seed;
+  const cached = neuralCache.get(key);
+  if (cached) return buildNeuralSVG(cached, p);
+  if (neuralPending !== key) {
+    neuralPending = key;
+    (async () => {
+      try {
+        const hand = await ensureNeural();
+        nStatus().textContent = "Writing…";
+        const lineTexts = (mode === "signature") ? [text] : text.split("\n");
+        const lines = [];
+        for (const lt of lineTexts) {
+          await new Promise((r) => setTimeout(r, 12)); // let "Writing…" paint
+          if (lt.trim() === "") { lines.push({ strokes: [], width: 0, height: 0 }); continue; }
+          lines.push(NEURAL.offsetsToStrokes(hand.sample(lt, { bias, seed })));
+        }
+        neuralCache.set(key, lines);
+        nStatus().textContent = "";
+        if (neuralPending === key) { neuralPending = null; render(false); }
+      } catch (_) { neuralPending = null; }
+    })();
+  }
+  const W = Math.max(480, p.width || 800);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="140" viewBox="0 0 ${W} 140" fill="none" stroke="currentColor">` +
+    `<g><text x="24" y="78" fill="currentColor" stroke="none" font-family="system-ui" font-size="16" opacity="0.55">✍ writing…</text></g></svg>`;
+}
+
 const INKS = ["#1b1b1f", "#1d3a8a", "#0b7285", "#6d1a36", "#2b2320", "#111"];
 const PAPERS = ["#fbfaf6", "#fff8e7", "#eef3f8", "#f3eee4", "#ffffff", "#12151c"];
 const TEXTURES = [
@@ -203,7 +285,7 @@ function makeHandwriting(forWidth) {
     hwW = sigBox.w; hwH = sigBox.h;
     return sigSVG.replace("<svg ", `<svg style="color:${ink}" `);
   }
-  let svg = engineSVG(textForEngine(), params(forWidth));
+  let svg = neuralSVG(textForEngine(), params(forWidth));
   if (mode === "signature") svg = addFlourish(svg);
   svg = svg.replace("<svg ", `<svg style="color:${ink}" `);
   hwW = +(svg.match(/width="(\d+)"/) || [800])[1];
@@ -221,7 +303,6 @@ function paperCSS() {
 }
 
 function render(animate = false) {
-  if (!wasm) return;
   refreshLabels();
   try {
     if (doc) return renderDoc();
@@ -614,9 +695,18 @@ function rdp(pts, eps) {
 
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
 const renderD = debounce(() => render(false), 90);
+let tier = "simple";
+function applyTier(t) {
+  tier = t;
+  document.querySelectorAll("#tier button").forEach((b) => b.classList.toggle("sel", b.dataset.tier === t));
+  document.querySelectorAll('[data-tier="adv"]').forEach((el) => { el.style.display = t === "advanced" ? "" : "none"; });
+}
+
 (async function () {
   buildSwatches();
-  try { await loadWasm(); } catch (e) { errEl.textContent = "Could not load the WASM engine (" + e.message + ")."; return; }
+  try { await loadWasm(); } catch (e) { /* procedural engine optional; neural is primary */ }
+  $("tier").querySelectorAll("button").forEach((b) => { b.onclick = () => applyTier(b.dataset.tier); });
+  applyTier("simple");
   loadHash(); buildSwatches();
   ["speed", "legibility", "thickness", "font_px", "slant", "contrast", "spacing", "line_spacing", "tex_intensity", "blur", "sharpen", "resolution", "blemish"].forEach((id) => $(id).addEventListener("input", renderD));
   $("text").addEventListener("input", debounce(() => render(true), 160));
