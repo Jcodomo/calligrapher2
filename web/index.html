@@ -88,6 +88,31 @@
   #addfab.open .fabbtn{transform:rotate(45deg)}
   .savedhand{display:inline-flex;align-items:center;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:3px 6px;font-size:12px;cursor:pointer}
   .savedhand .x{color:#c0392b;font-weight:700}
+  /* ---- PDF editor mode ---- */
+  #pdfedit_panel{display:none}
+  #pdfedit_stage{display:none}
+  body.pdfmode .panel > .group,
+  body.pdfmode .panel > details,
+  body.pdfmode .panel > textarea,
+  body.pdfmode .panel > #tier,
+  body.pdfmode #neural_status{display:none}
+  body.pdfmode #pdfedit_panel{display:block}
+  body.pdfmode .sheet{display:none}
+  body.pdfmode #addfab{display:none}
+  body.pdfmode .stage{align-items:stretch;justify-content:flex-start;padding:0}
+  body.pdfmode #pdfedit_stage{display:flex;flex-wrap:wrap;align-content:flex-start;gap:14px;padding:22px;width:100%;overflow:auto}
+  .pe-thumb{position:relative;width:150px;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:grab}
+  .pe-thumb.sel{outline:2px solid var(--accent);outline-offset:1px}
+  .pe-thumb.drop{outline:2px dashed var(--accent2)}
+  .pe-thumb img,.pe-thumb .pe-ph{display:block;width:100%;border-radius:8px 8px 0 0;background:#fff}
+  .pe-thumb .pe-ph{display:flex;align-items:center;justify-content:center;color:var(--muted);height:190px}
+  .pe-num{position:absolute;top:5px;left:6px;background:rgba(10,12,18,.72);color:#fff;font-size:11px;padding:1px 6px;border-radius:7px;font-variant-numeric:tabular-nums}
+  .pe-chk{position:absolute;top:5px;right:6px;width:17px;height:17px;accent-color:var(--accent);cursor:pointer}
+  .pe-bar{display:flex;gap:3px;padding:5px;justify-content:center;background:var(--panel2);border-radius:0 0 8px 8px}
+  .pe-bar button{flex:1;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 0;font-size:13px;cursor:pointer;line-height:1}
+  .pe-bar button:hover{border-color:var(--accent)}
+  #pdfedit_panel .row label{flex:0 0 72px}
+  #pe_wm{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px}
 </style>
 </head>
 <body>
@@ -95,6 +120,39 @@
   <aside class="panel">
     <h1>Calligrapher <b>2.0</b></h1>
     <div class="sub">Neural handwriting (Graves RNN) — Simple is the classic app; Advanced adds every Calligrapher 2 feature.</div>
+
+    <div class="seg" id="appmode" style="margin-bottom:10px">
+      <button data-app="sign" class="sel">Sign &amp; scan</button>
+      <button data-app="pdf">PDF editor</button>
+    </div>
+
+    <div id="pdfedit_panel">
+      <div class="group">
+        <h2>PDF editor</h2>
+        <button class="btn" id="pe_open">Open PDF(s)</button>
+        <input class="file" id="pe_file" type="file" accept="application/pdf" multiple />
+        <div style="color:var(--muted);font-size:11px;margin-top:6px">Drag thumbnails to reorder. Rotate, duplicate or delete any page. Tick pages to select, then extract them to a new PDF. Merge appends another PDF. Everything stays on your device.</div>
+      </div>
+      <div class="group" id="pe_tools" style="display:none">
+        <h2>Pages</h2>
+        <div class="actions" style="grid-template-columns:1fr 1fr">
+          <button class="btn" id="pe_rot_l">⟲ Rotate all</button>
+          <button class="btn" id="pe_rot_r">⟳ Rotate all</button>
+          <button class="btn" id="pe_merge">+ Merge PDF</button>
+          <button class="btn" id="pe_selall">Select all</button>
+          <button class="btn" id="pe_del_sel">Delete selected</button>
+          <button class="btn" id="pe_extract">Extract selected</button>
+        </div>
+      </div>
+      <div class="group" id="pe_finish" style="display:none">
+        <h2>Stamp &amp; export</h2>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:4px 0"><input type="checkbox" id="pe_nums"> Add page numbers</label>
+        <div class="row"><label>Position</label><select id="pe_numpos"><option value="bc">Bottom center</option><option value="br">Bottom right</option><option value="bl">Bottom left</option><option value="tc">Top center</option></select></div>
+        <div class="row"><label>Watermark</label><input id="pe_wm" type="text" placeholder="(none)" style="flex:1"></div>
+        <button class="btn" id="pe_export" style="margin-top:6px">Download edited PDF</button>
+        <div class="err" id="pe_err"></div>
+      </div>
+    </div>
 
     <div class="seg" id="tier" style="margin-bottom:12px">
       <button data-tier="simple" class="sel">Simple</button>
@@ -201,13 +259,20 @@ jumps over the lazy dog</textarea>
       <button class="btn" id="upload_btn">Upload PDF or image</button>
       <input class="file" id="file" type="file" accept="application/pdf,image/*" />
       <div id="doc_controls" style="display:none">
-        <div class="actions" style="margin-top:10px;grid-template-columns:1fr 1fr 1fr">
+        <div class="actions" style="margin-top:10px;grid-template-columns:1fr 1fr">
           <button class="btn" id="add_sig">+ Signature</button>
           <button class="btn" id="add_text">+ Writing</button>
           <button class="btn" id="add_date">+ Date</button>
+          <button class="btn" id="add_check">+ Check</button>
         </div>
         <div class="row" style="margin-top:8px"><label>Signer</label><select id="signer_sel" style="flex:1"></select><button class="btn" id="add_signer" style="width:auto;padding:7px 10px">+</button></div>
         <div class="row" id="item_font_row" style="display:none"><label>Font</label><select id="item_font" style="flex:1"></select></div>
+        <div id="item_date_row" style="display:none">
+          <div class="row"><label>Date</label><input id="item_date" type="date" style="flex:1"></div>
+          <div class="row"><label>Time</label><input id="item_time" type="time" style="flex:1"></div>
+          <div class="row"><label>Zone</label><select id="item_tz" style="flex:1"></select></div>
+        </div>
+        <div class="row" id="item_mark_row" style="display:none"><label>Mark</label><div class="seg" id="mark_seg" style="flex:1"><button data-mark="check" class="sel">✓ Check</button><button data-mark="x">✗ X</button></div></div>
         <div class="row"><label>Opacity</label><input id="item_opacity" type="range" min="10" max="100" value="100"><span class="val" id="item_opacity_v"></span></div>
         <div class="row"><label>PDF page</label><input id="pdf_page" type="number" min="1" value="1" style="width:70px"><span style="color:var(--muted);font-size:11px" id="pdf_pages"></span></div>
         <button class="btn" id="clear_doc" style="margin-top:8px">Remove document</button>
@@ -270,10 +335,12 @@ jumps over the lazy dog</textarea>
 
   <main class="stage">
     <div class="sheet" id="sheet"></div>
+    <div id="pdfedit_stage"></div>
     <div class="credit">Calligrapher 2.0 · yours to deploy</div>
   </main>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script type="module" src="./app.js?v=3"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script type="module" src="./app.js?v=6"></script>
 </body>
 </html>

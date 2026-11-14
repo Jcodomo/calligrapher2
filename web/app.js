@@ -1,6 +1,8 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
+import { initPdfEditor } from "./pdfedit.js?v=2";
+
 const WASM_URL = "./calligrapher2.wasm";
 let wasm = null;
 const enc = new TextEncoder();
@@ -446,9 +448,16 @@ function currentSignature() {
 // Async: sample a fresh signature SVG for text/params (awaits the worker).
 async function generateSig(text, p) {
   const bias = neuralBias();
-  const lineTexts = (mode === "signature") ? [text] : String(text).split("\n");
-  const lines = await sampleLines(lineTexts, bias, p.seed);
-  neuralCache.set(text + "|" + bias.toFixed(3) + "|" + p.seed, lines);
+  const key = text + "|" + bias.toFixed(3) + "|" + p.seed;
+  // Geometry depends only on text+bias+seed; thickness/slant/nib/spacing/size are
+  // styled cheaply from the cached strokes. Reuse the cache so those edits redraw
+  // instantly (no worker round-trip) — only new text, legibility or seed re-samples.
+  let lines = neuralCache.get(key);
+  if (!lines) {
+    const lineTexts = (mode === "signature") ? [text] : String(text).split("\n");
+    lines = await sampleLines(lineTexts, bias, p.seed);
+    neuralCache.set(key, lines);
+  }
   let svg = buildNeuralSVG(lines, p);
   if (mode === "signature") svg = addFlourish(svg);
   svg = svg.replace("<svg ", `<svg style="color:${ink}" `);
@@ -465,23 +474,57 @@ function addSigItem() {
 function addTextItem() {
   docItems.push({ id: "it" + itemSeq++, type: "text", nx: 0.1, ny: 0.1, nw: 0.26, ar: 0.16, opacity: 1, signer: activeSigner, text: "Type here", font: 5 });
   selId = docItems[docItems.length - 1].id; render();
+  focusInlineEdit(selId);   // start typing immediately; edits land live as you type
+}
+// Focus a freshly placed text item for immediate inline typing (after render rebuilds the DOM).
+function focusInlineEdit(id) {
+  const it = docItems.find((i) => i.id === id); if (!it || it.type !== "text") return;
+  requestAnimationFrame(() => {
+    const ov = $("overlay"); if (!ov) return;
+    const el = ov.querySelector(`.ditem[data-id="${id}"]`); if (el) startInlineEdit(it, el);
+  });
+}
+// DocuSign-style timestamp: "MM/DD/YYYY | H:MM AM/PM TZ".
+const TZ_LIST = ["PST", "PDT", "MST", "MDT", "CST", "CDT", "EST", "EDT", "AKST", "AKDT", "HST", "GMT", "UTC", "BST", "CET", "CEST", "EET", "IST", "JST", "KST", "AEST", "AEDT", "NZST"];
+function pad2(n) { return String(n).padStart(2, "0"); }
+function localTzAbbr() {
+  try { const m = new Date().toLocaleTimeString("en-US", { timeZoneName: "short" }).match(/[A-Z]{2,5}$/); return (m && m[0]) || "UTC"; }
+  catch { return "UTC"; }
+}
+function fmtDocuSign(dateStr, timeStr, tz) {
+  const [y, m, d] = (dateStr || "").split("-").map(Number);
+  let [hh, mm] = (timeStr || "0:0").split(":").map(Number);
+  if (!y || !m || !d) return "";
+  const ap = hh >= 12 ? "PM" : "AM";
+  let h12 = hh % 12; if (h12 === 0) h12 = 12;
+  return `${pad2(m)}/${pad2(d)}/${y} | ${h12}:${pad2(mm || 0)} ${ap} ${tz}`;
 }
 function addDateItem() {
-  const str = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
-  docItems.push({ id: "it" + itemSeq++, type: "text", nx: 0.1, ny: 0.1, nw: 0.3, ar: 0.12, opacity: 1, signer: activeSigner, text: str, font: 0 });
+  const now = new Date();
+  const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  const time = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+  const tz = localTzAbbr();
+  docItems.push({ id: "it" + itemSeq++, type: "text", isDate: true, date, time, tz, nx: 0.1, ny: 0.1, nw: 0.36, ar: 0.11, opacity: 1, signer: activeSigner, text: fmtDocuSign(date, time, tz), font: 0 });
   selId = docItems[docItems.length - 1].id; render();
 }
+// Checkbox mark: a placeable ✓ or X stamp for ticking boxes on a form.
+function markGlyph(m) { return m === "x" ? "X" : "✓"; }
+function addCheckItem() {
+  docItems.push({ id: "it" + itemSeq++, type: "text", isMark: true, mark: "check", nx: 0.1, ny: 0.1, nw: 0.06, ar: 1, opacity: 1, signer: activeSigner, text: "✓", font: 5 });
+  selId = docItems[docItems.length - 1].id; render();
+}
+function setMark(m) { const it = selectedItem(); if (!it || !it.isMark) return; it.mark = m; it.text = markGlyph(m); render(); }
 function deleteItem(id) { docItems = docItems.filter((i) => i.id !== id); if (selId === id) selId = null; render(); }
 function editText(it) {
   const v = prompt("Text:", it.text); if (v != null) { it.text = v; render(); }
 }
 // Re-roll / refresh a placed dynamic signature using the current realism controls.
-async function regenItem(it, newSeed) {
+async function regenItem(it, newSeed, quiet) {
   if (!it || it.type !== "sig" || !it.dynamic) return;
   if (newSeed != null) it.seed = newSeed;
   const p = params(Math.round((doc ? doc.w : 800) * 0.5));
   p.seed = it.seed;
-  try { const g = await generateSig(it.text, p); it.svg = g.svg; it.ar = g.h / g.w; render(); flash("Updated signature."); }
+  try { const g = await generateSig(it.text, p); it.svg = g.svg; it.ar = g.h / g.w; render(); if (!quiet) flash("Updated signature."); }
   catch (e) { errEl.textContent = "Could not re-roll: " + (e.message || e); }
 }
 function selectedItem() { return docItems.find((i) => i.id === selId); }
@@ -512,11 +555,13 @@ function itemEl(it, dispW, dispH) {
   const w = it.nw * dispW, h = it.nw * dispW * it.ar;
   const el = document.createElement("div");
   el.className = "ditem" + (it.id === selId ? " sel" : "");
+  el.dataset.id = it.id;
   el.style.cssText = `left:${it.nx * dispW}px;top:${it.ny * dispH}px;width:${w}px;height:${h}px;opacity:${it.opacity};color:${signerColor(it.signer)}`;
   if (it.type === "sig") el.innerHTML = it.svg.replace("<svg ", '<svg preserveAspectRatio="none" style="width:100%;height:100%;display:block;pointer-events:none" ');
   else {
     const fam = DOC_FONTS[it.font || 0].css;
-    el.innerHTML = `<div class="dtext" style="font-size:${h * 0.7}px;font-family:${fam}">${escapeHTML(it.text)}</div>`;
+    const extra = it.isMark ? "justify-content:center;font-weight:700;" : "";
+    el.innerHTML = `<div class="dtext" style="${extra}font-size:${h * 0.7}px;font-family:${fam}">${escapeHTML(it.text)}</div>`;
   }
   el.onpointerdown = (e) => {
     if (e.target.classList.contains("dhandle") || e.target.closest(".dtrash") || e.target.isContentEditable) return;
@@ -553,8 +598,21 @@ function syncItemUI() {
   const it = selectedItem();
   const row = $("item_font_row");
   if (row) row.style.display = it && it.type === "text" ? "" : "none";
+  const drow = $("item_date_row");
+  if (drow) drow.style.display = it && it.isDate ? "" : "none";
+  const mrow = $("item_mark_row");
+  if (mrow) { mrow.style.display = it && it.isMark ? "" : "none"; if (it && it.isMark) mrow.querySelectorAll("button").forEach((b) => b.classList.toggle("sel", b.dataset.mark === it.mark)); }
+  if (it && it.isDate) {
+    if ($("item_date")) $("item_date").value = it.date || "";
+    if ($("item_time")) $("item_time").value = it.time || "";
+    if ($("item_tz")) $("item_tz").value = it.tz || "UTC";
+  }
   if (it && it.type === "text" && $("item_font")) $("item_font").value = String(it.font || 0);
   if (it && $("item_opacity")) { $("item_opacity").value = Math.round((it.opacity ?? 1) * 100); $("item_opacity_v").textContent = $("item_opacity").value + "%"; }
+  // Selecting a placed (generated) signature loads its words into the left text box,
+  // so you can edit them live from the menu. Skip while the box is focused (don't fight typing).
+  const ta = $("text");
+  if (it && it.type === "sig" && it.dynamic && typeof it.text === "string" && ta && document.activeElement !== ta && ta.value !== it.text) ta.value = it.text;
 }
 
 function startMove(it, el, e, dispW, dispH) {
@@ -611,8 +669,12 @@ function renderFields(ov, dispW, dispH) {
 function animateSVG(svg) {
   const w = +(svg.match(/width="(\d+)"/) || [])[1] || 800, h = +(svg.match(/height="(\d+)"/) || [])[1] || 300;
   const speed = +$("speed").value; if (speed <= 0) return svg;
-  const dur = (6.5 - speed / 100 * 5.3).toFixed(2);
-  const defs = `<defs><clipPath id="wo"><rect x="0" y="0" width="0" height="${h}"><animate attributeName="width" from="0" to="${w}" dur="${dur}s" fill="freeze"/></rect></clipPath></defs>`;
+  // Half the previous draw time; ease-in-out spline makes the wipe accelerate in
+  // and settle out instead of a constant-speed sweep (smoother to the eye).
+  const dur = ((6.5 - speed / 100 * 5.3) * 0.5).toFixed(2);
+  const defs = `<defs><clipPath id="wo"><rect x="0" y="0" width="0" height="${h}">` +
+    `<animate attributeName="width" from="0" to="${w}" dur="${dur}s" fill="freeze" ` +
+    `calcMode="spline" keyTimes="0;1" keySplines="0.33 0 0.2 1"/></rect></clipPath></defs>`;
   return svg.replace("><g>", `>${defs}<g clip-path="url(#wo)">`);
 }
 
@@ -668,10 +730,27 @@ $("pdf_page").onchange = async () => { if (pdfDocCache) { await renderPdfPage(+$
 $("add_sig").onclick = addSigItem;
 $("add_text").onclick = addTextItem;
 $("add_date").onclick = addDateItem;
+if ($("add_check")) $("add_check").onclick = addCheckItem;
+if ($("mark_seg")) $("mark_seg").querySelectorAll("button").forEach((b) => b.onclick = () => setMark(b.dataset.mark));
 (function buildFontSelect() {
   const sel = $("item_font"); if (!sel) return;
   DOC_FONTS.forEach((f, i) => { const o = document.createElement("option"); o.value = String(i); o.textContent = f.name; sel.appendChild(o); });
   sel.onchange = () => { const it = selectedItem(); if (it && it.type === "text") { it.font = +sel.value; render(); } };
+})();
+(function buildTzSelect() {
+  const sel = $("item_tz"); if (!sel) return;
+  const local = localTzAbbr();
+  const list = TZ_LIST.includes(local) ? TZ_LIST : [local, ...TZ_LIST];
+  list.forEach((z) => { const o = document.createElement("option"); o.value = z; o.textContent = z; sel.appendChild(o); });
+  const apply = () => {
+    const it = selectedItem(); if (!it || !it.isDate) return;
+    it.date = $("item_date").value || it.date;
+    it.time = $("item_time").value || it.time;
+    it.tz = $("item_tz").value || it.tz;
+    it.text = fmtDocuSign(it.date, it.time, it.tz);
+    render();
+  };
+  ["item_date", "item_time", "item_tz"].forEach((id) => { const el = $(id); if (el) el.addEventListener("input", apply); });
 })();
 $("item_opacity").oninput = () => {
   const it = selectedItem();
@@ -802,8 +881,9 @@ async function composeCanvas() {
         const img = await svgToImage(it.svg.replace("<svg ", `<svg style="color:${signerColor(it.signer)}" `));
         ctx.drawImage(img, x, y, w, h);
       } else {
-        ctx.fillStyle = signerColor(it.signer); ctx.font = `${h * 0.7}px ${DOC_FONTS[it.font || 0].css}`; ctx.textBaseline = "middle";
-        ctx.fillText(it.text, x, y + h / 2);
+        ctx.fillStyle = signerColor(it.signer); ctx.font = `${it.isMark ? "700 " : ""}${h * 0.7}px ${DOC_FONTS[it.font || 0].css}`; ctx.textBaseline = "middle";
+        if (it.isMark) { ctx.textAlign = "center"; ctx.fillText(it.text, x + w / 2, y + h / 2); ctx.textAlign = "left"; }
+        else ctx.fillText(it.text, x, y + h / 2);
       }
     }
     ctx.globalAlpha = 1;
@@ -1123,11 +1203,13 @@ function buildAddFab() {
     '<button class="btn" data-add="sig">+ Signature</button>' +
     '<button class="btn" data-add="text">+ Writing</button>' +
     '<button class="btn" data-add="date">+ Date</button>' +
+    '<button class="btn" data-add="check">+ Check</button>' +
     '</div><button class="fabbtn" title="Add to page">+</button>';
   fab.querySelector(".fabbtn").onclick = () => fab.classList.toggle("open");
   fab.querySelectorAll("[data-add]").forEach((b) => b.onclick = () => {
     fab.classList.remove("open");
-    const a = b.dataset.add; if (a === "sig") addSigItem(); else if (a === "text") addTextItem(); else addDateItem();
+    const a = b.dataset.add;
+    if (a === "sig") addSigItem(); else if (a === "text") addTextItem(); else if (a === "date") addDateItem(); else addCheckItem();
   });
   stage.appendChild(fab);
 }
@@ -1157,10 +1239,27 @@ function applyTier(t) {
   if ($("cspace")) $("cspace").addEventListener("change", renderD);
   // Handwriting controls: refresh a selected placed signature live on release.
   const HW_KEYS = ["legibility", "thickness", "slant", "contrast", "spacing", "line_spacing", "font_px"];
-  HW_KEYS.forEach((id) => { const el = $(id); if (el) el.addEventListener("change", () => { const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it); }); });
-  $("text").addEventListener("input", debounce(() => render(true), 160));
-  $("seed").addEventListener("input", renderD);
-  $("style").addEventListener("change", () => applyStyle($("style").value));
+  // Live edit: while a placed signature is selected, any handwriting control
+  // re-draws that signature automatically (debounced; the stroke cache keeps it
+  // instant unless legibility / seed / text actually changed).
+  const regenSelDeb = debounce(() => { const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it, undefined, true); }, 130);
+  HW_KEYS.forEach((id) => { const el = $(id); if (el) el.addEventListener("input", regenSelDeb); });
+  // Editing the text box live-updates a selected placed signature; with a document
+  // open and none selected, the first keystroke auto-places a signature ready for
+  // live creation; otherwise it redraws the sheet.
+  $("text").addEventListener("input", debounce(() => {
+    const it = selectedItem();
+    if (it && it.type === "sig" && it.dynamic) { it.text = textForEngine(); regenItem(it, undefined, true); return; }
+    if (doc && textForEngine()) {
+      const s = [...docItems].reverse().find((d) => d.type === "sig" && d.dynamic);
+      if (s) { selId = s.id; s.text = textForEngine(); regenItem(s, undefined, true); }
+      else { addSigItem(); const ni = selectedItem(); if (ni) regenItem(ni, undefined, true); }
+      return;
+    }
+    render(true);
+  }, 160));
+  $("seed").addEventListener("input", () => { renderD(); regenSelDeb(); });
+  $("style").addEventListener("change", () => { applyStyle($("style").value); const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it, undefined, true); });
   $("hand").addEventListener("change", () => {
     const v = $("hand").value;
     handHistory.push(+$("seed").value);
@@ -1193,5 +1292,15 @@ function applyTier(t) {
   renderSavedSigs();
   buildSigners();
   window.addEventListener("resize", renderD);
+  // App mode switch: "Sign & scan" (default) | "PDF editor" (Stirling-style page ops).
+  const appmode = $("appmode");
+  if (appmode) appmode.querySelectorAll("button").forEach((b) => {
+    b.onclick = () => {
+      appmode.querySelectorAll("button").forEach((x) => x.classList.remove("sel"));
+      b.classList.add("sel");
+      document.body.classList.toggle("pdfmode", b.dataset.app === "pdf");
+    };
+  });
+  try { initPdfEditor(); } catch (e) { /* pdf-lib optional */ }
   render(false);
 })();
