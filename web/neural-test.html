@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Neural backend — test harness</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.4 system-ui, sans-serif; margin: 24px; max-width: 980px; }
+  h1 { font-size: 18px; }
+  input, button, label { font: inherit; }
+  #text { width: 360px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+  svg { width: 100%; height: auto; border: 1px solid #8884; background: #fff; border-radius: 6px; }
+  #log { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; color: #888; }
+  .bad { color: #c0392b; }
+</style>
+</head>
+<body>
+  <h1>Calligrapher 2 — neural backend test harness</h1>
+  <p>Validates the in-browser Graves RNN against the upstream pretrained weights.
+     Not the final UI — just proves the model runs and renders.</p>
+  <div class="row">
+    <input id="text" value="the quick brown fox" />
+    <label>bias <input id="bias" type="range" min="0.1" max="1.5" step="0.05" value="0.75" /></label>
+    <label>seed <input id="seed" type="number" value="1" style="width:70px" /></label>
+    <button id="go">Generate</button>
+  </div>
+  <svg id="out" viewBox="0 0 1000 220" preserveAspectRatio="xMidYMid meet"></svg>
+  <div id="log"></div>
+
+<script type="module">
+import { NeuralHand, offsetsToStrokes } from './neural.js';
+
+const log = (m, bad) => { const d = document.getElementById('log'); d.innerHTML += `<span class="${bad?'bad':''}">${m}</span>\n`; };
+let hand = null;
+
+async function ensure() {
+  if (hand) return hand;
+  log('loading weights…');
+  const t = performance.now();
+  hand = await NeuralHand.load('./model/');
+  log(`model loaded in ${(performance.now()-t|0)}ms`);
+  log('resolved vars: ' + JSON.stringify(hand.g._names, null, 0));
+  return hand;
+}
+
+function render(strokesInfo) {
+  const svg = document.getElementById('out');
+  const S = 70; // em -> px
+  // place on a baseline; em y-up, svg y-down
+  const pad = 20, baseY = 150;
+  let d = '';
+  for (const pts of strokesInfo.strokes) {
+    if (pts.length < 2) continue;
+    d += 'M' + pts.map(p => `${(p.x*S+pad).toFixed(1)},${(baseY - p.y*S).toFixed(1)}`).join(' L') + ' ';
+  }
+  svg.innerHTML = `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
+}
+
+document.getElementById('go').addEventListener('click', async () => {
+  try {
+    const h = await ensure();
+    const text = document.getElementById('text').value;
+    const bias = +document.getElementById('bias').value;
+    const seed = +document.getElementById('seed').value;
+    log(`sampling "${text}" (bias=${bias}, seed=${seed})…`);
+    const t = performance.now();
+    const offs = h.sample(text, { bias, seed });
+    const dt = performance.now() - t;
+    const info = offsetsToStrokes(offs);
+    log(`${offs.length} steps, ${info.strokes.length} strokes, ${dt|0}ms`);
+    render(info);
+  } catch (e) {
+    log('ERROR: ' + (e && e.stack || e), true);
+  }
+});
+</script>
+</body>
+</html>
