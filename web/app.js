@@ -211,7 +211,14 @@ let sigImg = null, sigSVG = "", sigBox = { w: 0, h: 0 }, sigMetrics = null;
 // document background + placement
 let doc = null;            // { img:Image, w, h, type }
 let pdfDocCache = null;    // loaded pdfjs document
-let place = { x: 40, y: 40, scale: 1 }; // overlay top-left (display px) + user scale
+// Document editor: a list of movable/resizable items (signatures + text) on the page.
+let docItems = [];          // {id,type,nx,ny,nw,ar,opacity,signer,svg,w,h,text}
+let selId = null;
+let signers = [{ id: "s1", name: "Signer 1", color: "#1b1b1f" }];
+let activeSigner = "s1";
+let itemSeq = 1;
+let pdfFields = [];         // fillable-PDF form fields for the current page
+let fieldValues = {};       // field name -> value
 
 // ---- swatches / toggles --------------------------------------------------
 
@@ -377,38 +384,123 @@ function render(animate = false) {
   } catch (e) { errEl.textContent = "Render error: " + (e.message || e); }
 }
 
-// Document mode: page image + draggable handwriting overlay.
+// ---- document editor -------------------------------------------------------
+function escapeHTML(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function signerColor(id) { const s = signers.find((x) => x.id === id); return s ? s.color : "#1b1b1f"; }
+function TRASH() { return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>'; }
+
+function currentSignature() {
+  if (sigSVG) return { svg: sigSVG, w: sigBox.w, h: sigBox.h };          // traced image (currentColor)
+  const svg = makeHandwriting(Math.round((doc ? doc.w : 800) * 0.5));    // generated handwriting
+  return { svg: cleanSigSVG(svg), w: hwW, h: hwH };
+}
+function addSigItem() {
+  const g = currentSignature();
+  if (!g.w) { errEl.textContent = "Type some text or import a signature first."; return; }
+  docItems.push({ id: "it" + itemSeq++, type: "sig", nx: 0.08, ny: 0.08, nw: 0.3, ar: g.h / g.w, opacity: 1, signer: activeSigner, svg: g.svg });
+  selId = docItems[docItems.length - 1].id; render();
+}
+function addTextItem() {
+  docItems.push({ id: "it" + itemSeq++, type: "text", nx: 0.1, ny: 0.1, nw: 0.26, ar: 0.16, opacity: 1, signer: activeSigner, text: "Type here" });
+  selId = docItems[docItems.length - 1].id; render();
+  const it = docItems[docItems.length - 1];
+  setTimeout(() => editText(it), 30);
+}
+function deleteItem(id) { docItems = docItems.filter((i) => i.id !== id); if (selId === id) selId = null; render(); }
+function editText(it) {
+  const v = prompt("Text:", it.text); if (v != null) { it.text = v; render(); }
+}
+
 function renderDoc() {
   sheet.className = "sheet doc";
   const stage = sheet.parentElement.getBoundingClientRect();
   const dispW = Math.min(doc.w, stage.width - 48);
   const dispH = dispW * doc.h / doc.w;
-  rawSVG = makeHandwriting(Math.round(doc.w * 0.6));
-  sheet.innerHTML =
-    `<img id="docbg" src="${doc.url}" style="width:${dispW}px;height:${dispH}px"/>` +
-    `<div id="overlay"></div><div class="hint">Drag the writing to position it</div>`;
-  const ov = $("overlay");
-  const s = (place.scale) * (dispW / hwW) * 0.5;
-  ov.style.transform = `translate(${place.x}px,${place.y}px) scale(${s})`;
-  ov.innerHTML = rawSVG;
-  ov.style.filter = previewFilter();
-  sheet.style.filter = toggles.scanned ? "contrast(1.05)" : "";
+  sheet.innerHTML = `<img id="docbg" src="${doc.url}" draggable="false" style="width:${dispW}px;height:${dispH}px"/><div id="overlay"></div>`;
   sheet.style.width = dispW + "px"; sheet.style.height = dispH + "px";
   sheet.style.background = "transparent"; sheet.style.backgroundImage = "";
-  enableDrag(ov, dispW, dispH);
+  sheet.style.filter = previewFilter(); // scanned look / blur / sharpness on the whole page
+  const ov = $("overlay");
+  ov.style.cssText = `position:absolute;left:0;top:0;width:${dispW}px;height:${dispH}px`;
+  ov.onpointerdown = (e) => { if (e.target === ov) { selId = null; render(); } };
+  renderFields(ov, dispW, dispH);
+  docItems.forEach((it) => ov.appendChild(itemEl(it, dispW, dispH)));
   errEl.textContent = ""; syncHash();
 }
-function enableDrag(ov, dispW, dispH) {
-  let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
-  ov.onpointerdown = (e) => { dragging = true; ov.classList.add("drag"); ov.setPointerCapture(e.pointerId); sx = e.clientX; sy = e.clientY; ox = place.x; oy = place.y; };
-  ov.onpointermove = (e) => {
-    if (!dragging) return;
-    place.x = Math.max(-40, Math.min(dispW, ox + (e.clientX - sx)));
-    place.y = Math.max(-40, Math.min(dispH, oy + (e.clientY - sy)));
-    const s = place.scale * (dispW / hwW) * 0.5;
-    ov.style.transform = `translate(${place.x}px,${place.y}px) scale(${s})`;
+
+function itemEl(it, dispW, dispH) {
+  const w = it.nw * dispW, h = it.nw * dispW * it.ar;
+  const el = document.createElement("div");
+  el.className = "ditem" + (it.id === selId ? " sel" : "");
+  el.style.cssText = `left:${it.nx * dispW}px;top:${it.ny * dispH}px;width:${w}px;height:${h}px;opacity:${it.opacity};color:${signerColor(it.signer)}`;
+  if (it.type === "sig") el.innerHTML = it.svg.replace("<svg ", '<svg preserveAspectRatio="none" style="width:100%;height:100%;display:block;pointer-events:none" ');
+  else el.innerHTML = `<div class="dtext" style="font-size:${h * 0.7}px">${escapeHTML(it.text)}</div>`;
+  el.onpointerdown = (e) => {
+    if (e.target.classList.contains("dhandle") || e.target.closest(".dtrash")) return;
+    e.preventDefault(); selId = it.id; el.classList.add("sel"); startMove(it, el, e, dispW, dispH);
   };
-  ov.onpointerup = () => { dragging = false; ov.classList.remove("drag"); syncHash(); };
+  if (it.id === selId) {
+    ["nw", "ne", "sw", "se"].forEach((corner) => {
+      const hd = document.createElement("div"); hd.className = "dhandle " + corner;
+      hd.onpointerdown = (e) => { e.preventDefault(); e.stopPropagation(); startResize(it, el, corner, e, dispW, dispH); };
+      el.appendChild(hd);
+    });
+    const tr = document.createElement("div"); tr.className = "dtrash"; tr.title = "Delete"; tr.innerHTML = TRASH();
+    tr.onpointerdown = (e) => { e.preventDefault(); e.stopPropagation(); deleteItem(it.id); };
+    el.appendChild(tr);
+    if (it.type === "text") el.ondblclick = () => editText(it);
+  }
+  return el;
+}
+
+function startMove(it, el, e, dispW, dispH) {
+  el.setPointerCapture(e.pointerId);
+  const sx = e.clientX, sy = e.clientY, ox = it.nx, oy = it.ny;
+  const mv = (ev) => {
+    it.nx = Math.max(-0.1, Math.min(0.98, ox + (ev.clientX - sx) / dispW));
+    it.ny = Math.max(-0.1, Math.min(0.98, oy + (ev.clientY - sy) / dispH));
+    el.style.left = it.nx * dispW + "px"; el.style.top = it.ny * dispH + "px";
+  };
+  const up = () => { el.removeEventListener("pointermove", mv); el.removeEventListener("pointerup", up); render(); };
+  el.addEventListener("pointermove", mv); el.addEventListener("pointerup", up);
+}
+function startResize(it, el, corner, e, dispW, dispH) {
+  el.setPointerCapture(e.pointerId);
+  const sx = e.clientX, ow = it.nw, onx = it.nx, ony = it.ny;
+  const west = corner.includes("w"), north = corner.includes("n");
+  const owPx = ow * dispW, ohPx = ow * dispW * it.ar;
+  const mv = (ev) => {
+    let dw = (ev.clientX - sx) / dispW; if (west) dw = -dw;
+    const nw = Math.max(0.04, ow + dw);
+    const nwPx = nw * dispW, nhPx = nw * dispW * it.ar;
+    it.nw = nw;
+    if (west) it.nx = onx + (owPx - nwPx) / dispW;
+    if (north) it.ny = ony + (ohPx - nhPx) / dispH;
+    el.style.width = nwPx + "px"; el.style.height = nhPx + "px";
+    el.style.left = it.nx * dispW + "px"; el.style.top = it.ny * dispH + "px";
+    if (it.type === "text") { const td = el.querySelector(".dtext"); if (td) td.style.fontSize = nhPx * 0.7 + "px"; }
+  };
+  const up = () => { el.removeEventListener("pointermove", mv); el.removeEventListener("pointerup", up); render(); };
+  el.addEventListener("pointermove", mv); el.addEventListener("pointerup", up);
+}
+
+// ---- fillable PDF form fields ----------------------------------------------
+function renderFields(ov, dispW, dispH) {
+  pdfFields.forEach((f) => {
+    const x = f.nx * dispW, y = f.ny * dispH, w = f.nw * dispW, h = f.nh * dispH;
+    if (f.type === "check") {
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.className = "dfield";
+      cb.checked = !!fieldValues[f.name]; cb.style.cssText = `left:${x}px;top:${y}px;width:${Math.max(14, h)}px;height:${Math.max(14, h)}px`;
+      cb.onchange = () => { fieldValues[f.name] = cb.checked; };
+      ov.appendChild(cb);
+    } else {
+      const inp = document.createElement("input"); inp.type = "text"; inp.className = "dfield";
+      inp.value = fieldValues[f.name] || ""; inp.placeholder = f.name || "";
+      inp.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;font-size:${Math.min(h * 0.7, 16)}px`;
+      inp.oninput = () => { fieldValues[f.name] = inp.value; };
+      ov.appendChild(inp);
+    }
+  });
 }
 
 function animateSVG(svg) {
@@ -428,7 +520,7 @@ $("file").onchange = async (e) => {
   try {
     if (f.type === "application/pdf") { await loadPDF(await f.arrayBuffer()); }
     else { await loadImage(URL.createObjectURL(f)); }
-    $("doc_controls").style.display = ""; place = { x: 40, y: 40, scale: 1 };
+    $("doc_controls").style.display = ""; docItems = []; selId = null;
     errEl.textContent = ""; render();
   } catch (err) { errEl.textContent = "Could not open that file: " + (err.message || err); }
 };
@@ -452,10 +544,44 @@ async function renderPdfPage(n) {
   const url = c.toDataURL("image/png");
   const img = await new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.src = url; });
   doc = { img, w: img.naturalWidth, h: img.naturalHeight, url, type: "pdf" };
+  // fillable form fields on this page
+  pdfFields = [];
+  try {
+    const ann = await page.getAnnotations();
+    for (const a of ann) {
+      if (a.subtype !== "Widget" || !a.rect) continue;
+      const r = vp.convertToViewportRectangle(a.rect);
+      const x1 = Math.min(r[0], r[2]), y1 = Math.min(r[1], r[3]), x2 = Math.max(r[0], r[2]), y2 = Math.max(r[1], r[3]);
+      const name = a.fieldName || a.id;
+      const box = { name, nx: x1 / vp.width, ny: y1 / vp.height, nw: (x2 - x1) / vp.width, nh: (y2 - y1) / vp.height };
+      if (a.fieldType === "Tx") { pdfFields.push({ ...box, type: "text" }); if (a.fieldValue && fieldValues[name] == null) fieldValues[name] = a.fieldValue; }
+      else if (a.fieldType === "Btn" && !a.pushButton && a.checkBox !== false) { pdfFields.push({ ...box, type: "check" }); if (a.fieldValue != null && fieldValues[name] == null) fieldValues[name] = a.fieldValue !== "Off"; }
+    }
+  } catch (_) { pdfFields = []; }
 }
 $("pdf_page").onchange = async () => { if (pdfDocCache) { await renderPdfPage(+$("pdf_page").value); render(); } };
-$("place_scale").oninput = () => { place.scale = +$("place_scale").value / 100; render(); };
-$("clear_doc").onclick = () => { doc = null; pdfDocCache = null; $("doc_controls").style.display = "none"; $("pdf_pages").textContent = ""; render(); };
+$("add_sig").onclick = addSigItem;
+$("add_text").onclick = addTextItem;
+$("item_opacity").oninput = () => {
+  const it = docItems.find((i) => i.id === selId);
+  $("item_opacity_v").textContent = $("item_opacity").value + "%";
+  if (it) { it.opacity = +$("item_opacity").value / 100; render(); }
+};
+$("signer_sel").onchange = () => { activeSigner = $("signer_sel").value; };
+$("add_signer").onclick = () => {
+  const name = prompt("Signer name:", "Signer " + (signers.length + 1)); if (!name) return;
+  const palette = ["#1b1b1f", "#1d3a8a", "#0b7285", "#6d1a36", "#2b2320", "#7a1f1f"];
+  const id = "s" + Date.now();
+  signers.push({ id, name, color: palette[signers.length % palette.length] });
+  activeSigner = id; buildSigners();
+};
+function buildSigners() {
+  const sel = $("signer_sel"); if (!sel) return;
+  sel.innerHTML = "";
+  signers.forEach((s) => { const o = document.createElement("option"); o.value = s.id; o.textContent = s.name; sel.appendChild(o); });
+  sel.value = activeSigner;
+}
+$("clear_doc").onclick = () => { doc = null; pdfDocCache = null; docItems = []; selId = null; pdfFields = []; fieldValues = {}; $("doc_controls").style.display = "none"; $("pdf_pages").textContent = ""; render(); };
 
 // ---- export pipeline -----------------------------------------------------
 
@@ -510,12 +636,27 @@ async function composeCanvas() {
     const c = document.createElement("canvas"); c.width = W; c.height = H;
     const ctx = c.getContext("2d");
     ctx.drawImage(doc.img, 0, 0, W, H);
-    const stage = sheet.parentElement.getBoundingClientRect();
-    const dispW = Math.min(doc.w, stage.width - 48);
-    const toExport = (doc.w / dispW) * res;           // display px -> export px
-    const s = place.scale * (dispW / hwW) * 0.5 * toExport;
-    const hwImg = await svgToImage(rawSVG);
-    ctx.drawImage(hwImg, place.x * toExport, place.y * toExport, hwW * s, hwH * s);
+    // filled form-field values
+    for (const f of pdfFields) {
+      const v = fieldValues[f.name]; if (v == null || v === "" || v === false) continue;
+      const x = f.nx * W, y = f.ny * H, w = f.nw * W, h = f.nh * H;
+      ctx.fillStyle = "#15233a";
+      if (f.type === "check") { ctx.font = `${h * 0.9}px system-ui, sans-serif`; ctx.textBaseline = "top"; ctx.fillText("X", x + w * 0.12, y); }
+      else { ctx.font = `${Math.min(h * 0.72, 18 * res)}px system-ui, sans-serif`; ctx.textBaseline = "middle"; ctx.fillText(String(v), x + 3, y + h / 2); }
+    }
+    // placed signatures / text
+    for (const it of docItems) {
+      const x = it.nx * W, y = it.ny * H, w = it.nw * W, h = it.nw * W * it.ar;
+      ctx.globalAlpha = it.opacity;
+      if (it.type === "sig") {
+        const img = await svgToImage(it.svg.replace("<svg ", `<svg style="color:${signerColor(it.signer)}" `));
+        ctx.drawImage(img, x, y, w, h);
+      } else {
+        ctx.fillStyle = signerColor(it.signer); ctx.font = `${h * 0.7}px system-ui, sans-serif`; ctx.textBaseline = "middle";
+        ctx.fillText(it.text, x, y + h / 2);
+      }
+    }
+    ctx.globalAlpha = 1;
     return finishCanvas(c);
   }
   // no document: handwriting on paper
@@ -815,6 +956,7 @@ function applyTier(t) {
   $("share").addEventListener("click", copyLink);
   $("sig_save").addEventListener("click", saveCurrentSig);
   renderSavedSigs();
+  buildSigners();
   window.addEventListener("resize", renderD);
   render(false);
 })();

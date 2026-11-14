@@ -63,6 +63,17 @@
   .hint{position:absolute;top:10px;left:16px;color:var(--muted);font-size:11px;background:rgba(0,0,0,.25);padding:3px 8px;border-radius:8px}
   .credit{position:absolute;bottom:10px;right:16px;color:var(--muted);font-size:11px}
   .file{display:none}
+  #overlay{overflow:visible}
+  .ditem{position:absolute;cursor:grab;touch-action:none;user-select:none}
+  .ditem.sel{outline:1.5px solid #4a90ff;outline-offset:2px}
+  .ditem .dtext{width:100%;height:100%;display:flex;align-items:center;white-space:nowrap;line-height:1;pointer-events:none}
+  .dhandle{position:absolute;width:12px;height:12px;background:#fff;border:1.5px solid #4a90ff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.3);z-index:3}
+  .dhandle.nw{left:-6px;top:-6px;cursor:nwse-resize}
+  .dhandle.ne{right:-6px;top:-6px;cursor:nesw-resize}
+  .dhandle.sw{left:-6px;bottom:-6px;cursor:nesw-resize}
+  .dhandle.se{right:-6px;bottom:-6px;cursor:nwse-resize}
+  .dtrash{position:absolute;left:50%;bottom:-42px;transform:translateX(-50%);width:36px;height:30px;background:#15233a;color:#fff;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.35);z-index:3}
+  .dfield{position:absolute;background:rgba(74,144,255,.08);border:1px solid rgba(74,144,255,.55);border-radius:3px;color:#15233a;padding:0 3px;box-sizing:border-box;font-family:system-ui,sans-serif}
 </style>
 </head>
 <body>
@@ -176,10 +187,15 @@ jumps over the lazy dog</textarea>
       <button class="btn" id="upload_btn">Upload PDF or image</button>
       <input class="file" id="file" type="file" accept="application/pdf,image/*" />
       <div id="doc_controls" style="display:none">
-        <div class="row" style="margin-top:10px"><label>Place size</label><input id="place_scale" type="range" min="20" max="200" value="100"><span class="val" id="place_scale_v"></span></div>
+        <div class="actions" style="margin-top:10px">
+          <button class="btn" id="add_sig">+ Signature</button>
+          <button class="btn" id="add_text">+ Text</button>
+        </div>
+        <div class="row" style="margin-top:8px"><label>Signer</label><select id="signer_sel" style="flex:1"></select><button class="btn" id="add_signer" style="width:auto;padding:7px 10px">+</button></div>
+        <div class="row"><label>Opacity</label><input id="item_opacity" type="range" min="10" max="100" value="100"><span class="val" id="item_opacity_v"></span></div>
         <div class="row"><label>PDF page</label><input id="pdf_page" type="number" min="1" value="1" style="width:70px"><span style="color:var(--muted);font-size:11px" id="pdf_pages"></span></div>
         <button class="btn" id="clear_doc" style="margin-top:8px">Remove document</button>
-        <div style="color:var(--muted);font-size:11px;margin-top:6px">Drag the writing on the page to position it.</div>
+        <div style="color:var(--muted);font-size:11px;margin-top:6px">Click an item to select, drag to move, corner dots to resize, trash to delete. Fillable PDF fields show as inputs you can type into.</div>
       </div>
     </div>
 
@@ -227,6 +243,6 @@ jumps over the lazy dog</textarea>
   </main>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script type="module" src="./app.js?v=1"></script>
+<script type="module" src="./app.js?v=2"></script>
 </body>
 </html>
