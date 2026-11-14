@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=2";
+import { initPdfEditor } from "./pdfedit.js?v=3";
 
 const WASM_URL = "./calligrapher2.wasm";
 let wasm = null;
@@ -1294,13 +1294,19 @@ function applyTier(t) {
   window.addEventListener("resize", renderD);
   // App mode switch: "Sign & scan" (default) | "PDF editor" (Stirling-style page ops).
   const appmode = $("appmode");
-  if (appmode) appmode.querySelectorAll("button").forEach((b) => {
-    b.onclick = () => {
-      appmode.querySelectorAll("button").forEach((x) => x.classList.remove("sel"));
-      b.classList.add("sel");
-      document.body.classList.toggle("pdfmode", b.dataset.app === "pdf");
-    };
-  });
+  const setAppMode = (which) => {
+    if (!appmode) return;
+    appmode.querySelectorAll("button").forEach((x) => x.classList.toggle("sel", x.dataset.app === which));
+    document.body.classList.toggle("pdfmode", which === "pdf");
+  };
+  if (appmode) appmode.querySelectorAll("button").forEach((b) => { b.onclick = () => setAppMode(b.dataset.app); });
+  // Hook the PDF editor uses to hand a PDF to "Sign & scan" (Annotate / Sign / Edit text).
+  window.__cal2OpenInSign = async (buf) => {
+    setAppMode("sign");
+    if (!buf) return;
+    try { await loadPDF(buf); $("doc_controls").style.display = ""; docItems = []; selId = null; errEl.textContent = ""; render(); }
+    catch (e) { errEl.textContent = "Could not open that PDF: " + (e.message || e); }
+  };
   try { initPdfEditor(); } catch (e) { /* pdf-lib optional */ }
   render(false);
 })();
