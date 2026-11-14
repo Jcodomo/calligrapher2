@@ -708,10 +708,16 @@ function applyTier(t) {
   $("tier").querySelectorAll("button").forEach((b) => { b.onclick = () => applyTier(b.dataset.tier); });
   applyTier("simple");
   loadHash(); buildSwatches();
+  if (!location.hash && $("hand").value !== "r") $("seed").value = $("hand").value;
   ["speed", "legibility", "thickness", "font_px", "slant", "contrast", "spacing", "line_spacing", "tex_intensity", "blur", "sharpen", "resolution", "blemish"].forEach((id) => $(id).addEventListener("input", renderD));
   $("text").addEventListener("input", debounce(() => render(true), 160));
   $("seed").addEventListener("input", renderD);
   $("style").addEventListener("change", () => applyStyle($("style").value));
+  $("hand").addEventListener("change", () => {
+    const v = $("hand").value;
+    $("seed").value = v === "r" ? Math.floor(Math.random() * 1e9) : v;
+    render(true);
+  });
   $("paper_style").addEventListener("change", () => render());
   $("reroll").addEventListener("click", () => { $("seed").value = Math.floor(Math.random() * 1e9); render(true); });
   $("png").addEventListener("click", exportPNG);
