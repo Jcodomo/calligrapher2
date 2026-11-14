@@ -1,6 +1,6 @@
 // neural-worker.js — runs the Graves RNN off the main thread so the UI stays
 // responsive while it samples. Loads the model once, then answers sample requests.
-import { NeuralHand, offsetsToStrokes } from './neural.js';
+import { NeuralHand, offsetsToStrokes } from './neural.js?v=1';
 
 let hand = null;
 

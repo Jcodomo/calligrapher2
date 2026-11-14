@@ -47,7 +47,7 @@ let neuralWorker = null, neuralReqId = 0;
 const neuralWaiters = new Map();
 function getWorker() {
   if (neuralWorker) return neuralWorker;
-  neuralWorker = new Worker("./neural-worker.js", { type: "module" });
+  neuralWorker = new Worker("./neural-worker.js?v=1", { type: "module" });
   neuralWorker.onmessage = (e) => {
     const { id, type } = e.data;
     if (type === "status") { nStatus().textContent = e.data.msg === "loading" ? "Loading neural model (~15 MB, once)…" : ""; return; }
