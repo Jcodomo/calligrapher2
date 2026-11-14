@@ -744,6 +744,37 @@ function rdp(pts, eps) {
   return [a, b];
 }
 
+// ---- saved signatures (localStorage, max 10) ------------------------------
+
+const SIG_KEY = "cal2_sigs";
+function loadSavedSigs() { try { return JSON.parse(localStorage.getItem(SIG_KEY) || "[]"); } catch { return []; } }
+function storeSavedSigs(a) { try { localStorage.setItem(SIG_KEY, JSON.stringify(a.slice(0, 10))); } catch {} }
+function cleanSigSVG(svg) { return svg.replace(/\s*style="color:[^"]*"/, ""); }
+function renderSavedSigs() {
+  const host = $("sig_saved"); if (!host) return;
+  const list = loadSavedSigs(); host.innerHTML = "";
+  if (!list.length) { host.innerHTML = '<div style="color:var(--muted);font-size:11px">None yet — Save current, or paste a signature.</div>'; return; }
+  list.forEach((s) => {
+    const card = document.createElement("div");
+    card.title = s.name || "signature";
+    card.style.cssText = "position:relative;width:78px;height:46px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;overflow:hidden;display:flex;align-items:center;justify-content:center";
+    card.innerHTML = s.svg.replace("<svg ", '<svg style="width:92%;height:84%;color:#111" preserveAspectRatio="xMidYMid meet" ');
+    card.onclick = () => { sigSVG = s.svg; sigBox = { w: s.w, h: s.h }; toggles.usesig = true; syncToggles(); $("sig_controls").style.display = ""; render(); flash("Loaded " + (s.name || "signature") + "."); };
+    const del = document.createElement("div");
+    del.textContent = "×"; del.title = "Delete";
+    del.style.cssText = "position:absolute;top:-1px;right:1px;color:#c0392b;font-weight:700;cursor:pointer;background:rgba(255,255,255,.75);line-height:1.1;padding:0 4px;border-radius:0 0 0 6px";
+    del.onclick = (e) => { e.stopPropagation(); storeSavedSigs(loadSavedSigs().filter((x) => x.id !== s.id)); renderSavedSigs(); };
+    card.appendChild(del); host.appendChild(card);
+  });
+}
+function saveCurrentSig() {
+  if (!rawSVG) { errEl.textContent = "Nothing to save yet."; return; }
+  const list = loadSavedSigs();
+  if (list.length >= 10) { errEl.textContent = "Saved signatures full (10) — delete one first."; return; }
+  list.push({ id: Date.now() + "-" + Math.floor(Math.random() * 1e4), name: "Sig " + (list.length + 1), svg: cleanSigSVG(rawSVG), w: hwW, h: hwH });
+  storeSavedSigs(list); renderSavedSigs(); flash("Signature saved.");
+}
+
 // ---- boot ----------------------------------------------------------------
 
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
@@ -777,6 +808,8 @@ function applyTier(t) {
   $("pdf").addEventListener("click", exportPDF);
   $("svg").addEventListener("click", exportSVG);
   $("share").addEventListener("click", copyLink);
+  $("sig_save").addEventListener("click", saveCurrentSig);
+  renderSavedSigs();
   window.addEventListener("resize", renderD);
   render(false);
 })();

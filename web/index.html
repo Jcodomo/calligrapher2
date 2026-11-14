@@ -90,16 +90,21 @@ jumps over the lazy dog</textarea>
 
 
     <div class="group" data-tier="adv">
-      <h2>Signature image</h2>
-      <button class="btn" id="sig_btn">Import or paste a signature</button>
+      <h2>Signatures</h2>
+      <button class="btn" id="sig_btn">Import or paste a signature screenshot</button>
       <input class="file" id="sig_file" type="file" accept="image/*" />
+      <div style="color:var(--muted);font-size:11px;margin-top:6px">Paste a screenshot of a signature with Ctrl/Cmd+V — it's traced to a clean vector. Use only a signature you're authorized to use.</div>
       <div id="sig_controls" style="display:none">
         <div class="switch"><div><div class="t">Use this signature</div><div class="d">Show the traced signature instead of typed text.</div></div><div class="sw-toggle" data-k="usesig"><i></i></div></div>
         <div class="row"><label>Threshold</label><input id="sig_threshold" type="range" min="20" max="240" value="150"><span class="val" id="sig_threshold_v"></span></div>
         <button class="btn" id="sig_match">Match style for typing</button>
         <button class="btn" id="sig_clear" style="margin-top:8px">Remove signature</button>
-        <div style="color:var(--muted);font-size:11px;margin-top:6px">Paste with Ctrl/Cmd+V. Use only a signature you're authorized to use.</div>
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px">
+        <div style="color:var(--muted);font-size:11px;letter-spacing:.06em;text-transform:uppercase">Saved (max 10)</div>
+        <button class="btn" id="sig_save" style="width:auto;padding:5px 9px;font-size:12px">Save current</button>
+      </div>
+      <div id="sig_saved" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
     </div>
 
     <div class="group">
@@ -115,6 +120,12 @@ jumps over the lazy dog</textarea>
         <option value="30">Hand 7</option>
         <option value="11">Hand 8</option>
         <option value="21">Hand 9</option>
+        <option value="7">Hand 10</option>
+        <option value="42">Hand 11</option>
+        <option value="88">Hand 12</option>
+        <option value="123">Hand 13</option>
+        <option value="256">Hand 14</option>
+        <option value="314">Hand 15</option>
       </select>
       <select id="style" data-tier="adv" style="margin-top:8px">
         <option value="random">Random preset</option>
