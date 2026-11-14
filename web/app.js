@@ -39,52 +39,111 @@ function engineSVG(text, p) {
 // Both tiers use this. The geometry (per-line strokes) is cached by text+bias+seed;
 // styling (size, slant, thickness, ink, paper, animation, export) is applied cheaply
 // on top and reuses the same SVG shape the procedural engine emits.
-let NEURAL = null, neuralHand = null, neuralReady = null;
 const neuralCache = new Map();
 const nStatus = () => $("neural_status");
 
-async function ensureNeural() {
-  if (neuralHand) return neuralHand;
-  if (!neuralReady) {
-    neuralReady = (async () => {
-      nStatus().textContent = "Loading neural model (~15 MB, once)…";
-      NEURAL = await import("./neural.js");
-      neuralHand = await NEURAL.NeuralHand.load("./model/");
-      nStatus().textContent = "";
-      return neuralHand;
-    })().catch((e) => { neuralReady = null; nStatus().textContent = "Neural model unavailable: " + (e.message || e); throw e; });
-  }
-  return neuralReady;
+// Sampling runs in a Web Worker so the main thread never blocks.
+let neuralWorker = null, neuralReqId = 0;
+const neuralWaiters = new Map();
+function getWorker() {
+  if (neuralWorker) return neuralWorker;
+  neuralWorker = new Worker("./neural-worker.js", { type: "module" });
+  neuralWorker.onmessage = (e) => {
+    const { id, type } = e.data;
+    if (type === "status") { nStatus().textContent = e.data.msg === "loading" ? "Loading neural model (~15 MB, once)…" : ""; return; }
+    const w = neuralWaiters.get(id); if (!w) return;
+    neuralWaiters.delete(id);
+    if (type === "result") w.resolve(e.data.lines); else w.reject(new Error(e.data.error || "sampling failed"));
+  };
+  neuralWorker.onerror = () => { nStatus().textContent = "Neural model unavailable (worker failed)."; };
+  return neuralWorker;
+}
+function sampleLines(lines, bias, seed) {
+  return new Promise((resolve, reject) => {
+    const id = ++neuralReqId;
+    neuralWaiters.set(id, { resolve, reject });
+    getWorker().postMessage({ id, lines, bias, seed, baseUrl: "./model/" });
+  });
 }
 
 function neuralBias() { return 0.2 + (+$("legibility").value / 100) * 1.25; } // legibility -> sampling bias
+
+// smooth value noise for organic jitter / drift (mirrors the procedural engine)
+function nhash(i) { let s = (i >>> 0) || 1; s ^= s << 13; s >>>= 0; s ^= s >> 17; s ^= s << 5; s >>>= 0; return (s / 4294967296) * 2 - 1; }
+function vnoise(seed, x) {
+  const xi = Math.floor(x), xf = x - xi;
+  const a = nhash((Math.imul(xi, 374761393) ^ seed) >>> 0), b = nhash((Math.imul(xi + 1, 374761393) ^ seed) >>> 0);
+  const t = xf * xf * (3 - 2 * xf);
+  return a + (b - a) * t;
+}
+
+// Variable-width pen ribbon from a polyline (px) -> filled SVG path.
+// Nib (contrast) thins fast strokes; Inkflow adds pressure + end taper.
+function ribbonPath(pts, p, baseW) {
+  const n = pts.length; if (n < 2) return "";
+  const inkflow = toggles.inkflow ? 0.85 : 0, contrast = p.contrast || 0;
+  const sp = new Array(n); let smax = 1e-4;
+  for (let i = 0; i < n; i++) { const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)]; sp[i] = Math.hypot(b.x - a.x, b.y - a.y); if (sp[i] > smax) smax = sp[i]; }
+  const w = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const fast = Math.min(1, sp[i] / smax);
+    let wi = baseW * (1 - contrast * 0.6 * fast);
+    if (inkflow > 0) {
+      const press = 1 + inkflow * 0.40 * vnoise(p.seed ^ 0xBEEF, i * 0.25);
+      const edge = Math.min(1, Math.min(i, n - 1 - i) / Math.max(1, n * 0.14));
+      wi *= press * (1 - inkflow * 0.70 * (1 - edge));
+    }
+    w[i] = Math.max(baseW * 0.22, wi);
+  }
+  const L = [], R = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+    let dx = b.x - a.x, dy = b.y - a.y; const l = Math.hypot(dx, dy) || 1e-5; dx /= l; dy /= l;
+    const hw = w[i] * 0.5;
+    L.push({ x: pts[i].x - dy * hw, y: pts[i].y + dx * hw });
+    R.push({ x: pts[i].x + dy * hw, y: pts[i].y - dx * hw });
+  }
+  let d = "M" + L[0].x.toFixed(1) + "," + L[0].y.toFixed(1);
+  for (let i = 1; i < n; i++) d += "L" + L[i].x.toFixed(1) + "," + L[i].y.toFixed(1);
+  for (let i = n - 1; i >= 0; i--) d += "L" + R[i].x.toFixed(1) + "," + R[i].y.toFixed(1);
+  return d + "Z";
+}
 
 function buildNeuralSVG(lines, p) {
   const S = p.font_px * 0.62;
   const slant = Math.tan((p.slant_deg || 0) * Math.PI / 180);
   const lineGap = p.font_px * 1.9 * (p.line_spacing || 1.08);
   const margin = p.font_px * 0.5;
-  const sw = Math.max(1, p.weight * (p.font_px / 64) * 1.35);
+  const baseW = Math.max(1, p.weight * (p.font_px / 64) * 1.35);
+  const vary = toggles.vary ? 1 : 0, natural = toggles.natural ? 1 : 0, tilt = toggles.tilt ? 1 : 0;
   let maxW = 0;
   for (const L of lines) maxW = Math.max(maxW, L.width * S);
   const W = Math.ceil(maxW + margin * 2);
-  const H = Math.ceil(margin * 2 + lineGap * Math.max(0, lines.length - 1) + p.font_px * 2.2);
+  const H = Math.ceil(margin * 2 + lineGap * Math.max(0, lines.length - 1) + p.font_px * 2.4);
   let body = "";
-  lines.forEach((L, i) => {
-    const baseY = margin + p.font_px * 1.5 + i * lineGap;
+  lines.forEach((L, li) => {
+    const baseY = margin + p.font_px * 1.5 + li * lineGap;
     const shiftX = margin + (maxW - L.width * S) * (p.align || 0);
-    for (const stroke of L.strokes) {
-      if (stroke.length < 2) continue;
-      let d = "";
+    L.strokes.forEach((stroke, si) => {
+      if (stroke.length < 2) return;
+      const ang = tilt ? 0.12 * vnoise(p.seed ^ 0x77, li * 10 + si) : 0;
+      let cx = 0, cy = 0; for (const q of stroke) { cx += q.x; cy += q.y; } cx /= stroke.length; cy /= stroke.length;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      const pts = [];
       for (let k = 0; k < stroke.length; k++) {
-        const px = stroke[k].x * S, py = stroke[k].y * S;
-        d += (k ? "L" : "M") + (shiftX + px + py * slant).toFixed(1) + "," + (baseY - py).toFixed(1) + " ";
+        let ex = stroke[k].x, ey = stroke[k].y; // em
+        if (vary) { ex += 0.012 * vary * vnoise(p.seed ^ 0x1234, (li * 50 + si) * 3 + k * 0.4); ey += 0.012 * vary * vnoise(p.seed ^ 0x5678, (li * 50 + si) * 3 + k * 0.4 + 10); }
+        if (tilt) { const rx = ex - cx, ry = ey - cy; ex = cx + rx * ca - ry * sa; ey = cy + rx * sa + ry * ca; }
+        const px = ex * S, py = ey * S;
+        let y = baseY - py;
+        if (natural) y += natural * 0.10 * p.font_px * vnoise(p.seed ^ 0xA1, (shiftX + px) * 0.012 + li * 3);
+        pts.push({ x: shiftX + px + py * slant, y });
       }
-      body += `<path d="${d.trim()}"/>`;
-    }
+      body += `<path d="${ribbonPath(pts, p, baseW)}"/>`;
+    });
   });
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" ` +
-    `fill="none" stroke="currentColor" stroke-width="${sw.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"><g>${body}</g></svg>`;
+    `fill="currentColor" stroke="none"><g>${body}</g></svg>`;
 }
 
 let neuralPending = null;
@@ -97,19 +156,13 @@ function neuralSVG(text, p) {
     neuralPending = key;
     (async () => {
       try {
-        const hand = await ensureNeural();
         nStatus().textContent = "Writing…";
         const lineTexts = (mode === "signature") ? [text] : text.split("\n");
-        const lines = [];
-        for (const lt of lineTexts) {
-          await new Promise((r) => setTimeout(r, 12)); // let "Writing…" paint
-          if (lt.trim() === "") { lines.push({ strokes: [], width: 0, height: 0 }); continue; }
-          lines.push(NEURAL.offsetsToStrokes(hand.sample(lt, { bias, seed })));
-        }
+        const lines = await sampleLines(lineTexts, bias, seed);
         neuralCache.set(key, lines);
         nStatus().textContent = "";
         if (neuralPending === key) { neuralPending = null; render(false); }
-      } catch (_) { neuralPending = null; }
+      } catch (e) { neuralPending = null; nStatus().textContent = "Neural model unavailable: " + (e.message || e); }
     })();
   }
   const W = Math.max(480, p.width || 800);
