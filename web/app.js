@@ -203,7 +203,7 @@ const STYLES = {
 };
 
 let ink = INKS[0], paper = PAPERS[0], texIdx = 1, align = 0, mode = "writing";
-const toggles = { vary: true, natural: true, inkflow: true, tilt: false, cursivecaps: false, usesig: false, transparent: false, scanned: false };
+const toggles = { vary: true, natural: true, inkflow: true, tilt: false, cursivecaps: false, usesig: false, transparent: false, scanned: false, border: false };
 
 // Imported-signature state (traced from an uploaded/pasted image).
 let sigImg = null, sigSVG = "", sigBox = { w: 0, h: 0 }, sigMetrics = null;
@@ -219,6 +219,20 @@ let activeSigner = "s1";
 let itemSeq = 1;
 let pdfFields = [];         // fillable-PDF form fields for the current page
 let fieldValues = {};       // field name -> value
+
+// Fonts for text/date items. "DocuSign" is a slanted script like DocuSign's stamp.
+const DOC_FONTS = [
+  { name: "DocuSign", css: "'Dancing Script', 'Segoe Script', cursive" },
+  { name: "Script", css: "'Great Vibes', cursive" },
+  { name: "Handwritten", css: "'Caveat', cursive" },
+  { name: "Marker", css: "'Homemade Apple', cursive" },
+  { name: "Serif", css: "Georgia, 'Times New Roman', serif" },
+  { name: "Sans", css: "system-ui, Arial, sans-serif" },
+  { name: "Mono", css: "'Courier New', ui-monospace, monospace" },
+];
+// New-hand history (revert to the previous seed) + saved hands (localStorage).
+let handHistory = [];
+const HAND_KEY = "cal2_hands";
 
 // ---- swatches / toggles --------------------------------------------------
 
@@ -263,11 +277,14 @@ function textureURL(i, intensity) {
     `<rect width='100%' height='100%' filter='url(#n)'/></svg>`;
   return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
 }
+const REALISM_KEYS = ["vary", "natural", "inkflow", "tilt", "cursivecaps"];
 document.querySelectorAll(".sw-toggle").forEach((el) => {
   el.onclick = () => {
     const k = el.dataset.k; toggles[k] = !toggles[k]; el.classList.toggle("on", toggles[k]);
     if (k === "tilt" && toggles.tilt) { toggles.natural = false; syncToggles(); }
     render();
+    // Realism live edit: refresh a placed signature so the change shows at once.
+    if (REALISM_KEYS.includes(k)) { const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it); }
   };
 });
 function syncToggles() { document.querySelectorAll(".sw-toggle").forEach((el) => el.classList.toggle("on", !!toggles[el.dataset.k])); }
@@ -295,6 +312,8 @@ const LABELS = {
   line_spacing: v => (v / 100).toFixed(2), tex_intensity: v => v + "%", blemish: v => v + "%",
   blur: v => v / 10 + "px", sharpen: v => v + "%", resolution: v => v + "×", place_scale: v => v + "%",
   sig_threshold: v => v,
+  scan_rotate: v => (v / 10).toFixed(1) + "°", scan_rotvar: v => "±" + (v / 10).toFixed(1) + "°",
+  scan_bright: v => v + "%", scan_contrast: v => v + "%", scan_noise: v => v + "%", scan_yellow: v => v + "%",
 };
 function refreshLabels() { for (const id in LABELS) { const el = $(id + "_v"); if (el && $(id)) el.textContent = LABELS[id](+$(id).value); } }
 
@@ -333,12 +352,39 @@ function addFlourish(svg) {
   return svg.replace("</g></svg>", paths + "</g></svg>");
 }
 
+// Read the Scan & finish controls into one object (shared by preview + export).
+function scanParams() {
+  return {
+    on: toggles.scanned,
+    cspace: $("cspace") ? $("cspace").value : "color",
+    border: !!toggles.border,
+    rotate: (+($("scan_rotate") || {}).value || 0) / 10,
+    rotvar: (+($("scan_rotvar") || {}).value || 0) / 10,
+    bright: (+($("scan_bright") || {}).value || 100) / 100,
+    contrast: (+($("scan_contrast") || {}).value || 100) / 100,
+    noise: (+($("scan_noise") || {}).value || 0),
+    yellow: (+($("scan_yellow") || {}).value || 0) / 100,
+    blem: +$("blemish").value / 100,
+    blur: +$("blur").value / 10,
+    sharp: +$("sharpen").value / 100,
+  };
+}
+// A fixed per-session skew so live rotation preview matches the exported random tilt.
+let scanSkew = (Math.random() * 2 - 1);
+function scanAngle(sp) { return sp.rotate + sp.rotvar * scanSkew; }
+function scanTransform() { const sp = scanParams(); return sp.on ? `rotate(${scanAngle(sp).toFixed(2)}deg)` : "none"; }
+
 function previewFilter() {
-  const blur = +$("blur").value / 10, sh = +$("sharpen").value / 100;
+  const sp = scanParams();
   const parts = [];
-  if (blur > 0) parts.push(`blur(${blur}px)`);
-  if (sh > 0) parts.push(`contrast(${(1 + sh * 0.6).toFixed(2)}) saturate(${(1 + sh * 0.1).toFixed(2)})`);
-  if (toggles.scanned) parts.push("contrast(1.05) brightness(0.99)");
+  if (sp.blur > 0) parts.push(`blur(${sp.blur}px)`);
+  if (sp.sharp > 0) parts.push(`contrast(${(1 + sp.sharp * 0.6).toFixed(2)}) saturate(${(1 + sp.sharp * 0.1).toFixed(2)})`);
+  if (sp.on) {
+    if (sp.cspace === "gray") parts.push("grayscale(1)");
+    else if (sp.cspace === "bw") parts.push("grayscale(1) contrast(2.2) brightness(1.05)");
+    parts.push(`brightness(${sp.bright.toFixed(3)}) contrast(${sp.contrast.toFixed(3)})`);
+    if (sp.yellow > 0) parts.push(`sepia(${(sp.yellow * 0.7).toFixed(3)})`);
+  }
   return parts.join(" ");
 }
 
@@ -370,6 +416,7 @@ function paperCSS() {
 function render(animate = false) {
   refreshLabels();
   try {
+    updateFab();
     if (doc) return renderDoc();
     sheet.className = "sheet";
     const stage = sheet.parentElement.getBoundingClientRect();
@@ -379,6 +426,8 @@ function render(animate = false) {
     const pc = paperCSS();
     sheet.style.background = pc.bg; sheet.style.backgroundImage = pc.img; sheet.style.backgroundSize = pc.size;
     sheet.style.filter = previewFilter();
+    sheet.style.transform = scanTransform();
+    sheet.style.outline = "";
     sheet.style.width = ""; sheet.style.height = "";
     errEl.textContent = ""; syncHash();
   } catch (e) { errEl.textContent = "Render error: " + (e.message || e); }
@@ -394,22 +443,48 @@ function currentSignature() {
   const svg = makeHandwriting(Math.round((doc ? doc.w : 800) * 0.5));    // generated handwriting
   return { svg: cleanSigSVG(svg), w: hwW, h: hwH };
 }
+// Async: sample a fresh signature SVG for text/params (awaits the worker).
+async function generateSig(text, p) {
+  const bias = neuralBias();
+  const lineTexts = (mode === "signature") ? [text] : String(text).split("\n");
+  const lines = await sampleLines(lineTexts, bias, p.seed);
+  neuralCache.set(text + "|" + bias.toFixed(3) + "|" + p.seed, lines);
+  let svg = buildNeuralSVG(lines, p);
+  if (mode === "signature") svg = addFlourish(svg);
+  svg = svg.replace("<svg ", `<svg style="color:${ink}" `);
+  const w = +(svg.match(/width="(\d+)"/) || [])[1] || 1, h = +(svg.match(/height="(\d+)"/) || [])[1] || 1;
+  return { svg: cleanSigSVG(svg), w, h };
+}
 function addSigItem() {
   const g = currentSignature();
   if (!g.w) { errEl.textContent = "Type some text or import a signature first."; return; }
-  docItems.push({ id: "it" + itemSeq++, type: "sig", nx: 0.08, ny: 0.08, nw: 0.3, ar: g.h / g.w, opacity: 1, signer: activeSigner, svg: g.svg });
+  const traced = !!(sigSVG && toggles.usesig);
+  docItems.push({ id: "it" + itemSeq++, type: "sig", nx: 0.08, ny: 0.08, nw: 0.3, ar: g.h / g.w, opacity: 1, signer: activeSigner, svg: g.svg, dynamic: !traced, text: textForEngine(), seed: +$("seed").value });
   selId = docItems[docItems.length - 1].id; render();
 }
 function addTextItem() {
-  docItems.push({ id: "it" + itemSeq++, type: "text", nx: 0.1, ny: 0.1, nw: 0.26, ar: 0.16, opacity: 1, signer: activeSigner, text: "Type here" });
+  docItems.push({ id: "it" + itemSeq++, type: "text", nx: 0.1, ny: 0.1, nw: 0.26, ar: 0.16, opacity: 1, signer: activeSigner, text: "Type here", font: 5 });
   selId = docItems[docItems.length - 1].id; render();
-  const it = docItems[docItems.length - 1];
-  setTimeout(() => editText(it), 30);
+}
+function addDateItem() {
+  const str = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  docItems.push({ id: "it" + itemSeq++, type: "text", nx: 0.1, ny: 0.1, nw: 0.3, ar: 0.12, opacity: 1, signer: activeSigner, text: str, font: 0 });
+  selId = docItems[docItems.length - 1].id; render();
 }
 function deleteItem(id) { docItems = docItems.filter((i) => i.id !== id); if (selId === id) selId = null; render(); }
 function editText(it) {
   const v = prompt("Text:", it.text); if (v != null) { it.text = v; render(); }
 }
+// Re-roll / refresh a placed dynamic signature using the current realism controls.
+async function regenItem(it, newSeed) {
+  if (!it || it.type !== "sig" || !it.dynamic) return;
+  if (newSeed != null) it.seed = newSeed;
+  const p = params(Math.round((doc ? doc.w : 800) * 0.5));
+  p.seed = it.seed;
+  try { const g = await generateSig(it.text, p); it.svg = g.svg; it.ar = g.h / g.w; render(); flash("Updated signature."); }
+  catch (e) { errEl.textContent = "Could not re-roll: " + (e.message || e); }
+}
+function selectedItem() { return docItems.find((i) => i.id === selId); }
 
 function renderDoc() {
   sheet.className = "sheet doc";
@@ -420,11 +495,16 @@ function renderDoc() {
   sheet.style.width = dispW + "px"; sheet.style.height = dispH + "px";
   sheet.style.background = "transparent"; sheet.style.backgroundImage = "";
   sheet.style.filter = previewFilter(); // scanned look / blur / sharpness on the whole page
+  sheet.style.transform = scanTransform();
+  const spB = scanParams();
+  sheet.style.outline = (spB.on && spB.border) ? "6px solid rgba(22,19,14,0.9)" : "";
+  sheet.style.outlineOffset = "-3px";
   const ov = $("overlay");
   ov.style.cssText = `position:absolute;left:0;top:0;width:${dispW}px;height:${dispH}px`;
   ov.onpointerdown = (e) => { if (e.target === ov) { selId = null; render(); } };
   renderFields(ov, dispW, dispH);
   docItems.forEach((it) => ov.appendChild(itemEl(it, dispW, dispH)));
+  syncItemUI();
   errEl.textContent = ""; syncHash();
 }
 
@@ -434,10 +514,13 @@ function itemEl(it, dispW, dispH) {
   el.className = "ditem" + (it.id === selId ? " sel" : "");
   el.style.cssText = `left:${it.nx * dispW}px;top:${it.ny * dispH}px;width:${w}px;height:${h}px;opacity:${it.opacity};color:${signerColor(it.signer)}`;
   if (it.type === "sig") el.innerHTML = it.svg.replace("<svg ", '<svg preserveAspectRatio="none" style="width:100%;height:100%;display:block;pointer-events:none" ');
-  else el.innerHTML = `<div class="dtext" style="font-size:${h * 0.7}px">${escapeHTML(it.text)}</div>`;
+  else {
+    const fam = DOC_FONTS[it.font || 0].css;
+    el.innerHTML = `<div class="dtext" style="font-size:${h * 0.7}px;font-family:${fam}">${escapeHTML(it.text)}</div>`;
+  }
   el.onpointerdown = (e) => {
-    if (e.target.classList.contains("dhandle") || e.target.closest(".dtrash")) return;
-    e.preventDefault(); selId = it.id; el.classList.add("sel"); startMove(it, el, e, dispW, dispH);
+    if (e.target.classList.contains("dhandle") || e.target.closest(".dtrash") || e.target.isContentEditable) return;
+    e.preventDefault(); selId = it.id; el.classList.add("sel"); syncItemUI(); startMove(it, el, e, dispW, dispH);
   };
   if (it.id === selId) {
     ["nw", "ne", "sw", "se"].forEach((corner) => {
@@ -448,9 +531,30 @@ function itemEl(it, dispW, dispH) {
     const tr = document.createElement("div"); tr.className = "dtrash"; tr.title = "Delete"; tr.innerHTML = TRASH();
     tr.onpointerdown = (e) => { e.preventDefault(); e.stopPropagation(); deleteItem(it.id); };
     el.appendChild(tr);
-    if (it.type === "text") el.ondblclick = () => editText(it);
+    if (it.type === "text") el.ondblclick = () => startInlineEdit(it, el);
   }
   return el;
+}
+
+// Live inline text editing: edits land in it.text as you type (no modal).
+function startInlineEdit(it, el) {
+  const td = el.querySelector(".dtext"); if (!td) return;
+  td.setAttribute("contenteditable", "true");
+  td.style.pointerEvents = "auto";
+  td.focus();
+  const sel = window.getSelection(); sel.removeAllRanges();
+  const r = document.createRange(); r.selectNodeContents(td); sel.addRange(r);
+  td.oninput = () => { it.text = td.textContent; };
+  td.onblur = () => { it.text = td.textContent; td.removeAttribute("contenteditable"); render(); };
+  td.onkeydown = (ev) => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); td.blur(); } };
+}
+// Keep the Font row + Opacity in sync with the selected item.
+function syncItemUI() {
+  const it = selectedItem();
+  const row = $("item_font_row");
+  if (row) row.style.display = it && it.type === "text" ? "" : "none";
+  if (it && it.type === "text" && $("item_font")) $("item_font").value = String(it.font || 0);
+  if (it && $("item_opacity")) { $("item_opacity").value = Math.round((it.opacity ?? 1) * 100); $("item_opacity_v").textContent = $("item_opacity").value + "%"; }
 }
 
 function startMove(it, el, e, dispW, dispH) {
@@ -469,8 +573,9 @@ function startResize(it, el, corner, e, dispW, dispH) {
   const sx = e.clientX, ow = it.nw, onx = it.nx, ony = it.ny;
   const west = corner.includes("w"), north = corner.includes("n");
   const owPx = ow * dispW, ohPx = ow * dispW * it.ar;
+  const GAIN = 1.8; // resize handle moves size quicker than the cursor
   const mv = (ev) => {
-    let dw = (ev.clientX - sx) / dispW; if (west) dw = -dw;
+    let dw = GAIN * (ev.clientX - sx) / dispW; if (west) dw = -dw;
     const nw = Math.max(0.04, ow + dw);
     const nwPx = nw * dispW, nhPx = nw * dispW * it.ar;
     it.nw = nw;
@@ -562,8 +667,14 @@ async function renderPdfPage(n) {
 $("pdf_page").onchange = async () => { if (pdfDocCache) { await renderPdfPage(+$("pdf_page").value); render(); } };
 $("add_sig").onclick = addSigItem;
 $("add_text").onclick = addTextItem;
+$("add_date").onclick = addDateItem;
+(function buildFontSelect() {
+  const sel = $("item_font"); if (!sel) return;
+  DOC_FONTS.forEach((f, i) => { const o = document.createElement("option"); o.value = String(i); o.textContent = f.name; sel.appendChild(o); });
+  sel.onchange = () => { const it = selectedItem(); if (it && it.type === "text") { it.font = +sel.value; render(); } };
+})();
 $("item_opacity").oninput = () => {
-  const it = docItems.find((i) => i.id === selId);
+  const it = selectedItem();
   $("item_opacity_v").textContent = $("item_opacity").value + "%";
   if (it) { it.opacity = +$("item_opacity").value / 100; render(); }
 };
@@ -593,14 +704,52 @@ function svgToImage(svg) {
     img.onerror = rej; img.src = url;
   });
 }
-// Apply blur/sharpen/scanned/blemish to a finished canvas.
+// Apply blur/sharpen + the full scanned look to a finished canvas.
+// May return a new (rotated) canvas, so always use the return value.
 function finishCanvas(c) {
   const ctx = c.getContext("2d");
-  const blur = +$("blur").value / 10, sh = +$("sharpen").value / 100, blem = +$("blemish").value / 100;
-  if (blur > 0) { const t = document.createElement("canvas"); t.width = c.width; t.height = c.height; const tx = t.getContext("2d"); tx.drawImage(c, 0, 0); ctx.clearRect(0, 0, c.width, c.height); ctx.filter = `blur(${blur * (c.width / 800)}px)`; ctx.drawImage(t, 0, 0); ctx.filter = "none"; }
-  if (sh > 0) unsharp(ctx, c.width, c.height, sh);
-  if (toggles.scanned) scanEffects(ctx, c.width, c.height, blem);
+  const sp = scanParams();
+  if (sp.blur > 0) { const t = document.createElement("canvas"); t.width = c.width; t.height = c.height; t.getContext("2d").drawImage(c, 0, 0); ctx.clearRect(0, 0, c.width, c.height); ctx.filter = `blur(${sp.blur * (c.width / 800)}px)`; ctx.drawImage(t, 0, 0); ctx.filter = "none"; }
+  if (sp.sharp > 0) unsharp(ctx, c.width, c.height, sp.sharp);
+  if (!sp.on) return c;
+
+  // colorspace + brightness + contrast via a filtered redraw
+  const filt = [];
+  if (sp.cspace === "gray") filt.push("grayscale(1)");
+  else if (sp.cspace === "bw") filt.push("grayscale(1)", "contrast(2.2)", "brightness(1.05)");
+  filt.push(`brightness(${sp.bright.toFixed(3)})`, `contrast(${sp.contrast.toFixed(3)})`);
+  if (sp.yellow > 0) filt.push(`sepia(${(sp.yellow * 0.7).toFixed(3)})`);
+  const t = document.createElement("canvas"); t.width = c.width; t.height = c.height; t.getContext("2d").drawImage(c, 0, 0);
+  ctx.clearRect(0, 0, c.width, c.height); ctx.filter = filt.join(" "); ctx.drawImage(t, 0, 0); ctx.filter = "none";
+
+  if (sp.yellow > 0) { ctx.save(); ctx.globalCompositeOperation = "multiply"; ctx.fillStyle = `rgba(255,244,196,${(sp.yellow * 0.5).toFixed(3)})`; ctx.fillRect(0, 0, c.width, c.height); ctx.restore(); }
+  if (sp.noise > 0) scanNoise(ctx, c.width, c.height, sp.noise);
+  scanBlemish(ctx, c.width, c.height, sp.blem);
+  if (sp.border) { ctx.save(); const bw = Math.max(4, c.width * 0.006); ctx.strokeStyle = "rgba(22,19,14,0.9)"; ctx.lineWidth = bw; ctx.strokeRect(bw / 2, bw / 2, c.width - bw, c.height - bw); ctx.restore(); }
+
+  const ang = scanAngle(sp) * Math.PI / 180;
+  if (Math.abs(ang) > 0.0005) return rotateCanvas(c, ang);
   return c;
+}
+// Salt-and-pepper scanner grain.
+function scanNoise(ctx, w, h, amount) {
+  const img = ctx.getImageData(0, 0, w, h), d = img.data;
+  const count = Math.floor(w * h * Math.min(amount / 240, 0.45) * 0.08);
+  for (let i = 0; i < count; i++) {
+    const idx = Math.floor(Math.random() * w * h) * 4, v = Math.random() > 0.5 ? 255 : 0;
+    d[idx] = v; d[idx + 1] = v; d[idx + 2] = v;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+// Rotate a canvas by `ang` radians, expanding the frame and filling white.
+function rotateCanvas(c, ang) {
+  const w = c.width, h = c.height, cos = Math.abs(Math.cos(ang)), sin = Math.abs(Math.sin(ang));
+  const nw = Math.ceil(w * cos + h * sin), nh = Math.ceil(w * sin + h * cos);
+  const o = document.createElement("canvas"); o.width = nw; o.height = nh;
+  const ox = o.getContext("2d");
+  ox.fillStyle = "#fff"; ox.fillRect(0, 0, nw, nh);
+  ox.translate(nw / 2, nh / 2); ox.rotate(ang); ox.drawImage(c, -w / 2, -h / 2);
+  return o;
 }
 function unsharp(ctx, w, h, amt) {
   const src = ctx.getImageData(0, 0, w, h), out = ctx.createImageData(w, h);
@@ -615,7 +764,7 @@ function unsharp(ctx, w, h, amt) {
   }
   ctx.putImageData(out, 0, 0);
 }
-function scanEffects(ctx, w, h, blem) {
+function scanBlemish(ctx, w, h, blem) {
   // vignette
   const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.75);
   g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, `rgba(20,16,10,${0.12 + blem * 0.12})`);
@@ -631,6 +780,7 @@ function scanEffects(ctx, w, h, blem) {
 
 async function composeCanvas() {
   const res = +$("resolution").value;
+  try { await document.fonts.ready; } catch (_) {}
   if (doc) {
     const W = Math.round(doc.w * res), H = Math.round(doc.h * res);
     const c = document.createElement("canvas"); c.width = W; c.height = H;
@@ -652,7 +802,7 @@ async function composeCanvas() {
         const img = await svgToImage(it.svg.replace("<svg ", `<svg style="color:${signerColor(it.signer)}" `));
         ctx.drawImage(img, x, y, w, h);
       } else {
-        ctx.fillStyle = signerColor(it.signer); ctx.font = `${h * 0.7}px system-ui, sans-serif`; ctx.textBaseline = "middle";
+        ctx.fillStyle = signerColor(it.signer); ctx.font = `${h * 0.7}px ${DOC_FONTS[it.font || 0].css}`; ctx.textBaseline = "middle";
         ctx.fillText(it.text, x, y + h / 2);
       }
     }
@@ -921,6 +1071,68 @@ function saveCurrentSig() {
   storeSavedSigs(list); renderSavedSigs(); flash("Signature saved.");
 }
 
+// ---- hands: new / last / saved --------------------------------------------
+
+// New hand: if a placed signature is selected, re-roll only that one; otherwise
+// push the current seed to history and roll a new global seed.
+function newHand() {
+  const it = selectedItem();
+  if (it && it.type === "sig" && it.dynamic) { regenItem(it, Math.floor(Math.random() * 1e9)); return; }
+  handHistory.push(+$("seed").value);
+  $("seed").value = Math.floor(Math.random() * 1e9);
+  if ($("hand")) $("hand").value = "r";
+  render(true);
+}
+function lastHand() {
+  const prev = handHistory.pop();
+  if (prev == null) { flash("No previous hand to revert to."); return; }
+  $("seed").value = prev;
+  const it = selectedItem();
+  if (it && it.type === "sig" && it.dynamic) { regenItem(it, prev); return; }
+  render(true);
+}
+function loadSavedHands() { try { return JSON.parse(localStorage.getItem(HAND_KEY) || "[]"); } catch { return []; } }
+function storeSavedHands(a) { try { localStorage.setItem(HAND_KEY, JSON.stringify(a.slice(0, 12))); } catch {} }
+function renderSavedHands() {
+  const host = $("saved_hands"); if (!host) return;
+  const list = loadSavedHands(); host.innerHTML = "";
+  if (!list.length) { host.innerHTML = '<div style="color:var(--muted);font-size:11px">No saved hands yet — ★ Save hand to keep the current seed.</div>'; return; }
+  list.forEach((s) => {
+    const chip = document.createElement("span"); chip.className = "savedhand"; chip.title = "Seed " + s.seed;
+    const lbl = document.createElement("span"); lbl.textContent = s.name; chip.appendChild(lbl);
+    chip.onclick = () => { handHistory.push(+$("seed").value); $("seed").value = s.seed; const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it, s.seed); else render(true); flash("Loaded " + s.name + "."); };
+    const x = document.createElement("span"); x.className = "x"; x.textContent = "×"; x.title = "Delete";
+    x.onclick = (e) => { e.stopPropagation(); storeSavedHands(loadSavedHands().filter((h) => h.id !== s.id)); renderSavedHands(); };
+    chip.appendChild(x); host.appendChild(chip);
+  });
+}
+function saveHand() {
+  const list = loadSavedHands();
+  if (list.length >= 12) { flash("Saved hands full (12) — delete one first."); return; }
+  const name = prompt("Name this hand:", "Hand " + (list.length + 1)); if (!name) return;
+  list.push({ id: Date.now() + "-" + Math.floor(Math.random() * 1e4), name, seed: +$("seed").value });
+  storeSavedHands(list); renderSavedHands(); flash("Hand saved.");
+}
+
+// ---- on-canvas quick add --------------------------------------------------
+function buildAddFab() {
+  const stage = document.querySelector(".stage"); if (!stage || $("addfab")) return;
+  const fab = document.createElement("div"); fab.id = "addfab"; fab.style.display = "none";
+  fab.innerHTML =
+    '<div class="fabmenu">' +
+    '<button class="btn" data-add="sig">+ Signature</button>' +
+    '<button class="btn" data-add="text">+ Writing</button>' +
+    '<button class="btn" data-add="date">+ Date</button>' +
+    '</div><button class="fabbtn" title="Add to page">+</button>';
+  fab.querySelector(".fabbtn").onclick = () => fab.classList.toggle("open");
+  fab.querySelectorAll("[data-add]").forEach((b) => b.onclick = () => {
+    fab.classList.remove("open");
+    const a = b.dataset.add; if (a === "sig") addSigItem(); else if (a === "text") addTextItem(); else addDateItem();
+  });
+  stage.appendChild(fab);
+}
+function updateFab() { const f = $("addfab"); if (f) { f.style.display = doc ? "" : "none"; if (!doc) f.classList.remove("open"); } }
+
 // ---- boot ----------------------------------------------------------------
 
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
@@ -939,17 +1151,40 @@ function applyTier(t) {
   applyTier("simple");
   loadHash(); buildSwatches();
   if (!location.hash && $("hand").value !== "r") $("seed").value = $("hand").value;
-  ["speed", "legibility", "thickness", "font_px", "slant", "contrast", "spacing", "line_spacing", "tex_intensity", "blur", "sharpen", "resolution", "blemish"].forEach((id) => $(id).addEventListener("input", renderD));
+  ["speed", "legibility", "thickness", "font_px", "slant", "contrast", "spacing", "line_spacing", "tex_intensity",
+   "blur", "sharpen", "resolution", "blemish", "scan_rotate", "scan_rotvar", "scan_bright", "scan_contrast", "scan_noise", "scan_yellow"]
+    .forEach((id) => { const el = $(id); if (el) el.addEventListener("input", renderD); });
+  if ($("cspace")) $("cspace").addEventListener("change", renderD);
+  // Handwriting controls: refresh a selected placed signature live on release.
+  const HW_KEYS = ["legibility", "thickness", "slant", "contrast", "spacing", "line_spacing", "font_px"];
+  HW_KEYS.forEach((id) => { const el = $(id); if (el) el.addEventListener("change", () => { const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it); }); });
   $("text").addEventListener("input", debounce(() => render(true), 160));
   $("seed").addEventListener("input", renderD);
   $("style").addEventListener("change", () => applyStyle($("style").value));
   $("hand").addEventListener("change", () => {
     const v = $("hand").value;
+    handHistory.push(+$("seed").value);
     $("seed").value = v === "r" ? Math.floor(Math.random() * 1e9) : v;
-    render(true);
+    const it = selectedItem();
+    if (it && it.type === "sig" && it.dynamic) regenItem(it, +$("seed").value); else render(true);
   });
   $("paper_style").addEventListener("change", () => render());
-  $("reroll").addEventListener("click", () => { $("seed").value = Math.floor(Math.random() * 1e9); render(true); });
+  $("reroll").addEventListener("click", newHand);
+  $("last_hand").addEventListener("click", lastHand);
+  $("save_hand").addEventListener("click", saveHand);
+  renderSavedHands();
+  // On-canvas quick-add button (signature / writing / date).
+  buildAddFab();
+  // Scroll the controls panel even when the pointer is over the preview.
+  const panelEl = document.querySelector(".panel"), stageEl = document.querySelector(".stage");
+  if (stageEl && panelEl) stageEl.addEventListener("wheel", (e) => {
+    // Let the preview scroll itself only while it still can in this direction;
+    // otherwise forward the wheel to the controls panel.
+    const stageRoom = stageEl.scrollHeight - stageEl.clientHeight > 4;
+    const stageCanScroll = stageRoom && ((e.deltaY > 0 && stageEl.scrollTop + stageEl.clientHeight < stageEl.scrollHeight - 1) || (e.deltaY < 0 && stageEl.scrollTop > 1));
+    if (stageCanScroll) return;
+    if (panelEl.scrollHeight - panelEl.clientHeight > 4) { panelEl.scrollTop += e.deltaY; e.preventDefault(); }
+  }, { passive: false });
   $("png").addEventListener("click", exportPNG);
   $("pdf").addEventListener("click", exportPDF);
   $("svg").addEventListener("click", exportSVG);
