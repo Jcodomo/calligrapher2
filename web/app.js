@@ -216,6 +216,10 @@ let pdfDocCache = null;    // loaded pdfjs document
 // Document editor: a list of movable/resizable items (signatures + text) on the page.
 let docItems = [];          // {id,type,nx,ny,nw,ar,opacity,signer,svg,w,h,text}
 let selId = null;
+// Freehand / shape annotations drawn on the page. Coords are normalized to the
+// page (0..1); `size` is normalized to page width so it scales at any resolution.
+let docDraws = [];          // {id,kind:'pen'|'highlight'|'rect'|'line'|'arrow',color,size,pts?,x0,y0,x1,y1}
+let drawTool = null, drawColor = "#e23b3b", drawSize = 3, drawSeq = 1;
 let signers = [{ id: "s1", name: "Signer 1", color: "#1b1b1f" }];
 let activeSigner = "s1";
 let itemSeq = 1;
@@ -544,7 +548,12 @@ function renderDoc() {
   sheet.style.outlineOffset = "-3px";
   const ov = $("overlay");
   ov.style.cssText = `position:absolute;left:0;top:0;width:${dispW}px;height:${dispH}px`;
-  ov.onpointerdown = (e) => { if (e.target === ov) { selId = null; render(); } };
+  ov.classList.toggle("drawon", !!drawTool);
+  ov.onpointerdown = (e) => {
+    if (drawTool) { startDraw(e, ov, dispW, dispH); return; }
+    if (e.target === ov) { selId = null; render(); }
+  };
+  renderDraws(ov, dispW, dispH);   // annotation layer, behind the items
   renderFields(ov, dispW, dispH);
   docItems.forEach((it) => ov.appendChild(itemEl(it, dispW, dispH)));
   syncItemUI();
@@ -560,8 +569,13 @@ function itemEl(it, dispW, dispH) {
   if (it.type === "sig") el.innerHTML = it.svg.replace("<svg ", '<svg preserveAspectRatio="none" style="width:100%;height:100%;display:block;pointer-events:none" ');
   else {
     const fam = DOC_FONTS[it.font || 0].css;
-    const extra = it.isMark ? "justify-content:center;font-weight:700;" : "";
-    el.innerHTML = `<div class="dtext" style="${extra}font-size:${h * 0.7}px;font-family:${fam}">${escapeHTML(it.text)}</div>`;
+    if (it.isField) {
+      el.innerHTML = `<div class="dfieldbox"><span class="dfcap">${escapeHTML(it.label || "")}</span>` +
+        `<div class="dtext" style="font-size:${h * 0.5}px;font-family:${fam}">${escapeHTML(it.text || "")}</div></div>`;
+    } else {
+      const extra = it.isMark ? "justify-content:center;font-weight:700;" : "";
+      el.innerHTML = `<div class="dtext" style="${extra}font-size:${h * 0.7}px;font-family:${fam}">${escapeHTML(it.text)}</div>`;
+    }
   }
   el.onpointerdown = (e) => {
     if (e.target.classList.contains("dhandle") || e.target.closest(".dtrash") || e.target.isContentEditable) return;
@@ -666,6 +680,112 @@ function renderFields(ov, dispW, dispH) {
   });
 }
 
+// ---- drawing & annotation layer (pen / highlighter / shapes) ---------------
+const SVGNS = "http://www.w3.org/2000/svg";
+function arrowHead(x0, y0, x1, y1, sw) {
+  const ang = Math.atan2(y1 - y0, x1 - x0), L = Math.max(8, sw * 3.2), a = 0.5;
+  const ax = x1 - L * Math.cos(ang - a), ay = y1 - L * Math.sin(ang - a);
+  const bx = x1 - L * Math.cos(ang + a), by = y1 - L * Math.sin(ang + a);
+  return `M${ax.toFixed(1)},${ay.toFixed(1)} L${x1.toFixed(1)},${y1.toFixed(1)} L${bx.toFixed(1)},${by.toFixed(1)}`;
+}
+// One annotation -> SVG markup, sized to a W×H target (preview or export width).
+function drawMarkup(d, W, H) {
+  const sw = Math.max(0.5, d.size * W), col = d.color;
+  if (d.kind === "pen" || d.kind === "highlight") {
+    if (!d.pts || !d.pts.length) return "";
+    const p = d.pts.map((q) => [(q[0] * W).toFixed(1), (q[1] * H).toFixed(1)]);
+    const path = "M" + p[0][0] + "," + p[0][1] + p.slice(1).map((q) => "L" + q[0] + "," + q[1]).join("");
+    const hl = d.kind === "highlight" ? ' stroke-opacity="0.4" style="mix-blend-mode:multiply"' : "";
+    return `<path d="${path}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${hl}/>`;
+  }
+  const x0 = d.x0 * W, y0 = d.y0 * H, x1 = d.x1 * W, y1 = d.y1 * H;
+  if (d.kind === "rect") {
+    const x = Math.min(x0, x1), y = Math.min(y0, y1), w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" fill="none" stroke="${col}" stroke-width="${sw}"/>`;
+  }
+  if (d.kind === "line")
+    return `<line x1="${x0.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${x1.toFixed(1)}" y2="${y1.toFixed(1)}" stroke="${col}" stroke-width="${sw}" stroke-linecap="round"/>`;
+  if (d.kind === "arrow")
+    return `<line x1="${x0.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${x1.toFixed(1)}" y2="${y1.toFixed(1)}" stroke="${col}" stroke-width="${sw}" stroke-linecap="round"/>` +
+      `<path d="${arrowHead(x0, y0, x1, y1, sw)}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/>`;
+  return "";
+}
+function renderDraws(ov, dispW, dispH) {
+  if (!docDraws.length) return;
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.id = "drawlayer";
+  svg.setAttribute("width", dispW); svg.setAttribute("height", dispH);
+  svg.setAttribute("viewBox", `0 0 ${dispW} ${dispH}`);
+  svg.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;overflow:visible";
+  svg.innerHTML = docDraws.map((d) => drawMarkup(d, dispW, dispH)).join("");
+  ov.appendChild(svg);
+}
+function startDraw(e, ov, dispW, dispH) {
+  e.preventDefault();
+  try { ov.setPointerCapture(e.pointerId); } catch (_) {}
+  const r = ov.getBoundingClientRect();
+  const pt = (ev) => [(ev.clientX - r.left) / dispW, (ev.clientY - r.top) / dispH];
+  const kind = drawTool;
+  const d = { id: "dr" + drawSeq++, kind, color: drawColor, size: (kind === "highlight" ? drawSize * 5 : drawSize) / dispW };
+  // a live layer the stroke draws into until the pointer is released
+  let layer = $("drawlayer");
+  if (!layer) { renderDraws(ov, dispW, dispH); layer = $("drawlayer"); if (!layer) { layer = document.createElementNS(SVGNS, "svg"); layer.id = "drawlayer"; layer.setAttribute("viewBox", `0 0 ${dispW} ${dispH}`); layer.setAttribute("width", dispW); layer.setAttribute("height", dispH); layer.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;overflow:visible"; ov.appendChild(layer); } }
+  const g = document.createElementNS(SVGNS, "g"); layer.appendChild(g);
+  const s = pt(e);
+  if (kind === "pen" || kind === "highlight") d.pts = [s]; else { d.x0 = s[0]; d.y0 = s[1]; d.x1 = s[0]; d.y1 = s[1]; }
+  const redraw = () => { g.innerHTML = drawMarkup(d, dispW, dispH); };
+  redraw();
+  const mv = (ev) => { const p = pt(ev); if (kind === "pen" || kind === "highlight") d.pts.push(p); else { d.x1 = p[0]; d.y1 = p[1]; } redraw(); };
+  const up = () => {
+    ov.removeEventListener("pointermove", mv); ov.removeEventListener("pointerup", up);
+    const trivial = (kind === "pen" || kind === "highlight") ? (d.pts.length < 2)
+      : (Math.hypot((d.x1 - d.x0) * dispW, (d.y1 - d.y0) * dispH) < 4);
+    if (!trivial) docDraws.push(d);
+    render();
+  };
+  ov.addEventListener("pointermove", mv); ov.addEventListener("pointerup", up);
+}
+// Paint the requested annotation kinds onto the export canvas.
+function drawAnnToCanvas(ctx, W, H, kinds) {
+  for (const d of docDraws) {
+    if (!kinds.includes(d.kind)) continue;
+    ctx.save();
+    ctx.strokeStyle = d.color; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(0.5, d.size * W);
+    if (d.kind === "highlight") { ctx.globalAlpha = 0.4; ctx.globalCompositeOperation = "multiply"; }
+    if (d.kind === "pen" || d.kind === "highlight") {
+      if (d.pts && d.pts.length) { ctx.beginPath(); ctx.moveTo(d.pts[0][0] * W, d.pts[0][1] * H); for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i][0] * W, d.pts[i][1] * H); ctx.stroke(); }
+    } else {
+      const x0 = d.x0 * W, y0 = d.y0 * H, x1 = d.x1 * W, y1 = d.y1 * H;
+      if (d.kind === "rect") ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+      else if (d.kind === "line") { ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); }
+      else if (d.kind === "arrow") {
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+        const ang = Math.atan2(y1 - y0, x1 - x0), Ln = Math.max(8, ctx.lineWidth * 3.2), a = 0.5;
+        ctx.beginPath(); ctx.moveTo(x1 - Ln * Math.cos(ang - a), y1 - Ln * Math.sin(ang - a)); ctx.lineTo(x1, y1); ctx.lineTo(x1 - Ln * Math.cos(ang + a), y1 - Ln * Math.sin(ang + a)); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+}
+function roundRectPath(ctx, x, y, w, h, r) { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h); }
+
+// ---- form builder: stamp a fillable field (fill in-app, flatten on export) --
+function addFieldItem(kind) {
+  if (kind === "check") return addCheckItem();
+  if (kind === "sig") return addSigItem();
+  if (kind === "date") {
+    const now = new Date();
+    const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+    const time = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`, tz = localTzAbbr();
+    docItems.push({ id: "it" + itemSeq++, type: "text", isField: true, isDate: true, label: "Date", date, time, tz, nx: 0.1, ny: 0.1, nw: 0.36, ar: 0.12, opacity: 1, signer: activeSigner, text: fmtDocuSign(date, time, tz), font: 0 });
+  } else {
+    docItems.push({ id: "it" + itemSeq++, type: "text", isField: true, label: "Text", nx: 0.1, ny: 0.1, nw: 0.28, ar: 0.14, opacity: 1, signer: activeSigner, text: "", font: 5 });
+  }
+  selId = docItems[docItems.length - 1].id; render();
+  if (kind === "text") focusInlineEdit(selId);
+}
+
 function animateSVG(svg) {
   const w = +(svg.match(/width="(\d+)"/) || [])[1] || 800, h = +(svg.match(/height="(\d+)"/) || [])[1] || 300;
   const speed = +$("speed").value; if (speed <= 0) return svg;
@@ -687,7 +807,7 @@ $("file").onchange = async (e) => {
   try {
     if (f.type === "application/pdf") { await loadPDF(await f.arrayBuffer()); }
     else { await loadImage(URL.createObjectURL(f)); }
-    $("doc_controls").style.display = ""; docItems = []; selId = null;
+    $("doc_controls").style.display = ""; docItems = []; selId = null; docDraws = []; setDrawTool(null);
     errEl.textContent = ""; render();
   } catch (err) { errEl.textContent = "Could not open that file: " + (err.message || err); }
 };
@@ -771,7 +891,27 @@ function buildSigners() {
   signers.forEach((s) => { const o = document.createElement("option"); o.value = s.id; o.textContent = s.name; sel.appendChild(o); });
   sel.value = activeSigner;
 }
-$("clear_doc").onclick = () => { doc = null; pdfDocCache = null; docItems = []; selId = null; pdfFields = []; fieldValues = {}; $("doc_controls").style.display = "none"; $("pdf_pages").textContent = ""; render(); };
+$("clear_doc").onclick = () => { doc = null; pdfDocCache = null; docItems = []; selId = null; pdfFields = []; fieldValues = {}; docDraws = []; setDrawTool(null); $("doc_controls").style.display = "none"; $("pdf_pages").textContent = ""; render(); };
+
+// Draw-tool selection, kept in sync with the toolbar's pressed button.
+function setDrawTool(which) {
+  drawTool = which || null;
+  const seg = $("draw_seg");
+  if (seg) seg.querySelectorAll("button").forEach((b) => b.classList.toggle("sel", (b.dataset.draw || "") === (drawTool || "")));
+  if (drawTool) selId = null;
+}
+$("field_text") && ($("field_text").onclick = () => addFieldItem("text"));
+$("field_date") && ($("field_date").onclick = () => addFieldItem("date"));
+$("field_check") && ($("field_check").onclick = () => addFieldItem("check"));
+$("field_sig") && ($("field_sig").onclick = () => addFieldItem("sig"));
+(function wireDraw() {
+  const seg = $("draw_seg");
+  if (seg) seg.querySelectorAll("button").forEach((b) => b.onclick = () => { setDrawTool(b.dataset.draw || null); render(); });
+  if ($("draw_color")) $("draw_color").oninput = () => { drawColor = $("draw_color").value; };
+  if ($("draw_size")) $("draw_size").oninput = () => { drawSize = +$("draw_size").value; };
+  if ($("draw_undo")) $("draw_undo").onclick = () => { docDraws.pop(); render(); };
+  if ($("draw_clear")) $("draw_clear").onclick = () => { docDraws = []; render(); };
+})();
 
 // ---- export pipeline -----------------------------------------------------
 
@@ -865,6 +1005,7 @@ async function composeCanvas() {
     const c = document.createElement("canvas"); c.width = W; c.height = H;
     const ctx = c.getContext("2d");
     ctx.drawImage(doc.img, 0, 0, W, H);
+    drawAnnToCanvas(ctx, W, H, ["highlight"]); // highlighter sits under the ink/text
     // filled form-field values
     for (const f of pdfFields) {
       const v = fieldValues[f.name]; if (v == null || v === "" || v === false) continue;
@@ -880,6 +1021,13 @@ async function composeCanvas() {
       if (it.type === "sig") {
         const img = await svgToImage(it.svg.replace("<svg ", `<svg style="color:${signerColor(it.signer)}" `));
         ctx.drawImage(img, x, y, w, h);
+      } else if (it.isField) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(90,90,110,0.6)"; ctx.lineWidth = Math.max(1, W * 0.0012);
+        roundRectPath(ctx, x, y, w, h, Math.min(8 * res, h * 0.2)); ctx.stroke();
+        if (it.label) { ctx.fillStyle = "rgba(80,80,100,0.9)"; ctx.textBaseline = "top"; ctx.font = `${Math.min(h * 0.24, 12 * res)}px system-ui, sans-serif`; ctx.fillText(it.label, x + 5 * res, y + 3 * res); }
+        if (it.text) { ctx.fillStyle = signerColor(it.signer); ctx.textBaseline = "alphabetic"; ctx.font = `${h * 0.42}px ${DOC_FONTS[it.font || 0].css}`; ctx.fillText(it.text, x + 6 * res, y + h * 0.82); }
+        ctx.restore();
       } else {
         ctx.fillStyle = signerColor(it.signer); ctx.font = `${it.isMark ? "700 " : ""}${h * 0.7}px ${DOC_FONTS[it.font || 0].css}`; ctx.textBaseline = "middle";
         if (it.isMark) { ctx.textAlign = "center"; ctx.fillText(it.text, x + w / 2, y + h / 2); ctx.textAlign = "left"; }
@@ -887,6 +1035,7 @@ async function composeCanvas() {
       }
     }
     ctx.globalAlpha = 1;
+    drawAnnToCanvas(ctx, W, H, ["pen", "rect", "line", "arrow"]); // ink & shapes on top
     return finishCanvas(c);
   }
   // no document: handwriting on paper
@@ -1304,7 +1453,7 @@ function applyTier(t) {
   window.__cal2OpenInSign = async (buf) => {
     setAppMode("sign");
     if (!buf) return;
-    try { await loadPDF(buf); $("doc_controls").style.display = ""; docItems = []; selId = null; errEl.textContent = ""; render(); }
+    try { await loadPDF(buf); $("doc_controls").style.display = ""; docItems = []; selId = null; docDraws = []; setDrawTool(null); errEl.textContent = ""; render(); }
     catch (e) { errEl.textContent = "Could not open that PDF: " + (e.message || e); }
   };
   try { initPdfEditor(); } catch (e) { /* pdf-lib optional */ }

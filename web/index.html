@@ -79,6 +79,11 @@
   .dfield{position:absolute;background:rgba(74,144,255,.08);border:1px solid rgba(74,144,255,.55);border-radius:3px;color:#15233a;padding:0 3px;box-sizing:border-box;font-family:system-ui,sans-serif}
   .ditem .dtext[contenteditable]{outline:none;cursor:text}
   .ditem.sel{cursor:move}
+  #overlay.drawon{cursor:crosshair}
+  #overlay.drawon .ditem{pointer-events:none}
+  .dfieldbox{width:100%;height:100%;border:1px dashed rgba(90,90,110,.6);border-radius:4px;box-sizing:border-box;position:relative;background:rgba(74,144,255,.05)}
+  .dfcap{position:absolute;top:1px;left:4px;font-size:9px;line-height:1;color:rgba(80,80,100,.85);font-family:system-ui,sans-serif;pointer-events:none}
+  .dfieldbox .dtext{position:absolute;left:5px;right:5px;top:11px;bottom:2px;height:auto;white-space:nowrap}
   /* floating on-canvas add button */
   #addfab{position:absolute;right:16px;bottom:16px;z-index:6;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
   #addfab .fabmenu{display:none;flex-direction:column;gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
@@ -265,6 +270,23 @@ jumps over the lazy dog</textarea>
           <button class="btn" id="add_date">+ Date</button>
           <button class="btn" id="add_check">+ Check</button>
         </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:12px;font-weight:600;letter-spacing:.02em">FORM BUILDER</div>
+        <div class="actions" style="margin-top:6px;grid-template-columns:1fr 1fr">
+          <button class="btn" id="field_text">▭ Text field</button>
+          <button class="btn" id="field_date">▭ Date field</button>
+          <button class="btn" id="field_check">☐ Checkbox</button>
+          <button class="btn" id="field_sig">✒ Signature</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:12px;font-weight:600;letter-spacing:.02em">DRAW &amp; ANNOTATE</div>
+        <div class="seg" id="draw_seg" style="margin-top:6px;flex-wrap:wrap">
+          <button data-draw="" class="sel">Select</button>
+          <button data-draw="pen">✏ Pen</button>
+          <button data-draw="highlight">🖊 Mark</button>
+          <button data-draw="rect">▭ Box</button>
+          <button data-draw="line">／ Line</button>
+          <button data-draw="arrow">➔ Arrow</button>
+        </div>
+        <div class="row" style="margin-top:6px"><label>Ink</label><input type="color" id="draw_color" value="#e23b3b" style="width:42px;padding:2px;flex:none"><input id="draw_size" type="range" min="1" max="12" value="3" style="flex:1"><button class="btn" id="draw_undo" style="width:auto;padding:7px 10px">Undo</button><button class="btn" id="draw_clear" style="width:auto;padding:7px 10px">Clear</button></div>
         <div class="row" style="margin-top:8px"><label>Signer</label><select id="signer_sel" style="flex:1"></select><button class="btn" id="add_signer" style="width:auto;padding:7px 10px">+</button></div>
         <div class="row" id="item_font_row" style="display:none"><label>Font</label><select id="item_font" style="flex:1"></select></div>
         <div id="item_date_row" style="display:none">
@@ -341,6 +363,6 @@ jumps over the lazy dog</textarea>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=8"></script>
+<script type="module" src="./app.js?v=9"></script>
 </body>
 </html>
