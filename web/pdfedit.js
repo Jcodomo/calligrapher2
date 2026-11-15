@@ -269,6 +269,8 @@ const TOOLS = [
   { id: "translate", name: "Translate", icon: "文", color: "#2b6cff", kind: "server" },
   { id: "ocr", name: "PDF OCR", icon: "OCR", color: "#e8554e", kind: "panel" },
   { id: "sign", name: "Sign", icon: "✒", color: "#c86bff", kind: "action", run: () => openInSign() },
+  { id: "fillform", name: "Fill Form", icon: "▭", color: "#1f9d55", kind: "panel" },
+  { id: "txt2pdf", name: "Text → PDF", icon: "≡", color: "#f0a500", kind: "action", run: () => pickFiles(".txt,.md,.csv,.log,text/plain", false, (f) => txtToPdf(f[0])) },
   { id: "convert", name: "PDF Converter", icon: "⇄", color: "#e8554e", kind: "server" },
   { id: "pdfexcel", name: "PDF ↔ Excel", icon: "X", color: "#1f9d55", kind: "server" },
   { id: "delete", name: "Delete Pages", icon: "🗑", color: "#7c5cff", kind: "action", run: () => { if (!selected.size) return note("Tick pages to delete first.", true); pages = pages.filter((_, i) => !selected.has(i)); selected.clear(); renderGrid(); note("Deleted selected pages."); } },
@@ -331,6 +333,7 @@ function openTool(t) {
   else if (t.id === "ocr") openOcr();
   else if (t.id === "unlock") openUnlock();
   else if (t.id === "redact") openRedact();
+  else if (t.id === "fillform") openFillForm();
 }
 
 function openServerNote(t) {
@@ -523,6 +526,100 @@ function openRedact() {
     if (!any) return note("Draw at least one box first.", true);
     const out = await rasterizeToPdf(pages, 2, 0.92);
     await save(out, "redacted.pdf"); note("Saved redacted.pdf.");
+  });
+}
+
+// ---- PDF Form Filler (AcroForm fields) -------------------------------------
+function openFillForm() {
+  const p = panelShell("Fill Form", `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Fill the PDF's interactive form fields, then save. If it has none, use <b>Sign</b> to place text/checkmarks anywhere.</div>
+    <div id="pe_ff_fields" style="display:flex;flex-direction:column;gap:9px"></div>`);
+  withBusy("Reading form…", async () => {
+    const L = PDFLib();
+    const src = sources[0];
+    if (!src) return note("Open a PDF first.", true);
+    const doc = await L.PDFDocument.load(src.bytes, { ignoreEncryption: true });
+    const form = doc.getForm();
+    const fields = form.getFields();
+    const host = $("pe_ff_fields");
+    if (!fields.length) { host.innerHTML = '<div style="font-size:12.5px;color:var(--muted)">No interactive form fields in this PDF.</div>'; return; }
+    // The minified pdf-lib mangles class names, so classify by instanceof (with a duck-typed fallback).
+    const kind = (f) => {
+      if ((L.PDFCheckBox && f instanceof L.PDFCheckBox) || (!f.getOptions && typeof f.isChecked === "function")) return "check";
+      if ((L.PDFDropdown && f instanceof L.PDFDropdown) || (L.PDFOptionList && f instanceof L.PDFOptionList) ||
+          (L.PDFRadioGroup && f instanceof L.PDFRadioGroup) || typeof f.getOptions === "function") return "choice";
+      return "text";
+    };
+    fields.forEach((f, i) => {
+      const name = f.getName() || ("Field " + (i + 1)), k = kind(f), fid = "pe_ff_" + i;
+      const row = document.createElement("div");
+      if (k === "check") {
+        row.innerHTML = `<label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" id="${fid}" ${f.isChecked() ? "checked" : ""}> ${name}</label>`;
+      } else if (k === "choice") {
+        const opts = (f.getOptions ? f.getOptions() : []) || [];
+        const sel = (f.getSelected ? (f.getSelected()[0] || "") : "");
+        row.innerHTML = `<label style="font-size:11.5px;color:var(--muted)">${name}</label>
+          <select id="${fid}" style="width:100%"><option value=""></option>${opts.map((o) => `<option ${o === sel ? "selected" : ""}>${o}</option>`).join("")}</select>`;
+      } else {
+        const cur = (f.getText && f.getText()) || "";
+        row.innerHTML = `<label style="font-size:11.5px;color:var(--muted)">${name}</label>
+          <input type="text" id="${fid}" value="${String(cur).replace(/"/g, "&quot;")}" style="width:100%">`;
+      }
+      row.dataset.k = k; row.dataset.name = name;
+      host.appendChild(row);
+    });
+    const flat = document.createElement("label");
+    flat.style.cssText = "display:flex;gap:8px;align-items:center;font-size:12.5px;margin-top:4px";
+    flat.innerHTML = '<input type="checkbox" id="pe_ff_flat"> Flatten (lock fields so they can\'t be edited)';
+    host.appendChild(flat);
+    const go = document.createElement("button");
+    go.className = "btn"; go.textContent = "Fill → PDF"; go.style.marginTop = "6px";
+    host.appendChild(go);
+    go.onclick = () => withBusy("Filling…", async () => {
+      fields.forEach((f, i) => {
+        const el = $("pe_ff_" + i); if (!el) return;
+        const k = kind(f);
+        try {
+          if (k === "check") { el.checked ? f.check() : f.uncheck(); }
+          else if (k === "choice") { if (el.value) f.select(el.value); }
+          else if (f.setText) { f.setText(el.value || ""); }
+        } catch (_) {}
+      });
+      if ($("pe_ff_flat").checked) { try { form.flatten(); } catch (_) {} }
+      await save(doc, "filled.pdf"); note("Saved filled.pdf.");
+    });
+  });
+}
+
+// ---- Text / Markdown / CSV → PDF -------------------------------------------
+async function txtToPdf(file) {
+  await withBusy("Building PDF…", async () => {
+    const text = await file.text();
+    const L = PDFLib();
+    const out = await L.PDFDocument.create();
+    const isCsv = /\.csv$/i.test(file.name);
+    const font = await out.embedFont(isCsv ? L.StandardFonts.Courier : L.StandardFonts.Helvetica);
+    const size = 11, lh = size * 1.45, margin = 54, pw = 612, ph = 792, maxW = pw - margin * 2;
+    let pg = out.addPage([pw, ph]), y = ph - margin;
+    const newPage = () => { pg = out.addPage([pw, ph]); y = ph - margin; };
+    const drawLine = (s) => {
+      if (y < margin) newPage();
+      try { pg.drawText(s, { x: margin, y, size, font, color: L.rgb(0.1, 0.1, 0.12) }); } catch (_) {}
+      y -= lh;
+    };
+    const wrap = (line) => {
+      if (line === "") { y -= lh; return; }
+      const words = line.split(/(\s+)/); let cur = "";
+      for (const w of words) {
+        const test = cur + w;
+        if (font.widthOfTextAtSize(test.replace(/\t/g, "    "), size) > maxW && cur) { drawLine(cur.replace(/\t/g, "    ")); cur = w.trimStart(); }
+        else cur = test;
+      }
+      if (cur.trim() !== "" || cur === "") drawLine(cur.replace(/\t/g, "    "));
+    };
+    text.replace(/\r\n/g, "\n").split("\n").forEach(wrap);
+    await save(out, file.name.replace(/\.[^.]+$/, "") + ".pdf");
+    note("Saved " + file.name.replace(/\.[^.]+$/, "") + ".pdf.");
   });
 }
 

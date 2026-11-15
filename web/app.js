@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=3";
+import { initPdfEditor } from "./pdfedit.js?v=4";
 
 const WASM_URL = "./calligrapher2.wasm";
 let wasm = null;
