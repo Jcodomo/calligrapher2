@@ -346,11 +346,13 @@ jumps over the lazy dog</textarea>
     <div class="group">
       <h2>Export &amp; share</h2>
       <div class="actions">
-        <button class="btn" id="png">Download PNG</button>
-        <button class="btn" id="pdf">Download PDF</button>
-        <button class="btn" id="svg">Download SVG</button>
-        <button class="btn" id="share">Copy link</button>
+        <button class="btn" id="pdf">PDF (flattened)</button>
+        <button class="btn" id="pdf_fill">Fillable PDF</button>
+        <button class="btn" id="png">PNG image</button>
+        <button class="btn" id="svg">SVG</button>
       </div>
+      <button class="btn" id="share" style="margin-top:8px">Copy shareable link</button>
+      <div style="color:var(--muted);font-size:11px;margin-top:6px"><b>Flattened</b>: everything baked into the page (not editable). <b>Fillable PDF</b>: your Form-builder fields stay as boxes anyone can type into or tick in a PDF reader; signatures, writing and drawings are baked in.</div>
       <div class="err" id="err"></div>
     </div>
   </aside>
@@ -363,6 +365,6 @@ jumps over the lazy dog</textarea>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=9"></script>
+<script type="module" src="./app.js?v=10"></script>
 </body>
 </html>

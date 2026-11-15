@@ -213,6 +213,7 @@ let sigImg = null, sigSVG = "", sigBox = { w: 0, h: 0 }, sigMetrics = null;
 // document background + placement
 let doc = null;            // { img:Image, w, h, type }
 let pdfDocCache = null;    // loaded pdfjs document
+let docPdfBytes = null;    // original PDF bytes, kept for the fillable-PDF export (pdf-lib)
 // Document editor: a list of movable/resizable items (signatures + text) on the page.
 let docItems = [];          // {id,type,nx,ny,nw,ar,opacity,signer,svg,w,h,text}
 let selId = null;
@@ -569,7 +570,10 @@ function itemEl(it, dispW, dispH) {
   if (it.type === "sig") el.innerHTML = it.svg.replace("<svg ", '<svg preserveAspectRatio="none" style="width:100%;height:100%;display:block;pointer-events:none" ');
   else {
     const fam = DOC_FONTS[it.font || 0].css;
-    if (it.isField) {
+    if (it.isField && it.fieldKind === "check") {
+      el.innerHTML = `<div class="dfieldbox" style="display:flex;align-items:center;justify-content:center">` +
+        (it.checked ? `<span style="font-weight:700;font-size:${h * 0.8}px;line-height:1">✓</span>` : "") + `</div>`;
+    } else if (it.isField) {
       el.innerHTML = `<div class="dfieldbox"><span class="dfcap">${escapeHTML(it.label || "")}</span>` +
         `<div class="dtext" style="font-size:${h * 0.5}px;font-family:${fam}">${escapeHTML(it.text || "")}</div></div>`;
     } else {
@@ -590,7 +594,10 @@ function itemEl(it, dispW, dispH) {
     const tr = document.createElement("div"); tr.className = "dtrash"; tr.title = "Delete"; tr.innerHTML = TRASH();
     tr.onpointerdown = (e) => { e.preventDefault(); e.stopPropagation(); deleteItem(it.id); };
     el.appendChild(tr);
-    if (it.type === "text") el.ondblclick = () => startInlineEdit(it, el);
+    if (it.type === "text") {
+      if (it.isField && it.fieldKind === "check") el.ondblclick = () => { it.checked = !it.checked; render(); };
+      else el.ondblclick = () => startInlineEdit(it, el);
+    }
   }
   return el;
 }
@@ -771,19 +778,26 @@ function drawAnnToCanvas(ctx, W, H, kinds) {
 function roundRectPath(ctx, x, y, w, h, r) { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h); }
 
 // ---- form builder: stamp a fillable field (fill in-app, flatten on export) --
+// Each form-builder field is an `isField` item with a `fieldKind`; on a fillable
+// export these map to real AcroForm fields, and flatten/raster exports draw them
+// as boxes. Checkbox/signature are distinct from the standalone +Check / +Signature
+// annotation stamps so the exporter can tell fields from marks.
 function addFieldItem(kind) {
-  if (kind === "check") return addCheckItem();
-  if (kind === "sig") return addSigItem();
+  const base = { id: "it" + itemSeq++, type: "text", isField: true, opacity: 1, signer: activeSigner };
   if (kind === "date") {
     const now = new Date();
     const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
     const time = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`, tz = localTzAbbr();
-    docItems.push({ id: "it" + itemSeq++, type: "text", isField: true, isDate: true, label: "Date", date, time, tz, nx: 0.1, ny: 0.1, nw: 0.36, ar: 0.12, opacity: 1, signer: activeSigner, text: fmtDocuSign(date, time, tz), font: 0 });
+    docItems.push({ ...base, fieldKind: "date", isDate: true, label: "Date", date, time, tz, text: fmtDocuSign(date, time, tz), nx: 0.1, ny: 0.1, nw: 0.36, ar: 0.12, font: 0 });
+  } else if (kind === "check") {
+    docItems.push({ ...base, fieldKind: "check", label: "", checked: false, text: "", nx: 0.1, ny: 0.1, nw: 0.05, ar: 1, font: 5 });
+  } else if (kind === "sig") {
+    docItems.push({ ...base, fieldKind: "sig", label: "Signature", text: "", nx: 0.1, ny: 0.1, nw: 0.3, ar: 0.16, font: 0 });
   } else {
-    docItems.push({ id: "it" + itemSeq++, type: "text", isField: true, label: "Text", nx: 0.1, ny: 0.1, nw: 0.28, ar: 0.14, opacity: 1, signer: activeSigner, text: "", font: 5 });
+    docItems.push({ ...base, fieldKind: "text", label: "Text", text: "", nx: 0.1, ny: 0.1, nw: 0.28, ar: 0.14, font: 5 });
   }
   selId = docItems[docItems.length - 1].id; render();
-  if (kind === "text") focusInlineEdit(selId);
+  if (kind === "text" || kind === "sig") focusInlineEdit(selId);
 }
 
 function animateSVG(svg) {
@@ -814,12 +828,15 @@ $("file").onchange = async (e) => {
 async function loadImage(url) {
   const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
   doc = { img, w: img.naturalWidth, h: img.naturalHeight, url, type: "image" };
+  docPdfBytes = null;
   $("pdf_pages").textContent = "";
 }
 async function loadPDF(buf) {
   const pdfjsLib = window.pdfjsLib;
   pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-  pdfDocCache = await pdfjsLib.getDocument({ data: buf }).promise;
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  docPdfBytes = u8.slice();                                   // keep an untouched copy for the fillable export
+  pdfDocCache = await pdfjsLib.getDocument({ data: u8.slice() }).promise; // pdf.js detaches its buffer, so pass a copy
   $("pdf_page").max = pdfDocCache.numPages; $("pdf_pages").textContent = "of " + pdfDocCache.numPages;
   await renderPdfPage(+$("pdf_page").value || 1);
 }
@@ -891,7 +908,7 @@ function buildSigners() {
   signers.forEach((s) => { const o = document.createElement("option"); o.value = s.id; o.textContent = s.name; sel.appendChild(o); });
   sel.value = activeSigner;
 }
-$("clear_doc").onclick = () => { doc = null; pdfDocCache = null; docItems = []; selId = null; pdfFields = []; fieldValues = {}; docDraws = []; setDrawTool(null); $("doc_controls").style.display = "none"; $("pdf_pages").textContent = ""; render(); };
+$("clear_doc").onclick = () => { doc = null; pdfDocCache = null; docPdfBytes = null; docItems = []; selId = null; pdfFields = []; fieldValues = {}; docDraws = []; setDrawTool(null); $("doc_controls").style.display = "none"; $("pdf_pages").textContent = ""; render(); };
 
 // Draw-tool selection, kept in sync with the toolbar's pressed button.
 function setDrawTool(which) {
@@ -997,6 +1014,43 @@ function scanBlemish(ctx, w, h, blem) {
   }
 }
 
+// Draw one placed item (signature / text / mark / form field) onto a canvas.
+// Shared by the flattened export and the fillable export's baked-annotation layer.
+async function drawDocItemToCtx(ctx, it, W, H, res) {
+  const x = it.nx * W, y = it.ny * H, w = it.nw * W, h = it.nw * W * it.ar;
+  ctx.save(); ctx.globalAlpha = it.opacity ?? 1;
+  if (it.type === "sig") {
+    const img = await svgToImage(it.svg.replace("<svg ", `<svg style="color:${signerColor(it.signer)}" `));
+    ctx.drawImage(img, x, y, w, h);
+  } else if (it.isField) {
+    ctx.strokeStyle = "rgba(90,90,110,0.6)"; ctx.lineWidth = Math.max(1, W * 0.0012);
+    roundRectPath(ctx, x, y, w, h, Math.min(8 * res, h * 0.2)); ctx.stroke();
+    if (it.fieldKind === "check") {
+      if (it.checked) { ctx.fillStyle = signerColor(it.signer); ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = `700 ${h * 0.82}px system-ui, sans-serif`; ctx.fillText("✓", x + w / 2, y + h / 2); ctx.textAlign = "left"; }
+    } else {
+      if (it.label) { ctx.fillStyle = "rgba(80,80,100,0.9)"; ctx.textBaseline = "top"; ctx.font = `${Math.min(h * 0.24, 12 * res)}px system-ui, sans-serif`; ctx.fillText(it.label, x + 5 * res, y + 3 * res); }
+      if (it.text) { ctx.fillStyle = signerColor(it.signer); ctx.textBaseline = "alphabetic"; ctx.font = `${h * 0.42}px ${DOC_FONTS[it.font || 0].css}`; ctx.fillText(it.text, x + 6 * res, y + h * 0.82); }
+    }
+  } else {
+    ctx.fillStyle = signerColor(it.signer); ctx.font = `${it.isMark ? "700 " : ""}${h * 0.7}px ${DOC_FONTS[it.font || 0].css}`; ctx.textBaseline = "middle";
+    if (it.isMark) { ctx.textAlign = "center"; ctx.fillText(it.text, x + w / 2, y + h / 2); ctx.textAlign = "left"; }
+    else ctx.fillText(it.text, x, y + h / 2);
+  }
+  ctx.restore();
+}
+// A transparent canvas of everything EXCEPT the interactive form fields — used as
+// a baked overlay for the fillable export (so the fields stay typeable on top).
+async function composeAnnotationsCanvas() {
+  const res = +$("resolution").value;
+  const W = Math.round(doc.w * res), H = Math.round(doc.h * res);
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const ctx = c.getContext("2d");
+  drawAnnToCanvas(ctx, W, H, ["highlight"]);
+  for (const it of docItems) { if (it.isField) continue; await drawDocItemToCtx(ctx, it, W, H, res); }
+  drawAnnToCanvas(ctx, W, H, ["pen", "rect", "line", "arrow"]);
+  return c;
+}
+
 async function composeCanvas() {
   const res = +$("resolution").value;
   try { await document.fonts.ready; } catch (_) {}
@@ -1014,27 +1068,8 @@ async function composeCanvas() {
       if (f.type === "check") { ctx.font = `${h * 0.9}px system-ui, sans-serif`; ctx.textBaseline = "top"; ctx.fillText("X", x + w * 0.12, y); }
       else { ctx.font = `${Math.min(h * 0.72, 18 * res)}px system-ui, sans-serif`; ctx.textBaseline = "middle"; ctx.fillText(String(v), x + 3, y + h / 2); }
     }
-    // placed signatures / text
-    for (const it of docItems) {
-      const x = it.nx * W, y = it.ny * H, w = it.nw * W, h = it.nw * W * it.ar;
-      ctx.globalAlpha = it.opacity;
-      if (it.type === "sig") {
-        const img = await svgToImage(it.svg.replace("<svg ", `<svg style="color:${signerColor(it.signer)}" `));
-        ctx.drawImage(img, x, y, w, h);
-      } else if (it.isField) {
-        ctx.save();
-        ctx.strokeStyle = "rgba(90,90,110,0.6)"; ctx.lineWidth = Math.max(1, W * 0.0012);
-        roundRectPath(ctx, x, y, w, h, Math.min(8 * res, h * 0.2)); ctx.stroke();
-        if (it.label) { ctx.fillStyle = "rgba(80,80,100,0.9)"; ctx.textBaseline = "top"; ctx.font = `${Math.min(h * 0.24, 12 * res)}px system-ui, sans-serif`; ctx.fillText(it.label, x + 5 * res, y + 3 * res); }
-        if (it.text) { ctx.fillStyle = signerColor(it.signer); ctx.textBaseline = "alphabetic"; ctx.font = `${h * 0.42}px ${DOC_FONTS[it.font || 0].css}`; ctx.fillText(it.text, x + 6 * res, y + h * 0.82); }
-        ctx.restore();
-      } else {
-        ctx.fillStyle = signerColor(it.signer); ctx.font = `${it.isMark ? "700 " : ""}${h * 0.7}px ${DOC_FONTS[it.font || 0].css}`; ctx.textBaseline = "middle";
-        if (it.isMark) { ctx.textAlign = "center"; ctx.fillText(it.text, x + w / 2, y + h / 2); ctx.textAlign = "left"; }
-        else ctx.fillText(it.text, x, y + h / 2);
-      }
-    }
-    ctx.globalAlpha = 1;
+    // placed signatures / text / form fields
+    for (const it of docItems) await drawDocItemToCtx(ctx, it, W, H, res);
     drawAnnToCanvas(ctx, W, H, ["pen", "rect", "line", "arrow"]); // ink & shapes on top
     return finishCanvas(c);
   }
@@ -1061,6 +1096,68 @@ async function exportPDF() {
   } catch (e) { errEl.textContent = "PDF export failed: " + (e.message || e); }
 }
 function exportSVG() { download("calligraphy.svg", new Blob([mode === "signature" || +$("speed").value ? animateSVG(rawSVG) : rawSVG], { type: "image/svg+xml" })); flash("Saved SVG."); }
+
+// Export a genuinely fillable PDF: the original page (vector text preserved when a
+// PDF was opened) with signatures/writing/drawings baked in, and the Form-builder
+// fields placed as real interactive AcroForm widgets anyone can type into or tick.
+async function exportFillablePDF() {
+  if (!doc) { errEl.textContent = "Open a document first."; return; }
+  const L = window.PDFLib;
+  if (!L) { errEl.textContent = "PDF engine not loaded yet — try again in a moment."; return; }
+  try {
+    flash("Building fillable PDF…");
+    let pdf, page;
+    if (docPdfBytes) {
+      pdf = await L.PDFDocument.load(docPdfBytes, { ignoreEncryption: true });
+      const pages = pdf.getPages();
+      const idx = Math.min(pages.length - 1, Math.max(0, (+$("pdf_page").value || 1) - 1));
+      page = pages[idx];
+    } else {
+      pdf = await L.PDFDocument.create();
+      page = pdf.addPage([doc.w, doc.h]);
+      const bg = document.createElement("canvas"); bg.width = doc.w; bg.height = doc.h;
+      bg.getContext("2d").drawImage(doc.img, 0, 0, doc.w, doc.h);
+      const bgPng = await pdf.embedPng(bg.toDataURL("image/png"));
+      page.drawImage(bgPng, { x: 0, y: 0, width: doc.w, height: doc.h });
+    }
+    const { width: pw, height: ph } = page.getSize();
+    // Bake signatures / writing / marks / drawings as a transparent overlay.
+    const annCanvas = await composeAnnotationsCanvas();
+    const annPng = await pdf.embedPng(annCanvas.toDataURL("image/png"));
+    page.drawImage(annPng, { x: 0, y: 0, width: pw, height: ph });
+    // Interactive fields for every Form-builder item on the page.
+    const form = pdf.getForm();
+    let nf = 0, used = {};
+    for (const it of docItems) {
+      if (!it.isField) continue;
+      const wf = it.nw * pw, hf = it.nw * pw * it.ar;
+      const x = it.nx * pw;
+      let name = ((it.label || it.fieldKind || "field") + "_" + it.id).replace(/[^\w.-]/g, "_");
+      while (used[name]) name += "_"; used[name] = 1;
+      try {
+        if (it.fieldKind === "check") {
+          const s = Math.min(wf, hf) || 14, y = ph - it.ny * ph - s;
+          const cb = form.createCheckBox(name); cb.addToPage(page, { x, y, width: s, height: s });
+          if (it.checked) cb.check();
+        } else {
+          const y = ph - it.ny * ph - hf;
+          const tf = form.createTextField(name);
+          if (it.text) tf.setText(String(it.text));
+          tf.addToPage(page, { x, y, width: wf, height: hf });
+        }
+        nf++;
+      } catch (_) {}
+    }
+    // Carry over anything typed into the PDF's own existing form fields.
+    for (const f of pdfFields) {
+      const v = fieldValues[f.name]; if (v == null || v === "") continue;
+      try { if (f.type === "check") { if (v) form.getCheckBox(f.name).check(); } else form.getTextField(f.name).setText(String(v)); } catch (_) {}
+    }
+    const bytes = await pdf.save();
+    download("fillable.pdf", new Blob([bytes], { type: "application/pdf" }));
+    flash(nf ? `Saved fillable.pdf — ${nf} fillable field${nf > 1 ? "s" : ""}.` : "Saved fillable.pdf (no form fields placed — add some from Form builder).");
+  } catch (e) { errEl.textContent = "Fillable PDF failed: " + (e.message || e); }
+}
 
 // ---- share links ---------------------------------------------------------
 
@@ -1435,6 +1532,7 @@ function applyTier(t) {
   }, { passive: false });
   $("png").addEventListener("click", exportPNG);
   $("pdf").addEventListener("click", exportPDF);
+  if ($("pdf_fill")) $("pdf_fill").addEventListener("click", exportFillablePDF);
   $("svg").addEventListener("click", exportSVG);
   $("share").addEventListener("click", copyLink);
   $("sig_save").addEventListener("click", saveCurrentSig);
