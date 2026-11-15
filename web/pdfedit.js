@@ -7,6 +7,8 @@
 // broken button — Stirling runs those on a backend (LibreOffice / Tesseract), which
 // a static site can't do. Everything else runs locally.
 
+import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
+
 const $ = (id) => document.getElementById(id);
 
 let sources = [];          // { id, name, bytes:Uint8Array }
@@ -15,6 +17,9 @@ const selected = new Set();// indices into `pages`
 const jsDocs = new Map();  // srcId -> pdf.js document
 const thumbCache = new Map();
 let srcSeq = 1, dragFrom = -1, redactMode = false, activeTool = null;
+// Edit Text mode state
+let etSrc = null, etPageNum = 1, etScale = 1, etBgCtx = null, etCanvasH = 0, etAddMode = false;
+const etEdits = new Map(); // pageIndex -> { changes:[{idx,px,py,psize,pw,fontKey,bg,fg,text}], adds:[{pdfX,pdfYbaseline,pdfSize,fontKey,fg,text}] }
 
 const pdfjs = () => window.pdfjsLib;
 const PDFLib = () => window.PDFLib;
@@ -66,20 +71,47 @@ async function rasterize(entry, scale = 2) {
 }
 
 // ---- open / merge ----------------------------------------------------------
+async function addSourceBytes(name, bytes) {
+  const id = "src" + srcSeq++;
+  const src = { id, name, bytes };
+  sources.push(src);
+  const d = await jsDoc(src);
+  for (let i = 0; i < d.numPages; i++) pages.push({ srcId: id, srcIndex: i, rot: 0, red: [] });
+  return { src, numPages: d.numPages };
+}
 async function addFiles(fileList) {
   let added = 0;
   for (const f of fileList) {
     if (f.type !== "application/pdf" && !/\.pdf$/i.test(f.name)) continue;
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
-      const id = "src" + srcSeq++;
-      sources.push({ id, name: f.name, bytes });
-      const d = await jsDoc(sources[sources.length - 1]);
-      for (let i = 0; i < d.numPages; i++) pages.push({ srcId: id, srcIndex: i, rot: 0, red: [] });
-      added += d.numPages;
+      const r = await addSourceBytes(f.name, bytes);
+      added += r.numPages;
+      rememberSource(r.src).catch(() => {});
     } catch (e) { note("Could not open " + f.name + ": " + (e.message || e), true); }
   }
-  if (added) { $("pe_toolswrap").style.display = ""; buildGrid(); renderGrid(); }
+  if (added) { buildGrid(); renderGrid(); }
+}
+// ---- recent documents (shared store with Sign & scan) ----------------------
+async function rememberSource(src) {
+  let thumb = "";
+  try { const c = await rasterize({ srcId: src.id, srcIndex: 0, rot: 0 }, 0.3); thumb = c.toDataURL("image/jpeg", 0.6); } catch (_) {}
+  await saveRecent({ name: src.name, type: "pdf", bytes: src.bytes, thumb });
+  renderPeRecents();
+}
+async function openRecent(id) {
+  const rec = await getRecent(id); if (!rec) return;
+  sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1;
+  try {
+    await addSourceBytes(rec.name, new Uint8Array(rec.bytes));
+    buildGrid(); renderGrid(); note("Opened " + rec.name + ".");
+  } catch (e) { note("Could not reopen " + rec.name + ": " + (e.message || e), true); }
+}
+async function renderPeRecents() {
+  const host = $("pe_recent"); if (!host) return;
+  const list = await listRecents();
+  host.innerHTML = list.length ? '<div class="rlabel">Recent</div>' : "";
+  for (const r of list) host.appendChild(makeRecentCard(r, () => openRecent(r.id), async () => { await delRecent(r.id); renderPeRecents(); }));
 }
 function pickFiles(accept, multiple, cb) {
   const inp = document.createElement("input");
@@ -262,7 +294,7 @@ const TOOLS = [
   { id: "merge", name: "Merge", icon: "⧉", color: "#7c5cff", kind: "action", run: () => pickFiles("application/pdf", true, addFiles) },
   { id: "compress", name: "Compress", icon: "🗜", color: "#e8554e", kind: "panel" },
   { id: "annotate", name: "Annotate", icon: "✎", color: "#00c2a8", kind: "action", run: () => openInSign() },
-  { id: "edittext", name: "Edit Text", icon: "T", color: "#3aa0ff", kind: "action", run: () => openInSign() },
+  { id: "edittext", name: "Edit Text", icon: "T", color: "#3aa0ff", kind: "action", run: () => enterEditText() },
   { id: "split", name: "Split", icon: "✂", color: "#7c5cff", kind: "panel" },
   { id: "pdfword", name: "PDF ↔ Word", icon: "W", color: "#2b6cff", kind: "server" },
   { id: "img", name: "PDF ↔ Image", icon: "🖼", color: "#f0a500", kind: "panel" },
@@ -304,6 +336,7 @@ function buildGrid() {
 }
 function backToGrid() {
   activeTool = null; redactMode = false;
+  etSrc = null; etEdits.clear(); etAddMode = false;
   $("pe_toolhead").textContent = "Tools";
   $("pe_toolgrid").style.display = "";
   $("pe_toolpanel").innerHTML = "";
@@ -319,8 +352,10 @@ function panelShell(title, html) {
 }
 async function withBusy(msg, fn) { note(msg); try { await fn(); } catch (e) { note("Failed: " + (e.message || e), true); } }
 
+const NO_DOC_TOOLS = new Set(["merge", "txt2pdf", "img", "unlock"]);
 function openTool(t) {
   activeTool = t.id;
+  if (t.kind !== "server" && !NO_DOC_TOOLS.has(t.id) && !pages.length) { note("Open a PDF first — use “Open PDF(s)”.", true); return; }
   if (t.kind === "action") { t.run(); return; }
   if (t.kind === "server") { openServerNote(t); return; }
   if (t.id === "split") openSplit();
@@ -623,6 +658,158 @@ async function txtToPdf(file) {
   });
 }
 
+// ---- Edit Text: select & edit real PDF text (pdf.js text layer -> pdf-lib) --
+function mapFontKey(fam) {
+  const f = (fam || "").toLowerCase();
+  if (f.includes("mono") || f.includes("courier")) return "Courier";
+  if (f.includes("serif") && !f.includes("sans")) return "TimesRoman";
+  return "Helvetica";
+}
+// Pick the lightest ("bg") or darkest ("fg") pixel in a box of the rendered page.
+function sampleRGB(ctx, x, y, w, h, pick) {
+  try {
+    const sx = Math.max(0, Math.floor(x)), sy = Math.max(0, Math.floor(y));
+    const sw = Math.max(1, Math.min(ctx.canvas.width - sx, Math.ceil(w))), sh = Math.max(1, Math.min(ctx.canvas.height - sy, Math.ceil(h)));
+    const d = ctx.getImageData(sx, sy, sw, sh).data;
+    let best = null, bestL = pick === "bg" ? -1 : 256;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] < 8) continue;
+      const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      if (pick === "bg" ? lum > bestL : lum < bestL) { bestL = lum; best = [d[i], d[i + 1], d[i + 2]]; }
+    }
+    return best || (pick === "bg" ? [255, 255, 255] : [0, 0, 0]);
+  } catch (_) { return pick === "bg" ? [255, 255, 255] : [0, 0, 0]; }
+}
+async function enterEditText() {
+  if (!sources.length) return note("Open a PDF first.", true);
+  etSrc = sources[0]; etPageNum = 1; etEdits.clear(); etAddMode = false;
+  panelShell("Edit Text", `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Click any line of text to select and edit it live. Tick <b>Add text</b> and click to drop a new text box. The rest of the page stays pixel-perfect; edits re-render on export.</div>
+    <div class="row"><label>Page</label><button class="btn" id="et_prev" style="width:auto;padding:6px 11px">‹</button><span id="et_pg" style="min-width:60px;text-align:center"></span><button class="btn" id="et_next" style="width:auto;padding:6px 11px">›</button></div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin:6px 0"><input type="checkbox" id="et_add"> Add-text mode (click page to add)</label>
+    <button class="btn" id="et_save">⤓ Save edited PDF</button>`);
+  $("et_prev").onclick = () => { if (etPageNum > 1) { flushEtPage(); etPageNum--; renderEtPage(); } };
+  $("et_next").onclick = async () => { const d = await jsDoc(etSrc); if (etPageNum < d.numPages) { flushEtPage(); etPageNum++; renderEtPage(); } };
+  $("et_add").onchange = () => { etAddMode = $("et_add").checked; const layer = $("et_layer"); if (layer) layer.style.cursor = etAddMode ? "crosshair" : "default"; };
+  $("et_save").onclick = () => saveEditText();
+  renderEtPage();
+}
+async function renderEtPage() {
+  const stage = $("pdfedit_stage"); if (!stage || !etSrc) return;
+  const d = await jsDoc(etSrc);
+  etPageNum = Math.max(1, Math.min(d.numPages, etPageNum));
+  if ($("et_pg")) $("et_pg").textContent = etPageNum + " / " + d.numPages;
+  const page = await d.getPage(etPageNum);
+  const maxW = Math.max(360, stage.clientWidth - 48);
+  const base = page.getViewport({ scale: 1 });
+  etScale = Math.min(2.2, maxW / base.width);
+  const vp = page.getViewport({ scale: etScale });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height); etCanvasH = canvas.height;
+  const ctx = canvas.getContext("2d"); etBgCtx = ctx;
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  stage.innerHTML = "";
+  const wrap = document.createElement("div"); wrap.id = "et_wrap";
+  wrap.style.width = canvas.width + "px"; wrap.style.height = canvas.height + "px";
+  wrap.appendChild(canvas);
+  const layer = document.createElement("div"); layer.id = "et_layer";
+  layer.style.width = canvas.width + "px"; layer.style.height = canvas.height + "px";
+  layer.style.cursor = etAddMode ? "crosshair" : "default";
+  wrap.appendChild(layer); stage.appendChild(wrap);
+  const tc = await page.getTextContent();
+  const U = pdfjs().Util;
+  const existing = etEdits.get(etPageNum - 1);
+  const chByIdx = new Map((existing && existing.changes || []).map((c) => [c.idx, c]));
+  tc.items.forEach((it, i) => {
+    if (!it.str) return;
+    const tx = U.transform(vp.transform, it.transform);
+    const size = Math.hypot(tx[2], tx[3]); if (size < 2) return;
+    const span = document.createElement("div"); span.className = "et-span"; span.contentEditable = "true";
+    span.style.left = tx[4] + "px"; span.style.top = (tx[5] - size) + "px"; span.style.fontSize = size + "px";
+    const fam = (tc.styles[it.fontName] && tc.styles[it.fontName].fontFamily) || "sans-serif";
+    span.style.fontFamily = fam; span.textContent = it.str;
+    const pit = it.transform; // text-space -> PDF points (bottom-left origin)
+    span._et = { idx: i, px: pit[4], py: pit[5], psize: Math.hypot(pit[2], pit[3]) || size / etScale, pw: it.width || 0, fontKey: mapFontKey(fam), orig: it.str };
+    wireEtSpan(span); layer.appendChild(span);
+    const ch = chByIdx.get(i);
+    if (ch) { span.textContent = ch.text; span._et.changed = true; span._et.bg = ch.bg; span._et.fg = ch.fg; span._et.sampled = true; span.style.color = `rgb(${ch.fg.join(",")})`; span.style.background = `rgb(${ch.bg.join(",")})`; }
+  });
+  (existing && existing.adds || []).forEach((a) => addEtTextBox(a.pdfX * etScale, etCanvasH - a.pdfYbaseline * etScale - a.pdfSize * etScale, a.text, a.pdfSize * etScale, false));
+  layer.onclick = (e) => { if (etAddMode && e.target === layer) { const r = layer.getBoundingClientRect(); addEtTextBox(e.clientX - r.left, e.clientY - r.top, "", 16 * etScale, true); } };
+}
+function wireEtSpan(span) {
+  span.addEventListener("focus", () => {
+    span.classList.add("editing");
+    const g = span._et; if (!g) return;
+    if (!g.sampled) {
+      const left = parseFloat(span.style.left), top = parseFloat(span.style.top), size = parseFloat(span.style.fontSize);
+      const w = Math.max(6, g.pw * etScale);
+      g.bg = sampleRGB(etBgCtx, left, top, w, size, "bg");
+      g.fg = sampleRGB(etBgCtx, left, top, w, size, "fg");
+      g.sampled = true;
+    }
+    span.style.color = `rgb(${g.fg.join(",")})`;
+    span.style.background = `rgb(${g.bg.join(",")})`;
+  });
+  span.addEventListener("input", () => { if (span._et) span._et.changed = true; });
+  span.addEventListener("blur", () => {
+    span.classList.remove("editing");
+    const g = span._et; if (!g) return;
+    if (g.changed || span.textContent !== g.orig) { g.changed = true; }
+    else { span.style.color = "transparent"; span.style.background = "transparent"; }
+  });
+}
+function addEtTextBox(leftPx, topPx, text, sizePx, focus) {
+  const layer = $("et_layer"); if (!layer) return;
+  const span = document.createElement("div"); span.className = "et-span et-add"; span.contentEditable = "true";
+  span.style.left = leftPx + "px"; span.style.top = topPx + "px"; span.style.fontSize = (sizePx || 16) + "px";
+  span.style.fontFamily = "Helvetica, Arial, sans-serif"; span.style.color = "#111"; span.textContent = text || "";
+  span._et = { isAdd: true, fontKey: "Helvetica", fg: [17, 17, 17] };
+  span.addEventListener("input", () => { span._et.text = span.textContent; });
+  span.addEventListener("blur", () => { span._et.text = span.textContent; if (!span.textContent.trim()) span.remove(); });
+  layer.appendChild(span);
+  if (focus) setTimeout(() => span.focus(), 0);
+  return span;
+}
+function flushEtPage() {
+  const layer = $("et_layer"); if (!layer) return;
+  const changes = [], adds = [];
+  layer.querySelectorAll(".et-span").forEach((span) => {
+    const g = span._et; if (!g) return;
+    const left = parseFloat(span.style.left), top = parseFloat(span.style.top), sizePx = parseFloat(span.style.fontSize);
+    if (g.isAdd) {
+      if (span.textContent.trim()) adds.push({ pdfX: left / etScale, pdfYbaseline: (etCanvasH - (top + sizePx)) / etScale, pdfSize: sizePx / etScale, text: span.textContent, fontKey: g.fontKey, fg: g.fg });
+    } else if (g.changed || span.textContent !== g.orig) {
+      changes.push({ idx: g.idx, px: g.px, py: g.py, psize: g.psize, pw: g.pw, fontKey: g.fontKey, bg: g.bg || [255, 255, 255], fg: g.fg || [0, 0, 0], text: span.textContent });
+    }
+  });
+  etEdits.set(etPageNum - 1, { changes, adds });
+}
+async function saveEditText() {
+  if (!etSrc) return;
+  flushEtPage();
+  await withBusy("Rendering edited PDF…", async () => {
+    const L = PDFLib();
+    const pdf = await L.PDFDocument.load(etSrc.bytes, { ignoreEncryption: true });
+    const fontCache = new Map();
+    const getFont = async (key) => { if (!fontCache.has(key)) fontCache.set(key, await pdf.embedFont(L.StandardFonts[key] || L.StandardFonts.Helvetica)); return fontCache.get(key); };
+    const outPages = pdf.getPages();
+    let edited = 0;
+    for (const [pageIdx, ed] of etEdits.entries()) {
+      const pg = outPages[pageIdx]; if (!pg) continue;
+      for (const ch of ed.changes) {
+        const coverW = (ch.pw || ch.psize * Math.max(1, (ch.orig || ch.text || "x").length) * 0.5) + 2;
+        pg.drawRectangle({ x: ch.px - 1, y: ch.py - ch.psize * 0.28, width: coverW, height: ch.psize * 1.28, color: L.rgb(ch.bg[0] / 255, ch.bg[1] / 255, ch.bg[2] / 255) });
+        if (ch.text.trim()) { const font = await getFont(ch.fontKey); try { pg.drawText(ch.text, { x: ch.px, y: ch.py, size: ch.psize, font, color: L.rgb(ch.fg[0] / 255, ch.fg[1] / 255, ch.fg[2] / 255) }); } catch (_) {} }
+        edited++;
+      }
+      for (const a of ed.adds) { const font = await getFont(a.fontKey); try { pg.drawText(a.text, { x: a.pdfX, y: a.pdfYbaseline, size: a.pdfSize, font, color: L.rgb(a.fg[0] / 255, a.fg[1] / 255, a.fg[2] / 255) }); edited++; } catch (_) {} }
+    }
+    if (!edited) return note("No text changes yet — click a line and edit it first.", true);
+    await save(pdf, "edited-text.pdf"); note(`Saved edited-text.pdf — ${edited} change${edited > 1 ? "s" : ""}.`);
+  });
+}
+
 // ---- boot ------------------------------------------------------------------
 export function initPdfEditor() {
   const pj = pdfjs();
@@ -640,4 +827,12 @@ export function initPdfEditor() {
   }));
   buildGrid();
   renderGrid();
+  renderPeRecents();
+  // Load a PDF straight into the editor by bytes (used by the Sign→editor handoff).
+  window.__cal2RefreshPeRecents = renderPeRecents;
+  window.__cal2OpenPdfEditorBytes = async (bytes, name) => {
+    sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1;
+    try { await addSourceBytes(name || "document.pdf", new Uint8Array(bytes)); buildGrid(); renderGrid(); rememberSource(sources[0]).catch(() => {}); }
+    catch (e) { note("Could not open: " + (e.message || e), true); }
+  };
 }

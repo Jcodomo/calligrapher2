@@ -1,7 +1,8 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=4";
+import { initPdfEditor } from "./pdfedit.js?v=5";
+import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 
 const WASM_URL = "./calligrapher2.wasm";
 let wasm = null;
@@ -819,12 +820,45 @@ $("file").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   errEl.textContent = "Loading document…";
   try {
-    if (f.type === "application/pdf") { await loadPDF(await f.arrayBuffer()); }
+    const ab = await f.arrayBuffer();
+    if (f.type === "application/pdf") { await loadPDF(ab.slice(0)); }
     else { await loadImage(URL.createObjectURL(f)); }
     $("doc_controls").style.display = ""; docItems = []; selId = null; docDraws = []; setDrawTool(null);
     errEl.textContent = ""; render();
+    rememberCurrentDoc(f.name, f.type, new Uint8Array(ab)).catch(() => {});
   } catch (err) { errEl.textContent = "Could not open that file: " + (err.message || err); }
 };
+// ---- recent documents (shared store with the PDF editor) -------------------
+async function rememberCurrentDoc(name, type, u8) {
+  let thumb = "";
+  try {
+    if (doc && doc.img) {
+      const tw = 120, th = Math.max(1, Math.round(tw * doc.h / doc.w));
+      const c = document.createElement("canvas"); c.width = tw; c.height = th;
+      c.getContext("2d").drawImage(doc.img, 0, 0, tw, th);
+      thumb = c.toDataURL("image/jpeg", 0.6);
+    }
+  } catch (_) {}
+  await saveRecent({ name, type: type === "application/pdf" ? "pdf" : "image", bytes: u8, thumb });
+  renderSignRecents();
+}
+async function renderSignRecents() {
+  const host = $("recent_sign"); if (!host) return;
+  const list = await listRecents();
+  host.innerHTML = list.length ? '<div class="rlabel">Recent</div>' : "";
+  for (const r of list) host.appendChild(makeRecentCard(r, () => reopenRecent(r), async () => { await delRecent(r.id); renderSignRecents(); }));
+}
+async function reopenRecent(rec) {
+  const full = await getRecent(rec.id); if (!full) return;
+  errEl.textContent = "Loading document…";
+  try {
+    const u8 = new Uint8Array(full.bytes);
+    if (full.type === "pdf") { await loadPDF(u8.slice(0)); }
+    else { await loadImage(URL.createObjectURL(new Blob([u8]))); }
+    $("doc_controls").style.display = ""; docItems = []; selId = null; docDraws = []; setDrawTool(null);
+    errEl.textContent = ""; render(); flash("Opened " + full.name + ".");
+  } catch (e) { errEl.textContent = "Could not reopen: " + (e.message || e); }
+}
 async function loadImage(url) {
   const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
   doc = { img, w: img.naturalWidth, h: img.naturalHeight, url, type: "image" };
@@ -1538,6 +1572,7 @@ function applyTier(t) {
   $("sig_save").addEventListener("click", saveCurrentSig);
   renderSavedSigs();
   buildSigners();
+  renderSignRecents();
   window.addEventListener("resize", renderD);
   // App mode switch: "Sign & scan" (default) | "PDF editor" (Stirling-style page ops).
   const appmode = $("appmode");
@@ -1545,6 +1580,9 @@ function applyTier(t) {
     if (!appmode) return;
     appmode.querySelectorAll("button").forEach((x) => x.classList.toggle("sel", x.dataset.app === which));
     document.body.classList.toggle("pdfmode", which === "pdf");
+    // Refresh the Recent list for the mode being shown (shared store across modes).
+    if (which === "pdf") { if (window.__cal2RefreshPeRecents) window.__cal2RefreshPeRecents(); }
+    else renderSignRecents();
   };
   if (appmode) appmode.querySelectorAll("button").forEach((b) => { b.onclick = () => setAppMode(b.dataset.app); });
   // Hook the PDF editor uses to hand a PDF to "Sign & scan" (Annotate / Sign / Edit text).
