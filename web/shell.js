@@ -140,6 +140,8 @@ const TOOLS = {
   crop:      { name: "Crop PDF", desc: "Trim the margins off every page.", c: C.edit, i: "crop", mode: "pdf", tool: "crop", accept: PDF_IN },
   watermark: { name: "Watermark PDF", desc: "Stamp DRAFT, CONFIDENTIAL or your own words.", c: C.edit, i: "stamp", mode: "pdf", tool: "watermark", accept: PDF_IN },
   pdf2img:   { name: "PDF to JPG / PNG", desc: "Save every page of a PDF as a picture.", c: C.conv, i: "image", mode: "pdf", tool: "img", accept: PDF_IN },
+  pdf2word:  { name: "PDF to Word", desc: "Turn a PDF into an editable Word document (.docx); scans are read with OCR.", c: C.conv, i: "DOC", mode: "pdf", tool: "pdfword", accept: PDF_IN },
+  enhance:   { name: "Clean Up & Upscale", desc: "Make blurry scans, photos and small pictures into a sharp, high-resolution PDF with AI.", c: C.conv, i: "image", mode: "pdf", tool: "enhance", accept: "application/pdf,.pdf,image/*" },
   img2pdf:   { name: "JPG / PNG to PDF", desc: "Turn one or more pictures into a single PDF.", c: C.conv, i: "image", mode: "convert", multiple: true, accept: "image/*" },
   txt2pdf:   { name: "Text to PDF", desc: "Turn a .txt, .md or .csv file into a tidy PDF.", c: C.conv, i: "TXT", mode: "convert", accept: ".txt,.md,.csv,.log,text/plain" },
   ocr:       { name: "PDF OCR", desc: "Make a scanned PDF searchable, right in your browser.", c: C.opt, i: "OCR", mode: "pdf", tool: "ocr", accept: PDF_IN },
@@ -158,7 +160,7 @@ const MENU = [
   ["Fill & Sign", ["sign", "fillsign", "adddate", "forms", "fillform"]],
   ["Organize", ["merge", "split", "rotate", "delete", "extract", "organize"]],
   ["Optimize", ["compress", "number", "crop", "watermark"]],
-  ["Convert", ["pdf2img", "img2pdf", "txt2pdf", "ocr"]],
+  ["Convert", ["pdf2img", "img2pdf", "pdf2word", "enhance", "txt2pdf", "ocr"]],
   ["Protect", ["unlock", "redact", "flatten"]],
   ["Handwriting", ["write", "signature", "drawsig", "drawhand", "sigimport", "scanlook"]],
   ["Mortgage", ["builder"]],
@@ -353,6 +355,9 @@ async function intakeTool(id, files) {
       await window.__cal2OpenDocFile(docs[0]);
       if (docs.length > 1) await window.__cal2AddFilesToDoc(docs.slice(1));
       go("#/edit/" + id);
+    } else if (id === "enhance" && !files.some(isPdf)) {
+      const imgs = files.filter(isImage); if (!imgs.length) { toast("Choose a PDF or pictures."); return; }
+      window.__cal2ResetPdf(); go("#/pdf/enhance"); setTimeout(() => window.__cal2EnhanceAdd(imgs), 200);
     } else if (id === "img2pdf") {
       const imgs = files.filter(isImage); if (!imgs.length) { toast("Choose JPG or PNG pictures."); return; }
       toast("Building your PDF…"); await window.__cal2ImagesToPdf(imgs); toast("Saved images.pdf — check your downloads.");

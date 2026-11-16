@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=8";
+import { initPdfEditor } from "./pdfedit.js?v=11";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
@@ -1666,7 +1666,7 @@ const TOOL_MAP = {
   write: ["sign", "handwrite"], handwrite: ["sign", "handwrite"], signature: ["sign", "sig", "signature"], sigimport: ["sign", "sig", "sigimport"],
   merge: ["organize"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "panel:split"], extract: ["organize", "panel:extract"], number: ["organize", "panel:number"],
   unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"], pdffonts: ["edit", "fonts"],
-  compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"],
+  compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], pdf2word: ["convert", "panel:pdfword"], enhance: ["convert", "panel:enhance"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"],
 };
 function applyTool(id) {
   const m = TOOL_MAP[id]; if (!m || !doc) return false;
@@ -1691,7 +1691,7 @@ async function openPanelTool(id) {
 }
 function closePanelTool() { activePanelTool = null; document.body.classList.remove("toolpanel"); }
 // Results of document-changing tools replace the open document (Undo brings the old one back).
-const APPLY_RESULT = /^(watermarked|numbered|cropped|compressed|flattened|ocr|redacted)\.pdf$/;
+const APPLY_RESULT = /^(watermarked|numbered|cropped|compressed|flattened|ocr|redacted|enhanced)\.pdf$/;
 async function applyPdfResult(bytes, name) {
   if (workMode !== "doc" || !document.body.classList.contains("toolpanel") || !APPLY_RESULT.test(name)) return false;
   snapshotNow();

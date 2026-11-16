@@ -301,7 +301,8 @@ const TOOLS = [
   { id: "annotate", name: "Annotate", icon: "✎", color: "#00c2a8", kind: "action", run: () => openInSign() },
   { id: "edittext", name: "Edit Text", icon: "T", color: "#3aa0ff", kind: "action", run: () => enterEditText() },
   { id: "split", name: "Split", icon: "✂", color: "#7c5cff", kind: "panel" },
-  { id: "pdfword", name: "PDF ↔ Word", icon: "W", color: "#2b6cff", kind: "server" },
+  { id: "pdfword", name: "PDF → Word", icon: "W", color: "#2b6cff", kind: "panel" },
+  { id: "enhance", name: "Clean up & upscale", icon: "✦", color: "#7c5cff", kind: "panel" },
   { id: "img", name: "PDF ↔ Image", icon: "🖼", color: "#f0a500", kind: "panel" },
   { id: "translate", name: "Translate", icon: "文", color: "#2b6cff", kind: "server" },
   { id: "ocr", name: "PDF OCR", icon: "OCR", color: "#e8554e", kind: "panel" },
@@ -373,6 +374,8 @@ function openTool(t) {
   else if (t.id === "compress") openCompress();
   else if (t.id === "img") openImg();
   else if (t.id === "ocr") openOcr();
+  else if (t.id === "pdfword") openWord();
+  else if (t.id === "enhance") openEnhance();
   else if (t.id === "unlock") openUnlock();
   else if (t.id === "redact") openRedact();
   else if (t.id === "fillform") openFillForm();
@@ -478,25 +481,32 @@ function openImg() {
   panelShell("PDF ↔ Image", `
     <div style="font-weight:600;font-size:12.5px;margin-bottom:4px">PDF → images</div>
     <div class="row"><label>Format</label><select id="pe_ifmt"><option value="png">PNG</option><option value="jpeg">JPEG</option></select></div>
-    <div class="row"><label>Scale</label><input id="pe_iscale" type="range" min="1" max="4" step="1" value="2"><span class="val" id="pe_iscale_v">2×</span></div>
-    <button class="btn" id="pe_img_go">Export pages → .zip</button>
+    <div class="row"><label>Resolution</label><select id="pe_idpi"><option value="72">72 DPI (screen)</option><option value="150" selected>150 DPI</option><option value="200">200 DPI</option><option value="300">300 DPI (print)</option><option value="600">600 DPI</option></select></div>
+    <div style="font-size:11.5px;color:var(--muted);margin-bottom:6px">Tick pages in the grid to save only those. One page saves as a single picture; several as a .zip.</div>
+    <button class="btn" id="pe_img_go">Save pages as pictures</button>
     <div style="font-weight:600;font-size:12.5px;margin:14px 0 4px">Images → PDF</div>
+    <div class="row"><label>Page size</label><select id="pe_ipsize"><option value="fit">Same as each picture</option><option value="letter">Letter</option><option value="a4">A4</option><option value="legal">Legal</option></select></div>
+    <div class="row"><label>Margin</label><select id="pe_ipmar"><option value="0">None</option><option value="18">Small</option><option value="36" selected>Normal</option><option value="72">Wide</option></select></div>
     <button class="btn" id="pe_img2pdf">Pick images → PDF</button>`);
-  $("pe_iscale").oninput = () => $("pe_iscale_v").textContent = $("pe_iscale").value + "×";
   $("pe_img_go").onclick = () => withBusy("Rendering…", async () => {
-    const fmt = $("pe_ifmt").value, sc = +$("pe_iscale").value;
+    if (!pages.length) return note("Open a PDF first.", true);
+    const fmt = $("pe_ifmt").value, sc = +$("pe_idpi").value / 72, ext = fmt === "png" ? "png" : "jpg", mime = fmt === "png" ? "image/png" : "image/jpeg";
+    const idx = selected.size ? [...selected].sort((a, b) => a - b) : pages.map((_, i) => i);
+    const base = ((sources[0] && sources[0].name) || "page").replace(/\.pdf$/i, "");
+    if (idx.length === 1) { const c = await rasterize(pages[idx[0]], sc); dl(`${base}-page-${idx[0] + 1}.${ext}`, await new Promise((r) => c.toBlob(r, mime, 0.9))); note("Saved 1 picture."); return; }
     const zip = new (await ensureJsZip())();
-    for (let i = 0; i < pages.length; i++) {
+    for (const i of idx) {
+      note(`Rendering page ${i + 1}…`);
       const c = await rasterize(pages[i], sc);
-      const u8 = dataURLtoU8(c.toDataURL(fmt === "png" ? "image/png" : "image/jpeg", 0.9));
-      zip.file(`page-${i + 1}.${fmt === "png" ? "png" : "jpg"}`, u8);
+      zip.file(`${base}-page-${i + 1}.${ext}`, await new Promise((r) => c.toBlob(r, mime, 0.9)));
     }
-    dl("pages.zip", await zip.generateAsync({ type: "blob" })); note("Saved pages.zip (" + pages.length + " images).");
+    dl(base + "-pages.zip", await zip.generateAsync({ type: "blob" })); note("Saved " + idx.length + " pictures (.zip).");
   });
-  $("pe_img2pdf").onclick = () => pickFiles("image/*", true, imagesToPdf);
+  $("pe_img2pdf").onclick = () => pickFiles("image/*", true, (f) => imagesToPdf(f, { size: $("pe_ipsize").value, margin: +$("pe_ipmar").value }));
 }
 // Pictures → one PDF (also used when pictures are chosen on the "JPG to PDF" page).
-function imagesToPdf(files) {
+const PAGE_SIZES = { letter: [612, 792], a4: [595.28, 841.89], legal: [612, 1008] };
+function imagesToPdf(files, opts = {}) {
   return withBusy("Building…", async () => {
     const L = PDFLib(); const out = await L.PDFDocument.create();
     for (const f of files) {
@@ -512,7 +522,11 @@ function imagesToPdf(files) {
         c.getContext("2d").drawImage(im, 0, 0); URL.revokeObjectURL(url);
         img = await out.embedPng(dataURLtoU8(c.toDataURL("image/png")));
       }
-      const pg = out.addPage([img.width, img.height]); pg.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+      if (!opts.size || opts.size === "fit") { const pg = out.addPage([img.width, img.height]); pg.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height }); continue; }
+      // a fixed paper size: turned to match the picture, picture centred inside the margins
+      let [pw, ph] = PAGE_SIZES[opts.size] || PAGE_SIZES.letter; if (img.width > img.height) [pw, ph] = [ph, pw];
+      const m = opts.margin || 0, k = Math.min((pw - 2 * m) / img.width, (ph - 2 * m) / img.height), w = img.width * k, h = img.height * k;
+      out.addPage([pw, ph]).drawImage(img, { x: (pw - w) / 2, y: (ph - h) / 2, width: w, height: h });
     }
     await save(out, "images.pdf"); note("Saved images.pdf (" + files.length + " pages).");
   });
@@ -871,6 +885,257 @@ async function saveEditText() {
 }
 
 // ---- boot ------------------------------------------------------------------
+
+// ---- PDF → Word (.docx), built in the browser ---------------------------------------------
+// Text pages keep their paragraphs, headings (bigger type), bold and italic; scanned pages are
+// read with OCR, or kept as a picture of the page. "Exact look" puts each page in as a picture.
+function xmlEsc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ""); }
+async function pageParagraphs(page) {
+  const tc = await page.getTextContent(), vp = page.getViewport({ scale: 1 });
+  const styles = tc.styles || {};
+  const runs = tc.items.filter((it) => it.str !== undefined).map((it) => {
+    const fs = Math.hypot(it.transform[2], it.transform[3]) || 10, fn = ((styles[it.fontName] || {}).fontFamily || "") + " " + it.fontName;
+    return { str: it.str, x: it.transform[4], y: vp.height - it.transform[5], w: it.width, fs, eol: it.hasEOL,
+      bold: /bold|black|heavy|semibold/i.test(fn), italic: /italic|oblique/i.test(fn) };
+  }).filter((r) => r.str.trim().length);   // spaces are put back from the gaps
+  if (!runs.length) return null;
+  // lines: same baseline (within 40% of the size), left to right
+  runs.sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines = [];
+  for (const r of runs) {
+    const L = lines[lines.length - 1];
+    if (L && Math.abs(L.y - r.y) < Math.max(L.fs, r.fs) * 0.4) {
+      const gap = r.x - (L.x1 || L.x);
+      if (gap > r.fs * 0.15 && !/\s$/.test(L.runs[L.runs.length - 1].str) && !/^\s/.test(r.str)) r.str = (gap > r.fs * 2.5 ? "\t" : " ") + r.str;
+      L.runs.push(r); L.x1 = r.x + r.w; L.fs = Math.max(L.fs, r.fs);
+    } else lines.push({ y: r.y, x: r.x, x1: r.x + r.w, fs: r.fs, runs: [r] });
+  }
+  lines.forEach((l) => l.runs.sort((a, b) => a.x - b.x));
+  // paragraphs: a line joins the one above when the gap is normal and the size matches
+  const sizes = lines.map((l) => l.fs).sort((a, b) => a - b), body = sizes[Math.floor(sizes.length / 2)] || 11;
+  const paras = [];
+  let prev = null;
+  for (const l of lines) {
+    const P = paras[paras.length - 1];
+    const join = P && prev && l.y - prev.y < Math.max(l.fs, prev.fs) * 1.6 && Math.abs(l.fs - prev.fs) < 1 && l.fs < body * 1.25 && Math.abs(l.x - P.x) < body * 3;
+    if (join) { const last = P.runs[P.runs.length - 1]; if (!/[\s-]$/.test(last.str)) P.runs.push({ ...l.runs[0], str: " " }); P.runs.push(...l.runs); }
+    else paras.push({ x: l.x, fs: l.fs, head: l.fs >= body * 1.25, gapBefore: prev ? l.y - prev.y > Math.max(l.fs, prev.fs) * 2.2 : false, runs: [...l.runs] });
+    prev = l;
+  }
+  return { paras, body, width: vp.width };
+}
+function docxRun(r, sizePt) {
+  const pr = `<w:rPr>${r.bold ? "<w:b/>" : ""}${r.italic ? "<w:i/>" : ""}<w:sz w:val="${Math.max(12, Math.round(sizePt * 2))}"/></w:rPr>`;
+  return r.str.split("\t").map((part, i) => (i ? `<w:r>${pr}<w:tab/></w:r>` : "") + (part ? `<w:r>${pr}<w:t xml:space="preserve">${xmlEsc(part)}</w:t></w:r>` : "")).join("");
+}
+function docxPicture(rid, n, wEmu, hEmu) {
+  return `<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${wEmu}" cy="${hEmu}"/><wp:docPr id="${n}" name="Page ${n}"/>` +
+    `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${n}" name="page${n}.jpg"/><pic:cNvPicPr/></pic:nvPicPr>` +
+    `<pic:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${wEmu}" cy="${hEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>` +
+    `</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+}
+async function pdfToDocx(entries, { mode, scans }, prog) {
+  const JSZip = await ensureJsZip(), zip = new JSZip();
+  const body = [], rels = [], BR = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+  let img = 0, ocrSched = null, pageW = 612, pageH = 792;
+  for (let i = 0; i < entries.length; i++) {
+    prog(`Page ${i + 1} of ${entries.length}…`);
+    const e = entries[i], src = sources.find((q) => q.id === e.srcId), page = await (await jsDoc(src)).getPage(e.srcIndex + 1);
+    const vp = page.getViewport({ scale: 1, rotation: ((page.rotate || 0) + e.rot) % 360 });
+    if (i === 0) { pageW = vp.width; pageH = vp.height; }
+    if (i) body.push(BR);
+    const usable = (pageW - 108) * 12700;   // 0.75" margins, in EMU
+    const putPicture = async () => {
+      const c = await rasterize(e, 2), u8 = dataURLtoU8(c.toDataURL("image/jpeg", 0.88)); img++;
+      zip.file(`word/media/page${img}.jpg`, u8); rels.push(`<Relationship Id="rImg${img}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/page${img}.jpg"/>`);
+      const w = usable, h = Math.round(usable * c.height / c.width), maxH = (pageH - 108) * 12700, k = Math.min(1, maxH / h);
+      body.push(docxPicture("rImg" + img, img, Math.round(w * k), Math.round(h * k)));
+    };
+    if (mode === "picture") { await putPicture(); continue; }
+    const t = e.rot ? null : await pageParagraphs(page);
+    if (t) {
+      for (const p of t.paras) {
+        const size = p.head ? Math.min(28, p.fs) : Math.min(16, Math.max(8, p.fs));
+        const ind = Math.max(0, Math.round((p.x - 54) * 20));
+        body.push(`<w:p><w:pPr>${p.head ? '<w:pStyle w:val="Heading"/>' : ""}<w:spacing w:before="${p.gapBefore || p.head ? 160 : 0}" w:after="${p.head ? 80 : 100}"/>${ind > 200 ? `<w:ind w:left="${Math.min(ind, 4000)}"/>` : ""}</w:pPr>${p.runs.map((r) => docxRun(r, size)).join("")}</w:p>`);
+      }
+      continue;
+    }
+    if (scans === "ocr") {
+      if (!ocrSched) ocrSched = await ocrScheduler("eng", ocrPoolSize());
+      const c = await rasterize(e, 2), r = await ocrSched.addJob("recognize", c);
+      const paras = (r.data.paragraphs || []).map((pp) => pp.text.replace(/\s*\n\s*/g, " ").trim()).filter(Boolean);
+      if (paras.length) { paras.forEach((tx) => body.push(`<w:p><w:pPr><w:spacing w:after="100"/></w:pPr>${docxRun({ str: tx }, 11)}</w:p>`)); continue; }
+    }
+    await putPicture();
+  }
+  const W = Math.round(pageW * 20), H = Math.round(pageH * 20);
+  zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
+  zip.file("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file("word/_rels/document.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSty" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' + rels.join("") + "</Relationships>");
+  zip.file("word/styles.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/></w:rPr></w:style></w:styles>');
+  zip.file("word/document.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body>' +
+    body.join("") + `<w:sectPr><w:pgSz w:w="${W}" w:h="${H}"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+  return zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+}
+function openWord() {
+  panelShell("PDF → Word", `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Makes an editable Word document (.docx) in your browser. Paragraphs, headings, bold and italic are kept; layouts with columns or tables come out as plain paragraphs.</div>
+    <div class="row"><label>Content</label><select id="pe_wmode"><option value="text">Editable text</option><option value="picture">Exact look (each page as a picture)</option></select></div>
+    <div class="row"><label>Scanned pages</label><select id="pe_wscan"><option value="ocr">Read the text (OCR)</option><option value="picture">Keep as a picture</option></select></div>
+    <button class="btn" id="pe_word_go">Convert → .docx</button>
+    <div id="pe_word_prog" style="font-size:11px;color:var(--muted);margin-top:6px"></div>`);
+  $("pe_word_go").onclick = () => withBusy("Converting…", async () => {
+    if (!pages.length) return note("Open a PDF first.", true);
+    const prog = $("pe_word_prog"), list = selected.size ? pages.filter((_, i) => selected.has(i)) : pages;
+    const blob = await pdfToDocx(list, { mode: $("pe_wmode").value, scans: $("pe_wscan").value }, (m) => prog.textContent = m);
+    const name = ((sources[0] && sources[0].name) || "document").replace(/\.pdf$/i, "") + ".docx";
+    dl(name, blob); prog.textContent = ""; note("Saved " + name + " (" + list.length + " page" + (list.length > 1 ? "s" : "") + ").");
+  });
+}
+
+// ---- Clean up & upscale: sharper, higher-resolution PDFs from scans, photos and pictures --------
+// AI mode uses ESRGAN super-resolution in the browser (UpscalerJS + TensorFlow.js on the GPU), the same
+// engine and models as github.com/Mariano215/ai-image-upscaler (MIT). Several 4x passes are never needed for
+// documents: one pass, then a high-quality resample to the exact target, which keeps edges crisp.
+const UPS_MV = "1.0.0";
+const UPS_MODELS = {
+  fast: { src: `https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-slim@${UPS_MV}/dist/umd/models/esrgan-slim/src/x4/index.min.js`, g: "ESRGANSlim4x", sri: "sha384-DYTGe938MJpD698SdXwJhHm5SOraccyxoYjDnkoYLw/vlIVXYKX0Iv4bmcqTAzhW" },
+  balanced: { src: `https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-medium@${UPS_MV}/dist/umd/models/esrgan-medium/src/x4/index.min.js`, g: "ESRGANMedium4x", sri: "sha384-5fJ01HD6+MUDQcTDVhBsqg1yPTfOJb6urBcnZ13EqPInN+9vUsTnoaN56Wlg1x9d" },
+};
+const upscalers = {};
+function loadScriptSri(src, integrity) {
+  if (scriptCache.has(src)) return scriptCache.get(src);
+  const p = new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; if (integrity) { s.integrity = integrity; s.crossOrigin = "anonymous"; } s.onload = res; s.onerror = () => rej(new Error("Could not load the upscaling model")); document.head.appendChild(s); });
+  scriptCache.set(src, p); return p;
+}
+async function getUpscaler(q) {
+  if (upscalers[q]) return upscalers[q];
+  if (!window.tf) await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+  if (!window.Upscaler) await loadScript("https://cdn.jsdelivr.net/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js");
+  const m = UPS_MODELS[q]; await loadScriptSri(m.src, m.sri);
+  if (!window.Upscaler || !window[m.g]) throw new Error("The upscaling engine is not available in this browser");
+  return (upscalers[q] = new window.Upscaler({ model: window[m.g] }));
+}
+function canvasOf(src, w, h) { const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); const g = c.getContext("2d"); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high"; g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(src, 0, 0, c.width, c.height); return c; }
+// clean-up: levels (paper to white, ink to black), optional greyscale, light despeckle
+function cleanCanvas(c, { whiten, gray, despeckle }) {
+  const g = c.getContext("2d", { willReadFrequently: true }), d = g.getImageData(0, 0, c.width, c.height), p = d.data, n = p.length / 4;
+  const hist = new Uint32Array(256);
+  for (let k = 0; k < p.length; k += 4) hist[(p[k] * 0.299 + p[k + 1] * 0.587 + p[k + 2] * 0.114) | 0]++;
+  let lo = 0, hi = 255, acc = 0;
+  for (let k = 0; k < 256; k++) { acc += hist[k]; if (acc > n * 0.005) { lo = k; break; } }
+  acc = 0; for (let k = 255; k >= 0; k--) { acc += hist[k]; if (acc > n * (whiten ? 0.35 : 0.005)) { hi = k; break; } }
+  if (whiten) hi = Math.max(lo + 60, hi - 12);
+  const span = Math.max(1, hi - lo), lut = new Uint8ClampedArray(256);
+  for (let v = 0; v < 256; v++) lut[v] = Math.max(0, Math.min(255, (v - lo) * 255 / span));
+  for (let k = 0; k < p.length; k += 4) {
+    if (gray) { const y = lut[(p[k] * 0.299 + p[k + 1] * 0.587 + p[k + 2] * 0.114) | 0]; p[k] = p[k + 1] = p[k + 2] = y; }
+    else { p[k] = lut[p[k]]; p[k + 1] = lut[p[k + 1]]; p[k + 2] = lut[p[k + 2]]; }
+    if (whiten && p[k] * 0.299 + p[k + 1] * 0.587 + p[k + 2] * 0.114 > 232) p[k] = p[k + 1] = p[k + 2] = 255;   // paper tint goes too
+  }
+  if (despeckle) {   // isolated dark dots on white become white
+    const W = c.width, H = c.height, y = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++) y[i] = p[i * 4] * 0.3 + p[i * 4 + 1] * 0.59 + p[i * 4 + 2] * 0.11 < 128 ? 1 : 0;
+    for (let yy = 1; yy < H - 1; yy++) for (let x = 1; x < W - 1; x++) {
+      const i = yy * W + x; if (!y[i]) continue;
+      if (y[i - 1] + y[i + 1] + y[i - W] + y[i + W] + y[i - W - 1] + y[i - W + 1] + y[i + W - 1] + y[i + W + 1] === 0) { p[i * 4] = p[i * 4 + 1] = p[i * 4 + 2] = 255; }
+    }
+  }
+  g.putImageData(d, 0, 0); return c;
+}
+// unsharp mask (amount 0..2) on a canvas, in place
+function sharpenCanvas(c, amount) {
+  if (amount <= 0) return c;
+  const W = c.width, H = c.height, g = c.getContext("2d", { willReadFrequently: true });
+  const blur = document.createElement("canvas"); blur.width = W; blur.height = H;
+  const bg = blur.getContext("2d"); bg.filter = `blur(${Math.max(0.6, W / 2400)}px)`; bg.drawImage(c, 0, 0);
+  const a = g.getImageData(0, 0, W, H), b = bg.getImageData(0, 0, W, H).data, p = a.data;
+  for (let k = 0; k < p.length; k += 4) for (let j = 0; j < 3; j++) { const v = p[k + j] + (p[k + j] - b[k + j]) * amount; p[k + j] = v < 0 ? 0 : v > 255 ? 255 : v; }
+  g.putImageData(a, 0, 0); return c;
+}
+// one picture → enhanced canvas at about `dpi` for a page `inW` inches wide
+async function enhanceOne(src, opt, onProg) {
+  const sw = src.naturalWidth || src.width, sh = src.naturalHeight || src.height;
+  const tw = Math.round(opt.inW * opt.dpi), th = Math.round(tw * sh / sw);
+  let out;
+  if (opt.engine !== "classic") {
+    // feed the model at no more than a quarter of the target (and ~1.2 MP), it returns 4x
+    const k = Math.min(1, tw / 4 / sw, Math.sqrt(1.2e6 / (sw * sh)));
+    const inC = cleanCanvas(canvasOf(src, sw * k, sh * k), { whiten: false, gray: false, despeckle: opt.despeckle });
+    const up = await getUpscaler(opt.engine);
+    const url = await up.upscale(inC, { patchSize: 64, padding: 4, progress: (r) => onProg && onProg(r) });
+    const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    out = canvasOf(im, tw, th);
+  } else {
+    // classic: step up in halves (sharper than one big stretch)
+    let cur = cleanCanvas(canvasOf(src, sw, sh), { whiten: false, gray: false, despeckle: opt.despeckle });
+    while (cur.width * 2 < tw) cur = canvasOf(cur, cur.width * 2, cur.height * 2);
+    out = canvasOf(cur, tw, th);
+  }
+  cleanCanvas(out, { whiten: opt.whiten, gray: opt.gray, despeckle: false });
+  return sharpenCanvas(out, opt.sharpen);
+}
+let enhImages = [];   // pictures added straight to the tool (no PDF)
+async function fileToImage(f) { const url = URL.createObjectURL(f); const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("Could not read " + f.name)); i.src = url; }); return { im, name: f.name, url }; }
+function openEnhance() {
+  panelShell("Clean up & upscale", `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Turns blurry scans, phone photos and small pictures into a sharper, higher-resolution PDF. AI upscaling runs on your graphics card in this browser (the model downloads once, a few MB); nothing is uploaded.</div>
+    <div id="pe_enh_src" style="font-size:12px;margin-bottom:6px"></div>
+    <button class="btn" id="pe_enh_add" style="margin-bottom:8px">Add pictures…</button>
+    <div class="row"><label>Engine</label><select id="pe_enh_eng"><option value="balanced">AI upscale — best for photos &amp; scans</option><option value="fast">AI upscale — faster</option><option value="classic">Classic resample (no AI, quickest)</option></select></div>
+    <div class="row"><label>Resolution</label><select id="pe_enh_dpi"><option value="200">200 DPI</option><option value="300" selected>300 DPI (print)</option><option value="400">400 DPI</option></select></div>
+    <div class="row"><label>Sharpen</label><input id="pe_enh_sh" type="range" min="0" max="20" value="6"><span class="val" id="pe_enh_sh_v">0.6</span></div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin:4px 0"><input type="checkbox" id="pe_enh_wh" checked> Clean background (paper to white, darker ink)</label>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin:4px 0"><input type="checkbox" id="pe_enh_sp" checked> Remove specks</label>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin:4px 0"><input type="checkbox" id="pe_enh_gr"> Black &amp; white (greyscale)</label>
+    <div class="row"><label>Save as</label><select id="pe_enh_out"><option value="pdf">One PDF</option><option value="png">Pictures (.png, zipped if several)</option></select></div>
+    <button class="btn" id="pe_enh_go">Enhance</button>
+    <div id="pe_enh_prog" style="font-size:11px;color:var(--muted);margin-top:6px"></div>`);
+  const showSrc = () => { const n = (selected.size || pages.length); $("pe_enh_src").textContent = (pages.length ? `${n} PDF page${n === 1 ? "" : "s"}` : "") + (pages.length && enhImages.length ? " + " : "") + (enhImages.length ? `${enhImages.length} picture${enhImages.length === 1 ? "" : "s"}` : "") || "Add pictures, or open a PDF first."; };
+  showSrc();
+  $("pe_enh_sh").oninput = () => $("pe_enh_sh_v").textContent = (+$("pe_enh_sh").value / 10).toFixed(1);
+  $("pe_enh_add").onclick = () => pickFiles("image/*", true, async (files) => { for (const f of files) enhImages.push(await fileToImage(f)); showSrc(); });
+  $("pe_enh_go").onclick = () => withBusy("Enhancing…", async () => {
+    const list = selected.size ? pages.filter((_, i) => selected.has(i)) : pages;
+    if (!list.length && !enhImages.length) return note("Add pictures or open a PDF first.", true);
+    const prog = $("pe_enh_prog"), t0 = performance.now(), total = list.length + enhImages.length;
+    const opt = { engine: $("pe_enh_eng").value, dpi: +$("pe_enh_dpi").value, sharpen: +$("pe_enh_sh").value / 10, whiten: $("pe_enh_wh").checked, despeckle: $("pe_enh_sp").checked, gray: $("pe_enh_gr").checked };
+    if (opt.engine !== "classic") { prog.textContent = "Loading the AI model…"; await getUpscaler(opt.engine); }
+    const outs = [];
+    let n = 0;
+    const step = (lbl) => (r) => prog.textContent = `${lbl} ${n + 1} of ${total}… ${Math.round((r || 0) * 100)}%`;
+    for (const e of list) {
+      const src = sources.find((q) => q.id === e.srcId), page = await (await jsDoc(src)).getPage(e.srcIndex + 1);
+      const vp = page.getViewport({ scale: 1, rotation: ((page.rotate || 0) + e.rot) % 360 });
+      step("Page")(0);
+      const c = await rasterize(e, Math.min(3, 1600 / vp.width));   // read the page at ~1600 px wide
+      outs.push({ c: await enhanceOne(c, { ...opt, inW: vp.width / 72 }, step("Page")), wPt: vp.width, hPt: vp.height, name: `page-${n + 1}` }); n++;
+    }
+    for (const it of enhImages) {
+      step("Picture")(0);
+      const sw = it.im.naturalWidth, sh = it.im.naturalHeight, inW = sw >= sh ? 11 : 8.5;   // a full page wide
+      const c = await enhanceOne(it.im, { ...opt, inW: Math.min(inW, Math.max(2, sw * 4 / opt.dpi)) }, step("Picture"));
+      outs.push({ c, wPt: c.width * 72 / opt.dpi, hPt: c.height * 72 / opt.dpi, name: it.name.replace(/\.[^.]+$/, "") + "-enhanced" }); n++;
+    }
+    prog.textContent = "Saving…";
+    if ($("pe_enh_out").value === "png") {
+      if (outs.length === 1) dl(outs[0].name + ".png", await new Promise((r) => outs[0].c.toBlob(r, "image/png")));
+      else { const zip = new (await ensureJsZip())(); for (const o of outs) zip.file(o.name + ".png", await new Promise((r) => o.c.toBlob(r, "image/png"))); dl("enhanced.zip", await zip.generateAsync({ type: "blob" })); }
+    } else {
+      const L = PDFLib(), out = await L.PDFDocument.create();
+      for (const o of outs) {
+        const img = opt.gray ? await out.embedPng(dataURLtoU8(o.c.toDataURL("image/png"))) : await out.embedJpg(dataURLtoU8(o.c.toDataURL("image/jpeg", 0.92)));
+        const pg = out.addPage([o.wPt, o.hPt]); pg.drawImage(img, { x: 0, y: 0, width: o.wPt, height: o.hPt });
+      }
+      await save(out, "enhanced.pdf");
+    }
+    prog.textContent = "";
+    note(`Enhanced ${outs.length} page${outs.length === 1 ? "" : "s"} at ${opt.dpi} DPI in ${Math.round((performance.now() - t0) / 1000)}s.`);
+  });
+}
+
 export function initPdfEditor() {
   const pj = pdfjs();
   if (pj && pj.GlobalWorkerOptions && !pj.GlobalWorkerOptions.workerSrc)
@@ -906,7 +1171,8 @@ export function initPdfEditor() {
   window.__cal2ResetPdf = () => { resetAll(); backToGrid(); };
   window.__cal2PdfPageCount = () => pages.length;
   window.__cal2TxtToPdf = (f) => txtToPdf(f);
-  window.__cal2ImagesToPdf = (files) => imagesToPdf(files);
+  window.__cal2ImagesToPdf = (files, o) => imagesToPdf(files, o);
+  window.__cal2EnhanceAdd = async (files) => { enhImages = []; for (const f of files) enhImages.push(await fileToImage(f)); openEnhance(); };
   window.__cal2PdfBack = () => backToGrid();
   // Run a tool on bytes handed over by the editor (the document as you see it).
   window.__cal2RunPdfTool = async (id, bytes, name, sel) => {
@@ -918,4 +1184,4 @@ export function initPdfEditor() {
     if (t) openTool(t);
   };
 }
-function resetAll() { sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1; etSrc = null; etEdits.clear(); }
+function resetAll() { enhImages = []; sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1; etSrc = null; etEdits.clear(); }
