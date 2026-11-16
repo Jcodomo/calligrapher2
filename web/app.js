@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=7";
+import { initPdfEditor } from "./pdfedit.js?v=8";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
@@ -232,6 +232,7 @@ let drawSeq = 1;
 let signers = [{ id: "s1", name: "Signer 1", color: "#1b1b1f" }];
 let activeSigner = "s1";
 let itemSeq = 1;
+let formNoticeTok = -1;
 let fieldValues = {};       // the PDF's own form fields: name -> value
 
 // Fonts for text/date items. "DocuSign" is a slanted script like DocuSign's stamp.
@@ -525,7 +526,7 @@ async function renderPageObj(p) {
   const page = await src.pdf.getPage(p.idx + 1);
   const vp = page.getViewport({ scale: 2, rotation: ((page.rotate || 0) + p.rot) % 360 });
   const c = document.createElement("canvas"); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
-  await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+  await page.render({ canvasContext: c.getContext("2d"), viewport: vp, annotationMode: window.pdfjsLib.AnnotationMode ? window.pdfjsLib.AnnotationMode.ENABLE_FORMS : 1 }).promise;
   const url = await canvasUrl(c);
   const img = await loadImgEl(url);
   const fields = [];
@@ -537,14 +538,20 @@ async function renderPageObj(p) {
       const name = a.fieldName || a.id;
       const box = { name, nx: x1 / vp.width, ny: y1 / vp.height, nw: (x2 - x1) / vp.width, nh: (y2 - y1) / vp.height };
       if (a.fieldType === "Tx") { fields.push({ ...box, type: "text" }); if (a.fieldValue && fieldValues[name] == null) fieldValues[name] = a.fieldValue; }
-      else if (a.fieldType === "Btn" && !a.pushButton && a.checkBox !== false) { fields.push({ ...box, type: "check" }); if (a.fieldValue != null && fieldValues[name] == null) fieldValues[name] = a.fieldValue !== "Off"; }
+      else if (a.fieldType === "Btn" && a.radioButton) { fields.push({ ...box, type: "radio", value: a.buttonValue }); if (a.fieldValue && a.fieldValue !== "Off" && fieldValues[name] == null) fieldValues[name] = a.fieldValue; }
+      else if (a.fieldType === "Btn" && !a.pushButton) { fields.push({ ...box, type: "check" }); if (a.fieldValue != null && fieldValues[name] == null) fieldValues[name] = a.fieldValue !== "Off"; }
+      else if (a.fieldType === "Ch") { fields.push({ ...box, type: "choice", options: (a.options || []).map((o) => [o.exportValue ?? o.displayValue, o.displayValue ?? o.exportValue]) }); const fv = Array.isArray(a.fieldValue) ? a.fieldValue[0] : a.fieldValue; if (fv && fieldValues[name] == null) fieldValues[name] = fv; }
     }
   } catch (_) {}
   return { img, w: img.naturalWidth, h: img.naturalHeight, url, fields };
 }
 async function ensurePageImage(pi) {
   const p = docPages[pi]; if (!p || p.img) return p;
-  if (!p._loading) p._loading = renderPageObj(p).then((r) => { Object.assign(p, r); p._loading = null; return p; });
+  if (!p._loading) p._loading = renderPageObj(p).then((r) => {
+    Object.assign(p, r); p._loading = null;
+    if (r.fields && r.fields.length && formNoticeTok !== loadToken) { formNoticeTok = loadToken; setTimeout(() => toast("This PDF has fillable fields — click a box to type, Tab moves to the next one."), 400); }
+    return p;
+  });
   await p._loading;
   updatePageImage(pi);
   return p;
@@ -952,6 +959,66 @@ function focusInlineEdit(id) {
   const it = docItems.find((i) => i.id === id); if (!it || it.type !== "text") return;
   requestAnimationFrame(() => { const el = document.querySelector(`#ed_pages .ditem[data-id="${id}"]`); if (el) startInlineEdit(it, el); });
 }
+async function detectFormFields(all) {
+  if (!doc) return;
+  const list = all ? docPages.map((_, i) => i) : [curPage];
+  let made = 0;
+  for (const pi of list) {
+    const p = await ensurePageImage(pi); if (!p || !p.img) continue;
+    const W = 1200, H = Math.round(W * p.h / p.w);
+    const c = document.createElement("canvas"); c.width = W; c.height = H;
+    const cx = c.getContext("2d", { willReadFrequently: true }); cx.fillStyle = "#fff"; cx.fillRect(0, 0, W, H); cx.drawImage(p.img, 0, 0, W, H);
+    const px = cx.getImageData(0, 0, W, H).data, dark = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++) dark[i] = (px[i * 4] * 0.3 + px[i * 4 + 1] * 0.59 + px[i * 4 + 2] * 0.11) < 140 ? 1 : 0;
+    const D = (x, y) => (x < 0 || y < 0 || x >= W || y >= H) ? 0 : dark[y * W + x];
+    const inkIn = (x0, y0, x1, y1) => { let n = 0, t = 0; for (let y = Math.max(0, y0); y < Math.min(H, y1); y++) for (let x = Math.max(0, x0); x < Math.min(W, x1); x++) { t++; n += dark[y * W + x]; } return t ? n / t : 1; };
+    // existing boxes on this page (ours and the PDF's own) are left alone
+    const taken = [...docItems.filter((it) => (it.page || 0) === pi && (it.isField || it.tbox)).map((it) => ({ x: it.nx * W, y: it.ny * H, w: it.nw * W, h: it.nw * W * it.ar })),
+      ...(p.fields || []).map((f) => ({ x: f.nx * W, y: f.ny * H, w: f.nw * W, h: f.nh * H }))];
+    const free = (x, y, w, h) => !taken.some((t) => x < t.x + t.w && x + w > t.x && y < t.y + t.h && y + h > t.y);
+    const add = (o) => { taken.push(o.box); docItems.push({ ...o.it, id: "it" + itemSeq++, page: pi, opacity: 1, signer: activeSigner }); made++; };
+    const lines = [], boxes = [];
+    for (let y = 2; y < H - 2; y++) {
+      let x = 0;
+      while (x < W) {
+        if (!dark[y * W + x]) { x++; continue; }
+        let x1 = x; while (x1 < W && (dark[y * W + x1] || dark[y * W + x1 + 1])) x1++;
+        const len = x1 - x;
+        if (len >= W * 0.06) {
+          // a thin rule: little ink 3 rows above and below along most of it
+          if (inkIn(x, y - 4, x1, y - 3) < 0.35 && inkIn(x, y + 4, x1, y + 5) < 0.35) lines.push({ x0: x, x1, y });
+        } else if (len >= 9 && len <= 30) boxes.push({ x0: x, x1, y });
+        x = x1 + 1;
+      }
+    }
+    // merge thick rules (several rows) into one
+    lines.sort((a, b) => a.y - b.y || a.x0 - b.x0);
+    const rules = [];
+    for (const l of lines) { const r = rules.find((q) => Math.abs(q.x0 - l.x0) < 6 && Math.abs(q.x1 - l.x1) < 6 && l.y - q.y2 <= 2); if (r) r.y2 = l.y; else rules.push({ ...l, y2: l.y }); }
+    for (const r of rules) {
+      if (r.y2 - r.y > 4) continue;
+      const fh = Math.round(Math.min(34, Math.max(18, (r.x1 - r.x0) * 0.12)));
+      const top = r.y - fh, x0 = r.x0 + 2, w = r.x1 - r.x0 - 4;
+      if (top < 0 || inkIn(x0, top + 2, x0 + w, r.y - 2) > 0.02 || !free(x0, top, w, fh)) continue;   // already filled in, or text sits on it
+      add({ box: { x: x0, y: top, w, h: fh }, it: { type: "text", isField: true, fieldKind: "text", label: "Text", text: "", nx: x0 / W, ny: top / H, nw: w / W, ar: fh / w, font: 5 } });
+    }
+    // little empty squares: top edge, bottom edge the same width, both sides inked, inside blank
+    const seen = new Set();
+    for (const b of boxes) {
+      const L = b.x1 - b.x0, key = Math.round(b.x0 / 4) + ":" + Math.round(b.y / 4);
+      if (seen.has(key)) continue;
+      const yb = b.y + L - 1;
+      let ok = false;
+      for (let d = -2; d <= 2 && !ok; d++) if (inkIn(b.x0 + 1, yb + d, b.x1 - 1, yb + d + 1) > 0.8) ok = true;
+      if (!ok || inkIn(b.x0, b.y, b.x0 + 2, yb) < 0.7 || inkIn(b.x1 - 2, b.y, b.x1, yb) < 0.7) continue;
+      if (inkIn(b.x0 + 3, b.y + 3, b.x1 - 3, yb - 3) > 0.08 || !free(b.x0, b.y, L, L)) continue;
+      for (let dy = -1; dy <= L; dy++) seen.add(Math.round(b.x0 / 4) + ":" + Math.round((b.y + dy) / 4));
+      add({ box: { x: b.x0, y: b.y, w: L, h: L }, it: { type: "text", isField: true, fieldKind: "check", label: "", checked: false, text: "", nx: b.x0 / W, ny: b.y / H, nw: L / W, ar: 1, font: 5 } });
+    }
+  }
+  selId = null; render();
+  toast(made ? `Added ${made} form field${made > 1 ? "s" : ""} — fill them in, or Save → editable PDF to keep them fillable.` : "No blank lines or empty boxes found to turn into fields.");
+}
 function addNoteItem(x, y) {
   if (!doc) return null;
   const s = signers.find((q) => q.id === activeSigner);
@@ -1113,6 +1180,27 @@ function renderDoc() {
   if (holdSnap) scheduleSnapshot(); else snapshotNow();
 }
 // Grow text boxes to fit their text (height for wrapped boxes, width for edited PDF text).
+// "Fit": edited PDF text grows/shrinks to the original line's width; a text box to its frame.
+function fitTextToBox(it) {
+  const el = [...document.querySelectorAll(`#ed_pages .ditem[data-id="${it.id}"]`)].find((e) => e.clientWidth > 0); if (!el) return;
+  const td = el.querySelector(".tbtext"); if (!td || !(it.text || "").trim()) return;
+  const ovW = el.parentNode.clientWidth || 1;
+  if (it.tedit) {
+    const target = (it.cover ? it.cover.nw : it.nw) * ovW, cur = td.scrollWidth || 1;
+    it.fs = Math.max(0.002, it.fs * target / cur); it.nw = target / ovW;
+    return;
+  }
+  const boxW = el.clientWidth, boxH = el.clientHeight;
+  // lines stay as typed (no new wrapping): the longest one fills the width, all of them fit the height
+  const ws = td.style.whiteSpace; td.style.whiteSpace = "pre"; td.style.width = "max-content";
+  let lo = 0.002, hi = 0.2;
+  for (let k = 0; k < 18; k++) {
+    const mid = (lo + hi) / 2; td.style.fontSize = mid * ovW + "px";
+    if (td.scrollHeight <= boxH + 1 && td.offsetWidth <= boxW + 1) lo = mid; else hi = mid;
+  }
+  td.style.whiteSpace = ws; td.style.width = "";
+  it.fs = lo;
+}
 function fitTextBoxes() {
   document.querySelectorAll("#ed_pages .ditem.tbox").forEach((el) => {
     const it = docItems.find((x) => x.id === el.dataset.id); if (!it || it.id === editingId) return;
@@ -1206,7 +1294,7 @@ function itemEl(it, dispW, dispH) {
   el.style.cssText = `left:${it.nx * dispW}px;top:${it.ny * dispH}px;width:${w}px;height:${h}px;opacity:${it.opacity ?? 1};color:${itemColor(it)}`;
   if (it.tbox) {
     const f = tboxFont(it), fsPx = it.fs * dispW, pad = it.tedit ? 0 : Math.round(fsPx * 0.2);
-    el.innerHTML = `<div class="tbtext" style="font-family:${f.css.replace(/"/g, "&quot;")};font-size:${fsPx}px;font-weight:${f.weight};font-style:${f.style};${f.synth ? "font-synthesis:none;" : ""}line-height:${it.tedit ? "normal" : 1.2};color:${itemColor(it)};background:${it.bg && it.bg !== "none" ? it.bg : "transparent"};text-align:${it.align || "left"};padding:${pad}px;white-space:${it.tedit ? "pre" : "pre-wrap"}">${escapeHTML(tboxDisplay(it))}</div>`;
+    el.innerHTML = `<div class="tbtext" style="font-family:${f.css.replace(/"/g, "&quot;")};font-size:${fsPx}px;font-weight:${f.weight};font-style:${f.style};${f.synth ? "font-synthesis:none;" : ""}line-height:${it.lh || (it.tedit ? "normal" : 1.2)};letter-spacing:${it.ls || 0}em;color:${itemColor(it)};background:${it.bg && it.bg !== "none" ? it.bg : "transparent"};text-align:${it.align || "left"};padding:${pad}px;white-space:${it.tedit ? "pre" : "pre-wrap"}">${escapeHTML(tboxDisplay(it))}</div>`;
   } else if (it.type === "sig") el.innerHTML = it.svg.replace("<svg ", '<svg preserveAspectRatio="none" style="width:100%;height:100%;display:block;pointer-events:none" ');
   else if (it.type === "img") el.innerHTML = `<img src="${it.src}" alt="" draggable="false" style="width:100%;height:100%;display:block;pointer-events:none">`;
   else if (it.type === "shape") el.innerHTML = shapeSVG(it, w, h);
@@ -1364,7 +1452,21 @@ function startResize(it, el, corner, e, dispW, dispH) {
 function renderFields(ov, dispW, dispH, fields) {
   (fields || []).forEach((f) => {
     const x = f.nx * dispW, y = f.ny * dispH, w = f.nw * dispW, h = f.nh * dispH;
-    if (f.type === "check") {
+    if (f.type === "radio") {
+      const rb = document.createElement("input"); rb.type = "radio"; rb.className = "dfield"; rb.name = "rf_" + f.name;
+      rb.checked = fieldValues[f.name] === f.value; rb.style.cssText = `left:${x}px;top:${y}px;width:${Math.max(14, h)}px;height:${Math.max(14, h)}px;margin:0`;
+      rb.onchange = () => { if (rb.checked) { fieldValues[f.name] = f.value; scheduleSnapshot(); } };
+      ov.appendChild(rb);
+    } else if (f.type === "choice") {
+      const sl = document.createElement("select"); sl.className = "dfield";
+      sl.appendChild(new Option("", ""));
+      (f.options || []).forEach(([v, l]) => sl.appendChild(new Option(l, v)));
+      sl.value = fieldValues[f.name] || "";
+      sl.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;font-size:${Math.min(h * 0.7, 16)}px`;
+      sl.onchange = () => { fieldValues[f.name] = sl.value; scheduleSnapshot(); };
+      sl.onkeydown = (ev) => ev.stopPropagation();
+      ov.appendChild(sl);
+    } else if (f.type === "check") {
       const cb = document.createElement("input"); cb.type = "checkbox"; cb.className = "dfield";
       cb.checked = !!fieldValues[f.name]; cb.style.cssText = `left:${x}px;top:${y}px;width:${Math.max(14, h)}px;height:${Math.max(14, h)}px`;
       cb.onchange = () => { fieldValues[f.name] = cb.checked; scheduleSnapshot(); };
@@ -1543,6 +1645,7 @@ function setEdTool(t) {
   if (t === "wm") { openWmPanel(); return; }
   if (t === "drawsig") { openDrawPad("sig"); return; }
   if (t === "fonts") { setEdTool("select"); openFontScan(); return; }
+  if (t === "detect" || t === "detectall") { setEdTool("select"); detectFormFields(t === "detectall"); return; }
   edTool = t;
   if (edTool !== "select") { selId = null; selDraw = null; }
   if (t === "sig" || t === "handwrite") openSide(true);
@@ -1701,7 +1804,11 @@ function renderProps() {
     const info = pfontInfo(it);
     add(pcell(fontPicker(info && !it.ffOverride ? "__pdf" : fontByKey(it.ff).name, !!info, (v) => { if (v === "__pdf") it.ffOverride = false; else { it.ff = v; if (info) it.ffOverride = true; if (!it.tedit) TD.text.ff = v; ensureFont(v); } render(); })));
     const pts = pagePts(it.page || 0);
-    add(pcell(numBox(Math.round(it.fs * pts * 10) / 10, 4, 200, 1, (v) => { it.fs = v / pts; if (!it.tedit) TD.text.pt = v; render(); }, "Font size (pt)")));
+    const setPt = (v) => { v = Math.max(4, Math.min(200, Math.round(v * 10) / 10)); it.fs = v / pts; if (!it.tedit) TD.text.pt = v; propsSig = ""; render(); };
+    add(pcell(pbtn("A−", false, () => setPt(it.fs * pts - 1), "Smaller text"), numBox(Math.round(it.fs * pts * 10) / 10, 4, 200, 0.5, setPt, "Font size (pt)"), pbtn("A+", false, () => setPt(it.fs * pts + 1), "Bigger text"),
+      pbtn("⤢ Fit", false, () => { fitTextToBox(it); propsSig = ""; render(); }, it.tedit ? "Size the text to fill the original line's width" : "Size the text so it fills the box")));
+    add(pcell(mk("span", { title: "Line spacing" }, "↕"), selBox([["", "Auto"], ["1", "1.0"], ["1.15", "1.15"], ["1.2", "1.2"], ["1.5", "1.5"], ["2", "2.0"]], String(it.lh || ""), (v) => { it.lh = v ? +v : undefined; render(); }, "Line spacing"),
+      mk("span", { title: "Letter spacing" }, "↔"), numBox(Math.round((it.ls || 0) * 100), -20, 60, 1, (v) => { it.ls = v / 100; render(); }, "Letter spacing (% of size)")));
     add(pcell(colorBtn(it.color || "#000000", false, (c) => { it.color = c; if (!it.tedit) TD.text.color = c; render(); }, "Text colour"), colorBtn(it.bg || "none", true, (c) => { it.bg = c; render(); }, "Background")));
     add(opacityCell(() => it.opacity ?? 1, (v) => { it.opacity = v; }));
     add(pcell(pbtn("<b>B</b>", !!it.bold, () => { it.bold = !it.bold; if (!it.tedit) TD.text.bold = it.bold; render(); }, "Bold"), pbtn("<i style='font-family:serif;font-size:18px'>I</i>", !!it.italic, () => { it.italic = !it.italic; render(); }, "Italic"),
@@ -1998,16 +2105,18 @@ async function drawDocItemToCtx(ctx, it, W, H, res) {
     await ensureFontsIn(f.css);
     ctx.font = `${f.style} ${f.weight} ${fsPx}px ${f.css}`;
     ctx.fillStyle = itemColor(it); ctx.textBaseline = "alphabetic";
+    try { ctx.letterSpacing = ((it.ls || 0) * fsPx) + "px"; } catch (_) {}
     const disp = tboxDisplay(it);
     try { await document.fonts.load(ctx.font, disp.slice(0, 60) || "A"); } catch (_) {}
     if (it.tedit) ctx.fillText(disp, x, y + (it.asc || 0.86) * fsPx);
     else {
-      const lh = fsPx * 1.2, lines = wrapLines(ctx, disp, Math.max(4, w - pad * 2));
+      const lh = fsPx * (it.lh || 1.2), lines = wrapLines(ctx, disp, Math.max(4, w - pad * 2));
       ctx.textAlign = it.align === "center" ? "center" : it.align === "right" ? "right" : "left";
       const lx = it.align === "center" ? x + w / 2 : it.align === "right" ? x + w - pad : x + pad;
       lines.forEach((ln, i) => ctx.fillText(ln, lx, y + pad + i * lh + (lh - fsPx) / 2 + fsPx * 0.82));
       ctx.textAlign = "left";
     }
+    try { ctx.letterSpacing = "0px"; } catch (_) {}
   } else if (it.type === "sig") {
     const img = await svgToImage(it.svg.replace("<svg ", `<svg style="color:${itemColor(it)}" `));
     ctx.drawImage(img, x, y, w, h);
@@ -2069,7 +2178,9 @@ async function composePage(pi, res, mode = "all") {
       const v = fieldValues[f.name]; if (v == null || v === "" || v === false) continue;
       const x = f.nx * W, y = f.ny * H, w = f.nw * W, h = f.nh * H;
       ctx.fillStyle = "#15233a";
-      if (f.type === "check") { ctx.font = `${h * 0.9}px system-ui, sans-serif`; ctx.textBaseline = "top"; ctx.fillText("X", x + w * 0.12, y); }
+      if (f.type === "radio") { if (v === f.value) { ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, Math.min(w, h) * 0.28, 0, Math.PI * 2); ctx.fill(); } }
+      else if (f.type === "choice") { const o = (f.options || []).find((q) => q[0] === v); ctx.font = `${Math.min(h * 0.72, 18 * res)}px system-ui, sans-serif`; ctx.textBaseline = "middle"; ctx.fillText(String(o ? o[1] : v), x + 3, y + h / 2); }
+      else if (f.type === "check") { ctx.font = `${h * 0.9}px system-ui, sans-serif`; ctx.textBaseline = "top"; ctx.fillText("X", x + w * 0.12, y); }
       else { ctx.font = `${Math.min(h * 0.72, 18 * res)}px system-ui, sans-serif`; ctx.textBaseline = "middle"; ctx.fillText(String(v), x + 3, y + h / 2); }
     }
   }
@@ -2206,7 +2317,12 @@ async function buildOutputPdf() {
   }
   if (pristine) for (const p of docPages) for (const f of (p.fields || [])) {
     const v = fieldValues[f.name]; if (v == null || v === "") continue;
-    try { if (f.type === "check") { if (v) form.getCheckBox(f.name).check(); } else form.getTextField(f.name).setText(String(v)); } catch (_) {}
+    try {
+      if (f.type === "check") { if (v) form.getCheckBox(f.name).check(); }
+      else if (f.type === "radio") { if (v === f.value) { const rg = form.getRadioGroup(f.name), opts = rg.getOptions(), pick = opts.includes(String(v)) ? String(v) : opts[+v]; if (pick != null) rg.select(pick); } }
+      else if (f.type === "choice") { const fld = form.getField(f.name); if (fld.select) fld.select(String(v)); }
+      else form.getTextField(f.name).setText(String(v));
+    } catch (_) {}
   }
   return { pdf, nf, nn };
 }
@@ -3401,6 +3517,15 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("share").addEventListener("click", copyLink);
   $("sig_save").addEventListener("click", saveCurrentSig);
   renderSavedSigs();
+  // a signature drawn in the document builder (mtgcalc) is ready to place
+  try {
+    const want = localStorage.getItem("cal2_use_sig");
+    if (want) {
+      localStorage.removeItem("cal2_use_sig");
+      const s = loadSavedSigs().find((x) => x.id === want);
+      if (s) { sigSVG = s.svg; sigBox = { w: s.w, h: s.h }; toggles.usesig = true; syncToggles(); $("sig_controls").style.display = ""; touchSig(s.id); let n = 0; const t = setInterval(() => { if (workMode === "doc" && doc) { clearInterval(t); setEdTool("sig"); toast("Your signature is ready — click the page to place it."); } else if (++n > 60) clearInterval(t); }, 250); }
+    }
+  } catch (_) {}
   buildSigners();
   refreshRecentLists();
   let lastW = 0;

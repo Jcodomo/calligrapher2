@@ -524,28 +524,67 @@ function openOcr() {
     <button class="btn" id="pe_ocr_go">OCR → searchable PDF</button>
     <div id="pe_ocr_prog" style="font-size:11px;color:var(--muted);margin-top:6px"></div>`);
   $("pe_ocr_go").onclick = () => withBusy("Starting OCR…", async () => {
-    const T = await ensureTesseract();
-    const lang = $("pe_oclang").value, prog = $("pe_ocr_prog");
+    const lang = $("pe_oclang").value, prog = $("pe_ocr_prog"), t0 = performance.now();
     const L = PDFLib(); const out = await L.PDFDocument.create();
     const font = await out.embedFont(L.StandardFonts.Helvetica);
-    const worker = await T.createWorker(lang, 1, { logger: (m) => { if (m.status === "recognizing text") prog.textContent = "Reading… " + Math.round(m.progress * 100) + "%"; } });
+    // pages that already carry real text are kept as they are; only scans are read
+    const need = [];
     for (let i = 0; i < pages.length; i++) {
-      prog.textContent = `Page ${i + 1} / ${pages.length}…`;
-      const c = await rasterize(pages[i], 2);
-      const u8 = dataURLtoU8(c.toDataURL("image/jpeg", 0.85));
-      const img = await out.embedJpg(u8);
-      const pg = out.addPage([c.width, c.height]);
-      pg.drawImage(img, { x: 0, y: 0, width: c.width, height: c.height });
-      const { data } = await worker.recognize(c);
-      (data.words || []).forEach((w) => {
+      const e = pages[i], src = sources.find((q) => q.id === e.srcId);
+      let has = false;
+      try { const pg = await (await jsDoc(src)).getPage(e.srcIndex + 1); const tc = await pg.getTextContent(); has = tc.items.some((it) => (it.str || "").trim().length > 1) && !e.rot; } catch (_) {}
+      need.push(!has);
+    }
+    const todo = need.filter(Boolean).length;
+    let sched = null;
+    if (todo) {
+      prog.textContent = "Loading the text reader…";
+      sched = await ocrScheduler(lang, Math.min(todo, ocrPoolSize()));
+    }
+    // rasterize + read the scans in parallel (results kept in page order)
+    let done = 0;
+    const reads = pages.map((e, i) => need[i] ? (async () => {
+      const c = await rasterize(e, 2);
+      const r = await sched.addJob("recognize", c);
+      done++; prog.textContent = `Reading page ${done} of ${todo}…`;
+      return { c, words: (r.data && r.data.words) || [] };
+    })() : null);
+    for (let i = 0; i < pages.length; i++) {
+      if (!need[i]) {
+        const e = pages[i], src = sources.find((q) => q.id === e.srcId);
+        const lib = await L.PDFDocument.load(src.bytes, { ignoreEncryption: true });
+        const [cp] = await out.copyPages(lib, [e.srcIndex]); out.addPage(cp); continue;
+      }
+      const { c, words } = await reads[i];
+      const img = await out.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.85)));
+      const pg = out.addPage([c.width / 2, c.height / 2]);
+      pg.drawImage(img, { x: 0, y: 0, width: c.width / 2, height: c.height / 2 });
+      words.forEach((w) => {
         if (!w.text.trim()) return;
-        const bb = w.bbox, h = bb.y1 - bb.y0;
-        try { pg.drawText(w.text, { x: bb.x0, y: c.height - bb.y1, size: Math.max(4, h * 0.8), font, opacity: 0 }); } catch (_) {}
+        const bb = w.bbox, h = (bb.y1 - bb.y0) / 2;
+        try {
+          const size = Math.max(3, h * 0.85), tw = font.widthOfTextAtSize(w.text, size), want = (bb.x1 - bb.x0) / 2;
+          pg.drawText(w.text, { x: bb.x0 / 2, y: (c.height - bb.y1) / 2 + h * 0.15, size: tw > 0 ? Math.max(3, size * Math.min(2, want / tw)) : size, font, opacity: 0 });
+        } catch (_) {}
       });
     }
-    await worker.terminate();
-    await save(out, "ocr.pdf"); prog.textContent = ""; note("Saved ocr.pdf (searchable).");
+    await save(out, "ocr.pdf"); prog.textContent = "";
+    const secs = Math.round((performance.now() - t0) / 100) / 10;
+    note(`Saved ocr.pdf (searchable) — ${todo} scanned page${todo === 1 ? "" : "s"} read${pages.length - todo ? ", " + (pages.length - todo) + " already had text" : ""}, ${secs}s.`);
   });
+}
+// A pool of OCR workers using the small, fast models; kept warm for the next run.
+let ocrPool = null;
+function ocrPoolSize() { return Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)); }
+async function ocrScheduler(lang, n) {
+  const T = await ensureTesseract();
+  if (ocrPool && ocrPool.lang !== lang) { try { await ocrPool.sched.terminate(); } catch (_) {} ocrPool = null; }
+  if (!ocrPool) ocrPool = { lang, sched: T.createScheduler(), n: 0 };
+  while (ocrPool.n < n) {
+    const w = await T.createWorker(lang, 1, { langPath: "https://tessdata.projectnaptha.com/4.0.0_fast", cacheMethod: "write" });
+    ocrPool.sched.addWorker(w); ocrPool.n++;
+  }
+  return ocrPool.sched;
 }
 function openUnlock() {
   panelShell("Unlock", `
