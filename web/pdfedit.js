@@ -253,7 +253,12 @@ async function rasterizeToPdf(entries, scale, quality) {
   return out;
 }
 function dataURLtoU8(u) { const b = atob(u.split(",")[1]); const a = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; }
-async function save(out, name) { const bytes = await out.save(); dl(name, new Blob([bytes], { type: "application/pdf" })); }
+// When a tool runs on the editor's open document, results that change it go back there.
+async function save(out, name) {
+  const bytes = await out.save();
+  if (window.__cal2PdfSaveHook && await window.__cal2PdfSaveHook(bytes, name)) return;
+  dl(name, new Blob([bytes], { type: "application/pdf" }));
+}
 
 async function stampNumbersWatermark(out, { nums, pos, wm }) {
   const L = PDFLib();
@@ -340,6 +345,8 @@ function backToGrid() {
   $("pe_toolhead").textContent = "Tools";
   $("pe_toolgrid").style.display = "";
   $("pe_toolpanel").innerHTML = "";
+  // Inside the document editor the tool panel just closes (the document stays in view).
+  if (document.body.classList.contains("toolpanel")) { if (window.__cal2PdfPanelClosed) window.__cal2PdfPanelClosed(); return; }
   renderGrid();
 }
 function panelShell(title, html) {
@@ -862,5 +869,14 @@ export function initPdfEditor() {
   window.__cal2TxtToPdf = (f) => txtToPdf(f);
   window.__cal2ImagesToPdf = (files) => imagesToPdf(files);
   window.__cal2PdfBack = () => backToGrid();
+  // Run a tool on bytes handed over by the editor (the document as you see it).
+  window.__cal2RunPdfTool = async (id, bytes, name, sel) => {
+    resetAll();
+    await addSourceBytes(name || "document.pdf", new Uint8Array(bytes));
+    (sel || []).forEach((i) => { if (i < pages.length) selected.add(i); });
+    buildGrid();
+    const t = TOOLS.find((x) => x.id === id);
+    if (t) openTool(t);
+  };
 }
 function resetAll() { sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1; etSrc = null; etEdits.clear(); }

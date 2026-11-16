@@ -1,7 +1,7 @@
 // recents.js — remembers the last few opened documents (bytes + a thumbnail) in
 // IndexedDB so both "Sign & scan" and "PDF editor" can reopen them instantly.
 // Shared store, so a doc opened in either mode shows up in both.
-const DB_NAME = "cal2recents", STORE = "docs", MAX = 5;
+const DB_NAME = "cal2recents", STORE = "docs", MAX = 10;
 
 function openDB() {
   return new Promise((res, rej) => {

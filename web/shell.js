@@ -71,7 +71,7 @@ const TOOLS = {
   adddate:   { name: "Add Date to PDF", desc: "Stamp a date and time, in any time zone.", c: C.sign, i: "date", mode: "doc", tool: "date", accept: DOC_IN },
   forms:     { name: "Form Builder", desc: "Add fillable fields and save a PDF anyone can fill in.", c: C.form, i: "field", mode: "doc", tool: "field:text", accept: DOC_IN },
   fillform:  { name: "Fill PDF Form", desc: "Fill in the form fields a PDF already has.", c: C.form, i: "field", mode: "pdf", tool: "fillform", accept: PDF_IN },
-  merge:     { name: "Merge PDF", desc: "Combine several PDFs into one, in the order you want.", c: C.org, i: "merge", mode: "pdf", tool: "", multiple: true, accept: PDF_IN, arrive: "Drag the pages into order, then press “Download PDF” on the right." },
+  merge:     { name: "Merge PDF", desc: "Combine several PDFs into one, in the order you want.", c: C.org, i: "merge", mode: "pdf", tool: "", multiple: true, accept: PDF_IN, arrive: "Drag the pages into order (or add more PDFs), then Download." },
   split:     { name: "Split PDF", desc: "Cut a PDF into separate files by page ranges.", c: C.org, i: "split", mode: "pdf", tool: "split", accept: PDF_IN },
   rotate:    { name: "Rotate PDF", desc: "Turn pages the right way up.", c: C.org, i: "rotate", mode: "pdf", tool: "", accept: PDF_IN, arrive: "Use ⟲ ⟳ on a page, or tick pages and pick Rotate in Tools. Then Download PDF." },
   delete:    { name: "Delete PDF Pages", desc: "Remove the pages you don't need.", c: C.org, i: "trash", mode: "pdf", tool: "", accept: PDF_IN, arrive: "Press 🗑 on a page (or tick pages and pick Delete Pages). Then Download PDF." },
@@ -103,7 +103,7 @@ const MENU = [
   ["Handwriting", ["write", "signature", "sigimport", "scanlook"]],
 ];
 const POPULAR = ["edit", "sign", "merge", "compress", "pdf2img", "write"];
-const toolHref = (id) => (TOOLS[id].mode === "write" && !TOOLS[id].setup ? "#/write" : "#/tool/" + id);
+const toolHref = (id) => "#/tool/" + id;
 
 function menuHTML() {
   return MENU.map(([h, ids]) => `<div class="msec"><h4>${h}</h4>${ids.map((id) => `<a href="${toolHref(id)}">${tile(TOOLS[id].c, TOOLS[id].i)}<span>${TOOLS[id].name}</span></a>`).join("")}</div>`).join("");
@@ -147,7 +147,7 @@ function renderHome() {
       </div>
       <div>${HERO_ART}</div>
     </div>
-    ${dropZone("#0055ff", "CHOOSE FILES")}
+    ${dropZone("var(--accent-strong)", "CHOOSE FILES")}
     <h2 class="sec-h">Most popular tools</h2>
     <p class="sec-sub">${Object.keys(TOOLS).length} tools to edit, sign, convert and organize — free, with no account.</p>
     <div class="pop">${POPULAR.map(card).join("")}</div>
@@ -175,7 +175,7 @@ window.__cal2RefreshHomeRecents = refreshHomeRecents;
 // ---- tool landing --------------------------------------------------------------
 const CHECKS = ["Works right in your browser", "Your files are never uploaded", "Free, no account or sign-up"];
 const STEPS = {
-  doc: ["Choose your PDF or picture, or drop it on the box above.", "Use the toolbar over the page — then click or drag on the page.", "Press Download to save a PDF (flattened or fillable) or a PNG."],
+  doc: ["Choose your PDF or picture, or drop it on the box above.", "Use the toolbar over the page — then click or drag on the page.", "Press Download to save a PDF (flattened, or editable with fillable fields) or a PNG."],
   pdf: ["Choose your PDF, or drop it on the box above.", "Set the options on the right; arrange pages in the middle.", "Download the result straight to your device."],
   convert: ["Choose your file(s), or drop them on the box above.", "We convert it in your browser — nothing is sent anywhere.", "The new PDF downloads straight away."],
 };
@@ -213,7 +213,7 @@ async function renderRecent() {
     <div class="tool-head"><h1>Recent files</h1>
       <p style="text-align:center;color:var(--muted);margin-top:-8px">The last ${list.length || "few"} files you opened, kept only in this browser.</p>
       <div id="recent_list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px;margin-top:22px"></div>
-      ${list.length ? "" : `<div style="margin-top:20px">${dropZone("#0055ff", "CHOOSE FILE", true)}</div>`}
+      ${list.length ? "" : `<div style="margin-top:20px">${dropZone("var(--accent-strong)", "CHOOSE FILE", true)}</div>`}
     </div>
   </div>`;
   const host = $("recent_list");
@@ -265,7 +265,8 @@ async function appReady() {
   if (window.__cal2AppReady) return;
   await new Promise((res) => window.addEventListener("cal2:ready", res, { once: true }));
 }
-let pendingDoc = null;   // { tool, then, setup } to apply once the editor shows
+// Tools that work on the open document (everything except the pure converters / unlock).
+const ON_DOC = (id) => TOOLS[id] && id !== "img2pdf" && id !== "txt2pdf" && id !== "unlock" && !(TOOLS[id].mode === "write" && !TOOLS[id].setup && id !== "write");
 async function intakeAny(files) {
   files = [...files];
   const pdfs = files.filter(isPdf), imgs = files.filter(isImage);
@@ -280,12 +281,12 @@ async function intakeTool(id, files) {
   const t = TOOLS[id]; files = [...files];
   await appReady();
   try {
-    if (t.mode === "doc") {
-      const f = files.find((x) => isPdf(x) || isImage(x));
-      if (!f) { toast("Choose a PDF or a picture."); return; }
-      pendingDoc = { tool: t.tool, then: t.then, setup: t.setup };
-      await window.__cal2OpenDocFile(f);
-      go("#/edit");
+    if (ON_DOC(id) && id !== "write" && id !== "signature" && id !== "sigimport") {
+      const docs = files.filter((x) => isPdf(x) || isImage(x));
+      if (!docs.length) { toast("Choose a PDF or a picture."); return; }
+      await window.__cal2OpenDocFile(docs[0]);
+      if (docs.length > 1) await window.__cal2AddFilesToDoc(docs.slice(1));
+      go("#/edit/" + id);
     } else if (id === "img2pdf") {
       const imgs = files.filter(isImage); if (!imgs.length) { toast("Choose JPG or PNG pictures."); return; }
       toast("Building your PDF…"); await window.__cal2ImagesToPdf(imgs); toast("Saved images.pdf — check your downloads.");
@@ -303,6 +304,7 @@ async function intakeTool(id, files) {
 async function startNoFile(id) {
   const t = TOOLS[id];
   await appReady();
+  if (window.__cal2HasDoc() && ON_DOC(id)) { go("#/edit/" + id); return; }
   if (t.mode === "pdf") { window.__cal2ResetPdf(); go("#/pdf/" + t.tool); return; }
   go("#/write");
   setTimeout(() => applySetup(t.setup), 120);
@@ -335,22 +337,18 @@ async function route() {
   const [a, b] = parts;
   if (a === "tool" && TOOLS[b]) {
     const t = TOOLS[b];
-    if (t.mode === "write" && !t.setup) { go("#/write"); return; }
+    await appReady();
+    // With a document open, a tool works on it — the document stays in view.
+    if (window.__cal2HasDoc() && ON_DOC(b)) { go("#/edit/" + b); return; }
+    if (t.mode === "write" && !t.setup) { go("#/write"); return; }   // no document open: the handwriting studio
     document.body.dataset.route = "tool"; renderTool(b); document.title = t.name + " — Calligrapher"; window.scrollTo(0, 0); return;
   }
   if (a === "recent") { document.body.dataset.route = "tool"; await renderRecent(); document.title = "Recent files — Calligrapher"; window.scrollTo(0, 0); return; }
   await appReady();
   if (a === "edit") {
-    if (!window.__cal2HasDoc()) { go("#/tool/edit"); return; }
-    document.body.dataset.route = "work"; window.__cal2SetWork("doc"); document.title = "Editor — Calligrapher";
-    if (pendingDoc) {
-      const p = pendingDoc; pendingDoc = null;
-      setTimeout(() => {
-        if (p.tool && p.tool !== "select") window.__cal2SetDocTool(p.tool);
-        if (p.then === "image") window.__cal2SetDocTool("image");
-        if (p.setup) applySetup(p.setup);
-      }, 60);
-    }
+    if (!window.__cal2HasDoc()) { go(b && TOOLS[b] ? "#/tool/" + b : "#/tool/edit"); return; }
+    document.body.dataset.route = "work"; window.__cal2SetWork("doc"); document.title = (b && TOOLS[b] ? TOOLS[b].name + " — " : "Editor — ") + "Calligrapher";
+    if (b && TOOLS[b]) { setTimeout(() => { window.__cal2ApplyTool(b); if (TOOLS[b].arrive) toast(TOOLS[b].arrive.replace(/“Download PDF” on the right|Download PDF/g, "Download")); }, 40); history.replaceState(null, "", "#/edit"); }
     return;
   }
   if (a === "pdf") {
@@ -373,6 +371,27 @@ $("mega").addEventListener("click", (e) => { if (e.target.closest("a")) closeMeg
 document.addEventListener("click", (e) => { if (!e.target.closest("#mega") && !e.target.closest("#tools_btn") && !e.target.closest("#burger")) closeMega(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMega(); });
 $("top_choose").onclick = () => pick(DOC_IN, true, intakeAny);
+// light (soft grey) / dark theme, remembered in this browser
+const MOON = '<svg class="i" viewBox="0 0 20 20"><path d="M16.5 12.2A6.8 6.8 0 017.8 3.5a6.8 6.8 0 108.7 8.7z"/></svg>';
+const SUN = '<svg class="i" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3.5"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.3 4.3l1.4 1.4M14.3 14.3l1.4 1.4M4.3 15.7l1.4-1.4M14.3 5.7l1.4-1.4"/></svg>';
+function syncThemeBtn() { const dark = document.documentElement.dataset.theme === "dark"; $("theme_btn").innerHTML = dark ? SUN : MOON; $("theme_btn").title = dark ? "Switch to the light theme" : "Switch to the dark theme"; }
+$("theme_btn").onclick = () => { const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = t; try { localStorage.setItem("cal2_theme", t); } catch (_) {} syncThemeBtn(); };
+syncThemeBtn();
+// Recent files, one click from anywhere
+async function renderRecentDD() {
+  const dd = $("recent_dd"), list = await listRecents();
+  dd.innerHTML = '<h4>Recent files</h4>' + (list.length ? "" : '<div class="note" style="padding:4px 6px 8px">Files you open show up here.</div>');
+  for (const r of list) {
+    const b = document.createElement("button"); b.className = "rrow";
+    b.innerHTML = (r.thumb ? `<img src="${r.thumb}" alt="">` : '<span class="noimg"></span>') + `<span><b>${esc(r.name)}</b><small>${new Date(r.ts).toLocaleString()}</small></span>`;
+    b.onclick = () => { closeRecentDD(); openRecent(r.id, "doc"); };
+    dd.appendChild(b);
+  }
+  const all = document.createElement("a"); all.className = "all"; all.href = "#/recent"; all.textContent = "See all recent files"; all.onclick = closeRecentDD; dd.appendChild(all);
+}
+function closeRecentDD() { $("recent_dd").classList.remove("open"); $("top_recent").setAttribute("aria-expanded", "false"); }
+$("top_recent").onclick = async (e) => { e.stopPropagation(); const dd = $("recent_dd"); if (dd.classList.contains("open")) { closeRecentDD(); return; } await renderRecentDD(); dd.classList.add("open"); $("top_recent").setAttribute("aria-expanded", "true"); };
+document.addEventListener("click", (e) => { if (!e.target.closest("#recent_dd") && !e.target.closest("#top_recent")) closeRecentDD(); });
 // Files dropped onto the PDF tools' page area join the open set; onto the editor, a
 // picture is inserted on the page and a PDF opens in place of the current one.
 const stage = $("stage");
@@ -383,7 +402,12 @@ stage.addEventListener("drop", async (e) => {
   const files = [...(e.dataTransfer.files || [])]; if (!files.length) return;
   const mode = document.body.dataset.work;
   if (mode === "pdf") { const pdfs = files.filter(isPdf); if (pdfs.length) window.__cal2AddPdfFiles(pdfs); return; }
-  if (mode === "doc" && files.length === 1 && isImage(files[0]) && window.__cal2InsertImageFile) { window.__cal2InsertImageFile(files[0]); return; }
+  if (mode === "doc") {
+    // a picture dropped on a page goes on that page; PDFs are added to the document
+    if (files.length === 1 && isImage(files[0]) && e.target.closest && e.target.closest(".pg") && window.__cal2InsertImageFile) { window.__cal2InsertImageFile(files[0]); return; }
+    const add = files.filter((x) => isPdf(x) || isImage(x)); if (add.length) window.__cal2AddFilesToDoc(add);
+    return;
+  }
   const f = files.find((x) => isPdf(x) || isImage(x)); if (f) { await window.__cal2OpenDocFile(f); go("#/edit"); }
 });
 window.addEventListener("hashchange", route);
