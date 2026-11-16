@@ -54,6 +54,61 @@ const tile = (color, k) => `<span class="ico" style="background:${color}">${icon
 // mode "doc" = document editor (tool = toolbar tool to start with)
 // mode "pdf" = PDF tools (tool = pdfedit tool id; panel tools open on arrival)
 // mode "write" = handwriting studio (no file needed)
+
+// ---- your document builder (mtgcalc) and recently built files ------------------------
+const BUILDER_URL = "https://jcodomo.github.io/mtgcalc/";
+const EXT = ' target="_blank" rel="noopener"';
+// The builder downloads the PDFs it makes, so "recent files" from it live in a folder
+// (usually Downloads). Pick that folder once; it is remembered (Chrome/Edge) and each
+// scan lists the PDFs and pictures changed in the last 30 days, newest first.
+const CAN_SCAN = "showDirectoryPicker" in window;
+function dirDB() { return new Promise((res, rej) => { const r = indexedDB.open("cal2folder", 1); r.onupgradeneeded = () => r.result.createObjectStore("h"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+async function savedDir() { try { const db = await dirDB(); return await new Promise((res) => { const q = db.transaction("h").objectStore("h").get("dir"); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); }); } catch (_) { return null; } }
+async function keepDir(h) { try { const db = await dirDB(); db.transaction("h", "readwrite").objectStore("h").put(h, "dir"); } catch (_) {} }
+async function scanFolder(pickNew) {
+  let d = pickNew ? null : await savedDir();
+  if (d) { try { if ((await d.queryPermission({ mode: "read" })) !== "granted" && (await d.requestPermission({ mode: "read" })) !== "granted") d = null; } catch (_) { d = null; } }
+  if (!d) { d = await window.showDirectoryPicker({ id: "cal2scan", startIn: "downloads", mode: "read" }); keepDir(d); }
+  const cutoff = Date.now() - 30 * 864e5, files = [];
+  for await (const [name, h] of d.entries()) {
+    if (h.kind !== "file" || !/\.(pdf|png|jpe?g|webp)$/i.test(name)) continue;
+    try { const f = await h.getFile(); if (f.lastModified >= cutoff) files.push(f); } catch (_) {}
+  }
+  files.sort((a, b) => b.lastModified - a.lastModified);
+  return { folder: d.name, files: files.slice(0, 40) };
+}
+const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+function renderScanned(host, res) {
+  host.innerHTML = res.files.length ? "" : `<div class="note">No PDFs or pictures from the last 30 days in “${esc(res.folder)}”.</div>`;
+  for (const f of res.files) {
+    const row = document.createElement("div"); row.className = "scanrow";
+    row.innerHTML = `<span class="sr-ic">${/\.pdf$/i.test(f.name) ? "PDF" : "IMG"}</span><span class="sr-n"><b title="${esc(f.name)}">${esc(f.name)}</b><small>${new Date(f.lastModified).toLocaleString()} · ${fmtSize(f.size)}</small></span><button class="btn primary" data-a="edit">Edit</button><button class="btn" data-a="sign">Sign</button>`;
+    row.querySelector('[data-a="edit"]').onclick = () => intakeTool("edit", [f]);
+    row.querySelector('[data-a="sign"]').onclick = () => intakeTool("sign", [f]);
+    host.appendChild(row);
+  }
+}
+async function runScan(host, status, pickNew) {
+  if (!CAN_SCAN) { pick(DOC_IN, true, intakeAny); return; }
+  try { status.textContent = "Scanning…"; const res = await scanFolder(pickNew); status.textContent = `${res.files.length} recent file${res.files.length === 1 ? "" : "s"} in “${res.folder}”`; renderScanned(host, res); }
+  catch (err) { status.textContent = err && err.name === "AbortError" ? "" : "Couldn't read that folder."; }
+}
+function builderPanelHTML() {
+  return `<div class="builder-box">
+    <div class="bb-head"><div><h2 class="sec-h" style="margin:0">Recently built files</h2>
+      <p class="sec-sub" style="margin:4px 0 0">Make documents in your builder, then pick them up here to edit or sign. ${CAN_SCAN ? "Choose your Downloads folder once — it's remembered." : "Your browser can't scan folders, so choose the files instead."}</p></div>
+      <div class="bb-act"><a class="btn-ghost" href="${BUILDER_URL}"${EXT}>Open document builder ↗</a><button class="btn-blue" data-scan>${CAN_SCAN ? "Scan for recent files" : "Choose files"}</button></div></div>
+    <div class="bb-status"><span data-scanstatus></span>${CAN_SCAN ? ' <button class="linkbtn" data-scan-new type="button">Use a different folder</button>' : ""}</div>
+    <div class="scanlist" data-scanlist></div></div>`;
+}
+function wireBuilderPanel(root) {
+  const b = root.querySelector("[data-scan]"); if (!b) return;
+  const host = root.querySelector("[data-scanlist]"), st = root.querySelector("[data-scanstatus]");
+  b.onclick = () => runScan(host, st, false);
+  const nb = root.querySelector("[data-scan-new]"); if (nb) nb.onclick = () => runScan(host, st, true);
+  // already allowed this session? list straight away
+  if (CAN_SCAN) savedDir().then(async (d) => { try { if (d && (await d.queryPermission({ mode: "read" })) === "granted") runScan(host, st, false); } catch (_) {} });
+}
 const C = { edit: "#0fb5b8", sign: "#e0569b", form: "#1f9d55", org: "#7961f2", opt: "#f23030", conv: "#f0a500", prot: "#e8554e", write: "#0055ff" };
 const PDF_IN = "application/pdf,.pdf", DOC_IN = "application/pdf,.pdf,image/*";
 const TOOLS = {
@@ -66,6 +121,7 @@ const TOOLS = {
   highlight: { name: "Highlight PDF", desc: "Make the important parts stand out.", c: C.edit, i: "marker", mode: "doc", tool: "highlight", accept: DOC_IN },
   whiteout:  { name: "Whiteout PDF", desc: "Cover anything on a page with a clean white box.", c: C.edit, i: "whiteout", mode: "doc", tool: "whiteout", accept: DOC_IN },
   pdffonts:  { name: "Save PDF Fonts", desc: "Find the fonts a PDF uses and keep them for your own text.", c: C.edit, i: "edittext", mode: "doc", tool: "fonts", accept: PDF_IN },
+  builder:   { name: "Mortgage Document Builder ↗", desc: "Open your mtgcalc document builder; bring the PDFs it makes back here to sign.", c: C.form, i: "edit", ext: "https://jcodomo.github.io/mtgcalc/" },
   unwatermark: { name: "Remove Watermark", desc: "Take watermarks off PDFs and pictures you own.", c: C.prot, i: "whiteout", mode: "doc", tool: "wm", accept: DOC_IN },
   notes:     { name: "Comment on PDF", desc: "Stick notes on the page; they save as PDF comments.", c: C.edit, i: "note", mode: "doc", tool: "note", accept: DOC_IN },
   sign:      { name: "Sign PDF", desc: "Place a real-looking handwritten signature on any page.", c: C.sign, i: "sign", mode: "doc", tool: "sig", accept: DOC_IN },
@@ -105,16 +161,18 @@ const MENU = [
   ["Convert", ["pdf2img", "img2pdf", "txt2pdf", "ocr"]],
   ["Protect", ["unlock", "redact", "flatten"]],
   ["Handwriting", ["write", "signature", "drawsig", "drawhand", "sigimport", "scanlook"]],
+  ["Mortgage", ["builder"]],
 ];
 const POPULAR = ["edit", "sign", "merge", "compress", "pdf2img", "write"];
-const toolHref = (id) => "#/tool/" + id;
+const toolHref = (id) => (TOOLS[id] && TOOLS[id].ext) || "#/tool/" + id;
+const extAttr = (id) => (TOOLS[id] && TOOLS[id].ext ? ' target="_blank" rel="noopener"' : "");
 
 function menuHTML() {
-  return MENU.map(([h, ids]) => `<div class="msec"><h4>${h}</h4>${ids.map((id) => `<a href="${toolHref(id)}">${tile(TOOLS[id].c, TOOLS[id].i)}<span>${TOOLS[id].name}</span></a>`).join("")}</div>`).join("");
+  return MENU.map(([h, ids]) => `<div class="msec"><h4>${h}</h4>${ids.map((id) => `<a href="${toolHref(id)}"${extAttr(id)}>${tile(TOOLS[id].c, TOOLS[id].i)}<span>${TOOLS[id].name}</span></a>`).join("")}</div>`).join("");
 }
 function card(id) {
   const t = TOOLS[id];
-  return `<a class="card" href="${toolHref(id)}">${tile(t.c, t.i)}<div><b>${esc(t.name)}</b><span>${esc(t.desc)}</span></div>${icon("chev", "i chev")}</a>`;
+  return `<a class="card" href="${toolHref(id)}"${extAttr(id)}>${tile(t.c, t.i)}<div><b>${esc(t.name)}</b><span>${esc(t.desc)}</span></div>${icon("chev", "i chev")}</a>`;
 }
 const FILES_ART = `<svg class="files-art" width="96" height="72" viewBox="0 0 96 72" fill="none" aria-hidden="true"><rect x="22" y="6" width="44" height="56" rx="4" fill="#fff" opacity=".35"/><rect x="30" y="12" width="44" height="56" rx="4" fill="#fff"/><path d="M38 26h28M38 34h28M38 42h18" stroke="#c9d6f5" stroke-width="3" stroke-linecap="round"/><path d="M38 54c5-9 8-9 8-4s3 6 6 0 5-6 6 0" stroke="#0055ff" stroke-width="2.4" stroke-linecap="round"/></svg>`;
 function dropZone(color, label, small) {
@@ -147,7 +205,7 @@ function renderHome() {
       <div>
         <h1>Ghost Calligrapher</h1>
         <p>Edit, sign, annotate, organize and convert PDFs — and write with a real-looking pen. Everything runs in your browser; your files never leave your device.</p>
-        <div class="hero-cta"><button class="btn-blue" data-pick-home>${icon("plus")} Choose a file</button><a class="btn-ghost" href="#all">See all tools</a></div>
+        <div class="hero-cta"><button class="btn-blue" data-pick-home>${icon("plus")} Choose a file</button><a class="btn-ghost" href="#all">See all tools</a><a class="btn-ghost" href="${BUILDER_URL}"${EXT}>Document builder ↗</a></div>
       </div>
       <div>${HERO_ART}</div>
     </div>
@@ -159,6 +217,7 @@ function renderHome() {
       <h2 class="sec-h">Recent files</h2><p class="sec-sub">Pick up where you left off. Stored only in this browser.</p>
       <div class="recents-big" id="home_recent"></div>
     </div>
+    ${builderPanelHTML()}
     <h2 class="sec-h" id="all">All tools</h2>
     <p class="sec-sub">Pick a tool, then drop your file on its page.</p>
     <div class="allgrid">${menuHTML()}</div>
@@ -166,6 +225,7 @@ function renderHome() {
   </div>`;
   wireDrop($("view_home"), (files) => intakeAny(files));
   $("view_home").querySelector("[data-pick-home]").onclick = () => pick(DOC_IN, true, intakeAny);
+  wireBuilderPanel($("view_home"));
   refreshHomeRecents();
 }
 async function refreshHomeRecents() {
@@ -219,6 +279,7 @@ async function renderRecent() {
       <div id="recent_list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px;margin-top:22px"></div>
       ${list.length ? "" : `<div style="margin-top:20px">${dropZone("var(--accent-strong)", "CHOOSE FILE", true)}</div>`}
     </div>
+    ${builderPanelHTML()}
   </div>`;
   const host = $("recent_list");
   for (const r of list) {
@@ -234,6 +295,7 @@ async function renderRecent() {
     host.appendChild(el);
   }
   if (!list.length) wireDrop($("view_tool"), intakeAny);
+  wireBuilderPanel($("view_tool"));
 }
 async function openRecent(id, where) {
   const rec = await getRecent(id); if (!rec) { toast("That file is no longer stored."); return; }
@@ -394,7 +456,8 @@ async function renderRecentDD() {
     b.onclick = () => { closeRecentDD(); openRecent(r.id, "doc"); };
     dd.appendChild(b);
   }
-  const all = document.createElement("a"); all.className = "all"; all.href = "#/recent"; all.textContent = "See all recent files"; all.onclick = closeRecentDD; dd.appendChild(all);
+  const all = document.createElement("a"); all.className = "all"; all.href = "#/recent"; all.textContent = "See all recent files · scan for files you built"; all.onclick = closeRecentDD; dd.appendChild(all);
+  const bl = document.createElement("a"); bl.className = "all"; bl.href = BUILDER_URL; bl.target = "_blank"; bl.rel = "noopener"; bl.textContent = "Open document builder ↗"; bl.onclick = closeRecentDD; dd.appendChild(bl);
 }
 function closeRecentDD() { $("recent_dd").classList.remove("open"); $("top_recent").setAttribute("aria-expanded", "false"); }
 $("top_recent").onclick = async (e) => { e.stopPropagation(); const dd = $("recent_dd"); if (dd.classList.contains("open")) { closeRecentDD(); return; } await renderRecentDD(); dd.classList.add("open"); $("top_recent").setAttribute("aria-expanded", "true"); };

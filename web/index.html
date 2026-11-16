@@ -421,6 +421,20 @@
   .prime-chip{display:none;align-items:center;gap:6px;margin-top:8px;padding:6px 10px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:600}
   .prime-chip.on{display:flex}
   .prime-chip button{margin-left:auto;border:0;background:none;color:inherit;cursor:pointer;font-size:15px}
+  /* document builder + recently built files */
+  .builder-box{margin:30px 0 8px;padding:18px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+  .builder-box .sec-h{text-align:left;font-size:24px}
+  .builder-box .sec-sub{text-align:left}
+  .bb-head{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+  .bb-act{display:flex;gap:8px;flex-wrap:wrap}
+  .bb-status{margin-top:10px;font-size:13px;color:var(--muted);display:flex;gap:10px;align-items:center}
+  .scanlist{display:flex;flex-direction:column;gap:4px;margin-top:8px;max-height:420px;overflow:auto}
+  .scanrow{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--line);border-radius:6px}
+  .scanrow .sr-ic{flex:none;width:38px;height:28px;border-radius:4px;background:var(--accent-soft);color:var(--accent);font:700 11px/28px system-ui;text-align:center}
+  .scanrow .sr-n{flex:1;min-width:0;display:flex;flex-direction:column}
+  .scanrow .sr-n b{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .scanrow .sr-n small{color:var(--muted);font-size:12px}
+  .scanrow .btn{width:auto;padding:5px 12px}
   /* signature fine-tuning */
   .fx{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 20px;margin-top:12px}
   .fx label{display:flex;flex-direction:column;gap:2px;font-size:13px;color:var(--text2);cursor:default}
@@ -500,6 +514,7 @@
     <a href="#/tool/edit">Edit</a>
     <a href="#/tool/sign">Sign</a>
     <a href="#/tool/write">Write</a>
+    <a href="https://jcodomo.github.io/mtgcalc/" target="_blank" rel="noopener" title="Open your mortgage document builder">Doc builder ↗</a>
   </nav>
   <span class="spacer"></span>
   <button class="toplink" id="top_recent" aria-expanded="false"><svg class="i" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6.5V10l2.5 1.7"/></svg><span class="lbl">Recent files</span></button>
@@ -929,6 +944,6 @@ jumps over the lazy dog</textarea>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script type="module" src="./app.js?v=19"></script>
-<script type="module" src="./shell.js?v=6"></script>
+<script type="module" src="./shell.js?v=7"></script>
 </body>
 </html>
