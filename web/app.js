@@ -4,7 +4,7 @@
 import { initPdfEditor } from "./pdfedit.js?v=7";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
-import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont } from "./fonts.js?v=1";
+import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
 import { scanPdfWatermarks, removePdfWatermarks, eraseColor, inpaint, pageBackground } from "./watermark.js?v=1";
 
 const WASM_URL = "./calligrapher2.wasm";
@@ -1186,9 +1186,10 @@ function tboxFont(it) {
     if (!it.ffOverride) return { css: fb.css, weight: it.bold != null ? (it.bold ? 700 : 400) : fb.weight, style: it.italic != null ? (it.italic ? "italic" : "normal") : fb.style };
   }
   const fe = fontByKey(it.ff); if (fe.google) ensureFont(fe.name);
+  if (fe.user) return { css: fe.css, weight: it.bold != null ? (it.bold ? 700 : 400) : fe.weight, style: it.italic != null ? (it.italic ? "italic" : "normal") : fe.fstyle, synth: !!fe.family };
   return { css: fe.css, weight: it.bold ? 700 : 400, style: it.italic ? "italic" : "normal" };
 }
-const tboxDisplay = (it) => { const info = pfontInfo(it); return info && info.loadedName && !it.ffOverride ? toFontStr(info, it.text || "") : (it.text || ""); };
+const tboxDisplay = (it) => { const g = glyphInfo(it); return g ? toFontStr(g, it.text || "") : (it.text || ""); };
 function shapeSVG(it, w, h) {
   const sw = it.color === "none" ? 0 : Math.max(1, (it.sw || 3 / REF_W) * (w / it.nw)), fill = it.fill && it.fill !== "none" ? it.fill : "none", c = it.color === "none" ? "none" : itemColor(it);
   const inner = it.shape === "ellipse"
@@ -1284,7 +1285,7 @@ function startTboxEdit(it, el, cx, cy) {
   if (cx != null && document.caretRangeFromPoint) { try { r = document.caretRangeFromPoint(cx, cy); } catch (_) {} }
   if (!r || !td.contains(r.startContainer)) { r = document.createRange(); r.selectNodeContents(td); if (cx != null || it.text) r.collapse(false); }
   sel.addRange(r);
-  const info = pfontInfo(it), mapped = info && info.loadedName && !it.ffOverride;
+  const info = glyphInfo(it), mapped = !!info;
   td.oninput = () => {
     if (mapped) {
       const logical = fromFontStr(info, td.textContent), disp = toFontStr(info, logical);
@@ -1541,6 +1542,7 @@ function setEdTool(t) {
   if (t === "image") { setEdTool("select"); pickImageForDoc(); return; }
   if (t === "wm") { openWmPanel(); return; }
   if (t === "drawsig") { openDrawPad("sig"); return; }
+  if (t === "fonts") { setEdTool("select"); openFontScan(); return; }
   edTool = t;
   if (edTool !== "select") { selId = null; selDraw = null; }
   if (t === "sig" || t === "handwrite") openSide(true);
@@ -1560,7 +1562,7 @@ const TOOL_MAP = {
   sign: ["sign", "sig"], fillsign: ["sign", "text"], adddate: ["sign", "date"], forms: ["sign", "field:text"], fillform: ["sign", "select"],
   write: ["sign", "handwrite"], handwrite: ["sign", "handwrite"], signature: ["sign", "sig", "signature"], sigimport: ["sign", "sig", "sigimport"],
   merge: ["organize"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "panel:split"], extract: ["organize", "panel:extract"], number: ["organize", "panel:number"],
-  unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"],
+  unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"], pdffonts: ["edit", "fonts"],
   compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"],
 };
 function applyTool(id) {
@@ -1648,14 +1650,15 @@ function fontPicker(value, hasPdf, onPick) {
         list.appendChild(mk("h5", {}, cat));
         for (const f of fonts) {
           const fb = mk("button", { className: f.name === value ? "on" : "", title: f.name });
-          fb.textContent = f.name; fb.style.fontFamily = f.css; fb.dataset.f = f.name;
-          fb.onclick = () => { closePops(); onPick(f.name); };
+          const ui = userFontInfo(f); fb.textContent = ui ? toFontStr(ui, f.name) : f.name; fb.style.fontFamily = f.css; fb.dataset.f = f.name;
+          fb.onclick = () => { closePops(); if (f.user) ufTouch(f.id); onPick(f.name); };
           list.appendChild(fb); if (f.google) io.observe(fb);
         }
       }
     };
     q.oninput = build; q.onkeydown = (ev) => ev.stopPropagation();
-    pop.append(q, list); pop.onpointerdown = (ev) => ev.stopPropagation();
+    if (docSources.some((s) => s && s.kind === "pdf")) { const sb = mk("button", { className: "fscanbtn", type: "button" }, "Find & save this PDF's fonts…"); sb.onclick = () => { closePops(); openFontScan(); }; pop.appendChild(sb); }
+    pop.prepend(q, list); pop.onpointerdown = (ev) => ev.stopPropagation();
     document.body.appendChild(pop);
     const r = b.getBoundingClientRect();
     pop.style.left = Math.max(8, Math.min(innerWidth - 300, r.left)) + "px"; pop.style.top = (r.bottom + 6 + scrollY) + "px";
@@ -2858,6 +2861,161 @@ async function wmFillBrushed() {
   pagesSig = ""; doc = docPages[curPage]; render(); toast("Filled in. Ctrl+Z undoes.");
 }
 
+// ---- fonts found in PDFs: scan a document and keep its fonts --------------------
+// Embedded fonts are saved with their glyphs (only the characters that PDF used) and a
+// look-alike library font for everything else; fonts a PDF only names are saved as
+// that name, drawn with the closest library font. Kept 60 days after last use.
+const UF_DAYS = 60;
+function ufDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("cal2fonts", 1);
+    r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains("fonts")) r.result.createObjectStore("fonts", { keyPath: "id" }); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+}
+async function ufDo(mode, fn) {
+  try { const db = await ufDB(); return await new Promise((res) => { const t = db.transaction("fonts", mode); const st = t.objectStore("fonts"); let out; const r = fn(st); if (r) r.onsuccess = () => { out = r.result; }; t.oncomplete = () => res(out); t.onerror = () => res(null); }); }
+  catch (_) { return null; }
+}
+const ufAll = () => ufDo("readonly", (st) => st.getAll()).then((v) => v || []);
+const ufGet = (id) => ufDo("readonly", (st) => st.get(id));
+const ufPut = (rec) => ufDo("readwrite", (st) => st.put(rec));
+const ufDel = (id) => ufDo("readwrite", (st) => st.delete(id));
+async function ufTouch(id) { const r = await ufGet(id); if (r) { r.usedAt = Date.now(); ufPut(r); } }
+
+function glyphMapOf(fo) {
+  const map = {}; let count = 0;
+  const tfc = (fo && fo.toFontChar) || [], tu = (fo && fo.toUnicode) || {};
+  const add = (code, uni) => { const fc = tfc[code]; if (uni && fc != null && [...uni].length === 1 && !map[uni]) { map[uni] = String.fromCodePoint(fc); count++; } };
+  if (tu._map) { for (const code in tu._map) add(+code, tu._map[code]); }
+  else if (tu.firstChar != null) { for (let c = tu.firstChar; c <= tu.lastChar; c++) add(c, String.fromCharCode(c)); }
+  return { map, count };
+}
+function prettyFontName(raw) {
+  return String(raw).replace(/^[A-Z]{6}\+/, "").replace(/(PSMT|PS|MT)(?=$|[-,])/g, "").replace(/[-,_]+/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\s+/g, " ").trim() || String(raw);
+}
+// a saved font never takes the name of a built-in one ("Georgia" -> "Georgia (PDF)")
+const saveNameOf = (n) => { const e = fontEntry(n); return e && !e.user ? n + " (PDF)" : n; };
+const ufId = (name) => "pf_" + name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+async function registerSavedFont(rec) {
+  let family = null;
+  if (rec.data) {
+    family = "cal2u_" + rec.id;
+    try { const ff = new FontFace(family, rec.data, { weight: "100 900", style: rec.style === "italic" ? "italic" : "normal" }); await ff.load(); document.fonts.add(ff); }
+    catch (_) { family = null; }
+  }
+  const inv = {}; if (family) for (const k in rec.map) inv[rec.map[k]] = k;
+  ensureFontsIn(rec.fallbackCss);
+  const e = addUserFont({ id: rec.id, name: rec.name, family, map: family ? rec.map : {}, inv, glyphs: family ? rec.glyphs : 0, fallbackCss: rec.fallbackCss, as: rec.as });
+  e.weight = rec.weight || 400; e.fstyle = rec.style || "normal";
+  return e;
+}
+async function loadSavedFonts() {
+  const now = Date.now();
+  for (const r of await ufAll()) {
+    if (now - (r.usedAt || r.savedAt || 0) > UF_DAYS * 864e5) { ufDel(r.id); continue; }
+    try { await registerSavedFont(r); } catch (_) {}
+  }
+}
+// The text of a user font, written in its glyphs (characters it lacks fall back).
+const userFontInfo = (fe) => (fe && fe.user && fe.family ? { loadedName: fe.family, map: fe.map, inv: fe.inv } : null);
+function glyphInfo(it) {
+  const info = pfontInfo(it);
+  if (info && !it.ffOverride) return info.loadedName ? info : null;
+  return userFontInfo(fontByKey(it.ff));
+}
+
+async function scanDocFonts(onProgress) {
+  const found = new Map(), OPS = window.pdfjsLib.OPS;
+  const pdfs = docSources.filter((s) => s && s.kind === "pdf" && s.pdf);
+  const total = pdfs.reduce((n, s) => n + s.pdf.numPages, 0); let done = 0;
+  for (const src of pdfs) {
+    for (let i = 1; i <= src.pdf.numPages; i++) {
+      const page = await src.pdf.getPage(i);
+      const ol = await page.getOperatorList();
+      const ids = new Set();
+      ol.fnArray.forEach((fn, k) => { if (fn === OPS.setFont) ids.add(ol.argsArray[k][0]); });
+      for (const id of ids) {
+        let fo = null; try { if (page.commonObjs.has(id)) fo = page.commonObjs.get(id); } catch (_) {}
+        if (!fo || fo.isType3Font || !fo.name) continue;
+        const name = prettyFontName(fo.name), g = glyphMapOf(fo);
+        const embedded = !!(fo.data && !fo.missingFile && g.count);
+        const prev = found.get(name);
+        if (prev) { prev.pages++; if (embedded && g.count > prev.glyphs) Object.assign(prev, { data: fo.data, map: g.map, glyphs: g.count, embedded, loaded: fo.loadedName }); continue; }
+        found.set(name, { name, data: embedded ? fo.data : null, map: g.map, glyphs: embedded ? g.count : 0, embedded, loaded: fo.loadedName,
+          match: matchPdfFont(fo.name, { serif: !!fo.isSerifFont, mono: !!fo.isMonospace }), pages: 1 });
+      }
+      done++; if (onProgress) onProgress(done, total);
+    }
+  }
+  return [...found.values()].sort((a, b) => (b.embedded - a.embedded) || a.name.localeCompare(b.name));
+}
+
+let fsFound = [];
+function fsRow(f, saved) {
+  const row = mk("label", { className: "fs-row" });
+  const cb = mk("input", { type: "checkbox" }); cb.checked = !saved; cb.dataset.n = f.name;
+  const info = f.embedded && f.loaded ? { loadedName: f.loaded, map: f.map } : null;
+  const sample = "The quick brown fox jumps over the lazy dog 0123456789";
+  const prev = mk("div", { className: "fs-prev" }); prev.textContent = info ? toFontStr(info, sample) : sample;
+  prev.style.fontFamily = (info ? `"${f.loaded}", ` : "") + f.match.css; prev.style.fontWeight = f.match.weight; prev.style.fontStyle = f.match.style;
+  const meta = f.embedded ? `Embedded · ${f.glyphs} characters · missing ones use ${f.match.family}` : `Not embedded · drawn with ${f.match.family}`;
+  const body = mk("div", { className: "fs-b" });
+  body.innerHTML = `<div class="fs-n">${escapeHTML(f.name)}${saved ? ' <span class="fs-tag">Saved</span>' : ""}</div><div class="fs-m">${escapeHTML(meta)} · ${f.pages} page${f.pages > 1 ? "s" : ""}</div>`;
+  body.appendChild(prev);
+  row.append(cb, body);
+  return row;
+}
+async function renderSavedFontList() {
+  const box = $("fs_saved"); box.innerHTML = "";
+  const all = (await ufAll()).sort((a, b) => a.name.localeCompare(b.name));
+  $("fs_saved_h").hidden = !all.length;
+  for (const r of all) {
+    const fe = fontEntry(r.name), row = mk("div", { className: "fs-srow" });
+    const nm = mk("span", { className: "fs-sn" });
+    const ui = userFontInfo(fe); nm.textContent = ui ? toFontStr(ui, r.name) : r.name; if (fe) nm.style.fontFamily = fe.css;
+    const meta = mk("span", { className: "fs-m" }, r.glyphs ? r.glyphs + " characters" : "as " + r.as);
+    const del = mk("button", { className: "btn", title: "Remove this font" }, "Remove");
+    del.onclick = async () => { await ufDel(r.id); removeUserFont(r.name); renderSavedFontList(); fsRenderFound(); };
+    row.append(nm, meta, del); box.appendChild(row);
+  }
+}
+async function fsRenderFound() {
+  const list = $("fs_list"); list.innerHTML = "";
+  const saved = new Set((await ufAll()).map((r) => r.name));
+  for (const f of fsFound) list.appendChild(fsRow(f, saved.has(saveNameOf(f.name))));
+  $("fs_save").disabled = !fsFound.length;
+}
+async function openFontScan() {
+  const dlg = $("fscan"); if (!dlg.open) dlg.showModal();
+  fsFound = []; $("fs_list").innerHTML = ""; renderSavedFontList();
+  const hasPdf = docSources.some((s) => s && s.kind === "pdf" && s.pdf);
+  if (!hasPdf) { $("fs_status").textContent = "Open a PDF to find its fonts. Fonts you already saved are below."; $("fs_save").disabled = true; return; }
+  $("fs_status").textContent = "Looking for fonts…";
+  try {
+    fsFound = await scanDocFonts((d, t) => { $("fs_status").textContent = `Looking for fonts… page ${d} of ${t}`; });
+    const emb = fsFound.filter((f) => f.embedded).length;
+    $("fs_status").textContent = fsFound.length ? `Found ${fsFound.length} font${fsFound.length > 1 ? "s" : ""} (${emb} embedded). Saved fonts appear under “Your PDFs” in every font menu.` : "This PDF has no text fonts (it may be a scan).";
+    await fsRenderFound();
+  } catch (err) { $("fs_status").textContent = "Couldn't read the fonts: " + (err && err.message || err); }
+}
+async function saveScannedFonts() {
+  const pick = new Set([...$("fs_list").querySelectorAll("input:checked")].map((c) => c.dataset.n));
+  const now = Date.now(); let n = 0;
+  for (const f of fsFound) {
+    if (!pick.has(f.name)) continue;
+    const nm = saveNameOf(f.name), id = ufId(nm), old = await ufGet(id);
+    if (old && old.glyphs > f.glyphs) { old.usedAt = now; await ufPut(old); n++; continue; }
+    const rec = { id, name: nm, data: f.embedded ? new Uint8Array(f.data) : null, map: f.embedded ? f.map : {}, glyphs: f.embedded ? f.glyphs : 0,
+      fallbackCss: f.match.css, as: f.match.family, weight: f.match.weight, style: f.match.style, savedAt: now, usedAt: now };
+    await ufPut(rec); await registerSavedFont(rec); n++;
+  }
+  toast(n ? `Saved ${n} font${n > 1 ? "s" : ""} — find them under “Your PDFs” in the font menu.` : "Tick the fonts you want to keep.");
+  propsSig = ""; if (typeof renderProps === "function") renderProps();
+  renderSavedFontList(); fsRenderFound();
+}
+
 // ---- boot ----------------------------------------------------------------
 
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
@@ -2883,6 +3041,7 @@ const setAppMode = (which) => setWorkMode(which === "pdf" ? "pdf" : (doc ? "doc"
 function typingInField(e) { const t = e.target; return t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)); }
 
 (async function () {
+  loadSavedFonts().then(() => { propsSig = ""; if (workMode === "doc") render(); });
   buildSwatches();
   try { await loadWasm(); } catch (e) { /* procedural engine optional; neural is primary */ }
   $("tier").querySelectorAll("button").forEach((b) => { b.onclick = () => applyTier(b.dataset.tier); });
@@ -2934,6 +3093,9 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("hand_draw").onclick = () => openDrawPad("hand");
   $("prime_off").onclick = () => { activatePrime(null); const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it, undefined, true); else render(true); };
   $("wm_back").onclick = closeWmPanel;
+  $("fs_x").onclick = $("fs_close").onclick = () => $("fscan").close();
+  $("fs_save").onclick = saveScannedFonts;
+  $("fs_all").onclick = () => { const cbs = [...$("fs_list").querySelectorAll("input")]; const on = cbs.some((c) => !c.checked); cbs.forEach((c) => { c.checked = on; }); };
   $("wm_scan").onclick = wmScan; $("wm_apply").onclick = wmApply;
   $("wm_pick").onclick = () => { setEdTool("wm-pick"); toast("Click the watermark on the page."); };
   $("wm_tol").oninput = () => { $("wm_tol_v").textContent = $("wm_tol").value; };

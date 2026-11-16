@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Calligrapher — PDF tools &amp; real handwriting</title>
+<title>Ghost Calligrapher — PDF tools &amp; real handwriting</title>
 <meta name="description" content="Edit, sign, annotate and organize PDFs in your browser, with neural handwriting. Nothing is uploaded." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2311295b'/%3E%3Cpath d='M7 23 C 12 10, 20 10, 25 9' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E" />
 <script>
@@ -17,7 +17,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&family=Caveat:wght@500&family=Dancing+Script:wght@600&family=Great+Vibes&family=Homemade+Apple&display=swap" rel="stylesheet">
 <style>
-  /* ---- themes: soft grey (editor reference) and Calligrapher dark ---- */
+  /* ---- themes: soft grey (editor reference) and Ghost Calligrapher dark ---- */
   :root,:root[data-theme=light]{
     --canvas:#d8d8d8; --surface:#e4e4e4; --surface2:#ececec; --surface3:#f3f3f3; --band:#d9dde4;
     --line:#cdcdcd; --line2:#c2c2c2; --text:#2b2b2b; --text2:#333; --muted:#6a6a6a;
@@ -421,6 +421,23 @@
   .prime-chip{display:none;align-items:center;gap:6px;margin-top:8px;padding:6px 10px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:600}
   .prime-chip.on{display:flex}
   .prime-chip button{margin-left:auto;border:0;background:none;color:inherit;cursor:pointer;font-size:15px}
+  /* PDF fonts dialog */
+  .fs-status{color:var(--muted);font-size:13.5px;margin-bottom:10px}
+  .fs-list{max-height:46vh;overflow:auto;display:flex;flex-direction:column;gap:6px}
+  .fs-row{display:flex;gap:10px;align-items:flex-start;padding:10px;border:1px solid var(--line);border-radius:8px;cursor:pointer}
+  .fs-row:hover{border-color:var(--accent)}
+  .fs-row input{margin-top:3px}
+  .fs-b{min-width:0;flex:1}
+  .fs-n{font-weight:600}
+  .fs-tag{font-size:11px;font-weight:600;color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:1px 6px;margin-left:4px}
+  .fs-m{color:var(--muted);font-size:12.5px}
+  .fs-prev{margin-top:6px;font-size:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+  .fs-saved{display:flex;flex-direction:column;gap:4px;margin-top:6px}
+  .fs-srow{display:flex;align-items:center;gap:10px;padding:4px 0;border-bottom:1px solid var(--line)}
+  .fs-sn{font-size:18px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fs-srow .btn{width:auto;padding:4px 10px}
+  .fs-h{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:16px 0 0}
+  .fscanbtn{display:block;width:100%;margin-top:6px;padding:8px;border:0;border-top:1px solid var(--line);background:none;color:var(--accent);font-weight:600;cursor:pointer;text-align:left}
   /* font picker */
   .fbtn{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;min-width:170px;max-width:220px;height:32px;padding:0 8px;border:0;background:transparent;color:var(--text);cursor:pointer;font-size:15px;white-space:nowrap;overflow:hidden}
   .fbtn span{overflow:hidden;text-overflow:ellipsis}
@@ -449,7 +466,7 @@
 
 <!-- ================= top bar ================= -->
 <header class="topbar">
-  <a class="wordmark" href="#/" aria-label="Home">Calligrapher</a>
+  <a class="wordmark" href="#/" aria-label="Ghost Calligrapher home">Ghost Calligrapher</a>
   <button class="tools-btn" id="tools_btn" aria-expanded="false" aria-controls="mega">
     <svg class="i" viewBox="0 0 20 20"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="12" y="3" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="12" y="12" width="5" height="5" rx="1"/></svg>
     <span class="lbl">Tools</span>
@@ -535,6 +552,7 @@
       <button class="tb" data-tool="image" title="Insert an image"><svg class="i" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.5"/><circle cx="7.5" cy="8.5" r="1.5"/><path d="M4 15l4.5-4.5 3 3 2-2 3 3"/></svg><span class="tl">Image</span></button>
       <button class="tb" data-tool="note" title="Sticky note"><svg class="i" viewBox="0 0 20 20"><path d="M4 4h12v8l-4 4H4z"/><path d="M12 16v-4h4"/></svg><span class="tl">Note</span></button>
       <button class="tb" data-tool="wm" title="Remove a watermark from this PDF or picture"><svg class="i" viewBox="0 0 20 20"><path d="M8 3h4v5l3 3v2H5v-2l3-3z"/><path d="M3 3l14 14"/></svg><span class="tl">Remove watermark</span></button>
+      <button class="tb" data-tool="fonts" title="Find the fonts this PDF uses and save them for your own text"><svg class="i" viewBox="0 0 20 20"><path d="M3 16L8 4l5 12M5 12h6"/><path d="M14 9h4M16 7v4"/></svg><span class="tl">Save fonts</span></button>
       <button class="tb" data-tool="panel:watermark" title="Watermark every page"><svg class="i" viewBox="0 0 20 20"><path d="M8 3h4v5l3 3v2H5v-2l3-3z"/><path d="M4 17h12"/></svg><span class="tl">Watermark</span></button>
       <button class="tb" data-tool="panel:crop" title="Crop the pages"><svg class="i" viewBox="0 0 20 20"><path d="M6 2v12h12M2 6h12v12"/></svg><span class="tl">Crop</span></button>
     </div>
@@ -844,11 +862,26 @@ jumps over the lazy dog</textarea>
   </div>
 </dialog>
 
+<dialog class="dpad" id="fscan">
+  <div class="dp-head"><b>Fonts in this PDF</b><button class="iconbtn" id="fs_x" title="Close">✕</button></div>
+  <div class="dp-body">
+    <div class="fs-status" id="fs_status"></div>
+    <div class="fs-list" id="fs_list"></div>
+    <h4 class="fs-h" id="fs_saved_h" hidden>Your saved fonts</h4>
+    <div class="fs-saved" id="fs_saved"></div>
+  </div>
+  <div class="dp-foot">
+    <button class="btn" id="fs_all" style="margin-right:auto">Select all / none</button>
+    <button class="btn" id="fs_close">Close</button>
+    <button class="btn primary" id="fs_save">Save selected fonts</button>
+  </div>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=17"></script>
-<script type="module" src="./shell.js?v=4"></script>
+<script type="module" src="./app.js?v=18"></script>
+<script type="module" src="./shell.js?v=5"></script>
 </body>
 </html>

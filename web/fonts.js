@@ -51,9 +51,27 @@ export const FONT_LIB = LIB.map(([name, cat, axes, extra]) => ({
   name, cat, axes, google: axes !== "sys",
   css: `"${name}"${extra ? ", " + extra : ""}, ${GENERIC[cat]}`,
 }));
-export const FONT_CATS = ["Sans", "Serif", "Mono", "Display", "Handwriting"];
+export const FONT_CATS = ["Your PDFs", "Sans", "Serif", "Mono", "Display", "Handwriting"];
 const byName = new Map(FONT_LIB.map((f) => [f.name.toLowerCase(), f]));
 export const fontEntry = (name) => byName.get(String(name || "").toLowerCase()) || null;
+
+// ---- fonts saved from the user's PDFs ---------------------------------------------
+// An embedded PDF font keeps only the glyphs that PDF used, stored under private
+// code points, so each saved font carries its character map (text -> glyph) and a
+// look-alike library font for any character it does not have.
+// entry: { id, name, family (FontFace name or null), map, inv, fallbackCss, glyphs }
+export function addUserFont(u) {
+  removeUserFont(u.name);
+  const e = { name: u.name, cat: "Your PDFs", axes: "sys", google: false, user: true, id: u.id, family: u.family, map: u.map || {}, inv: u.inv || {}, glyphs: u.glyphs || 0, fallbackCss: u.fallbackCss, as: u.as || null,
+    css: (u.family ? `"${u.family}", ` : "") + u.fallbackCss };
+  FONT_LIB.unshift(e); byName.set(e.name.toLowerCase(), e);
+  return e;
+}
+export function removeUserFont(name) {
+  const k = String(name || "").toLowerCase(), e = byName.get(k);
+  if (!e || !e.user) return;
+  byName.delete(k); const i = FONT_LIB.indexOf(e); if (i >= 0) FONT_LIB.splice(i, 1);
+}
 
 // ---- loading ------------------------------------------------------------------
 const loading = new Map();

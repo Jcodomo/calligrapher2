@@ -1,4 +1,4 @@
-// shell.js — the site around the Calligrapher app: a home page with every tool,
+// shell.js — the site around the Ghost Calligrapher app: a home page with every tool,
 // one landing page per tool (drop a file to start), the Tools menu, recent files
 // and hash routing (#/, #/tool/<id>, #/edit, #/pdf/<tool>, #/write, #/recent).
 // It drives the app only through the small window.__cal2* hooks app.js and
@@ -65,6 +65,7 @@ const TOOLS = {
   draw:      { name: "Draw on PDF", desc: "Sketch freehand with a pen in any colour.", c: C.edit, i: "pen", mode: "doc", tool: "pen", accept: DOC_IN },
   highlight: { name: "Highlight PDF", desc: "Make the important parts stand out.", c: C.edit, i: "marker", mode: "doc", tool: "highlight", accept: DOC_IN },
   whiteout:  { name: "Whiteout PDF", desc: "Cover anything on a page with a clean white box.", c: C.edit, i: "whiteout", mode: "doc", tool: "whiteout", accept: DOC_IN },
+  pdffonts:  { name: "Save PDF Fonts", desc: "Find the fonts a PDF uses and keep them for your own text.", c: C.edit, i: "edittext", mode: "doc", tool: "fonts", accept: PDF_IN },
   unwatermark: { name: "Remove Watermark", desc: "Take watermarks off PDFs and pictures you own.", c: C.prot, i: "whiteout", mode: "doc", tool: "wm", accept: DOC_IN },
   notes:     { name: "Comment on PDF", desc: "Stick notes on the page; they save as PDF comments.", c: C.edit, i: "note", mode: "doc", tool: "note", accept: DOC_IN },
   sign:      { name: "Sign PDF", desc: "Place a real-looking handwritten signature on any page.", c: C.sign, i: "sign", mode: "doc", tool: "sig", accept: DOC_IN },
@@ -97,7 +98,7 @@ const TOOLS = {
   scanlook:  { name: "Make PDF Look Scanned", desc: "Give a document a realistic scanned-paper look.", c: C.write, i: "scan", mode: "doc", tool: "select", setup: "scan", accept: DOC_IN },
 };
 const MENU = [
-  ["Edit", ["edit", "annotate", "edittext", "addtext", "addimage", "draw", "highlight", "whiteout", "notes", "unwatermark"]],
+  ["Edit", ["edit", "annotate", "edittext", "addtext", "addimage", "draw", "highlight", "whiteout", "notes", "unwatermark", "pdffonts"]],
   ["Fill & Sign", ["sign", "fillsign", "adddate", "forms", "fillform"]],
   ["Organize", ["merge", "split", "rotate", "delete", "extract", "organize"]],
   ["Optimize", ["compress", "number", "crop", "watermark"]],
@@ -144,7 +145,7 @@ function renderHome() {
   <div class="wrap">
     <div class="hero">
       <div>
-        <h1>PDFs and handwriting, made simple.</h1>
+        <h1>Ghost Calligrapher</h1>
         <p>Edit, sign, annotate, organize and convert PDFs — and write with a real-looking pen. Everything runs in your browser; your files never leave your device.</p>
         <div class="hero-cta"><button class="btn-blue" data-pick-home>${icon("plus")} Choose a file</button><a class="btn-ghost" href="#all">See all tools</a></div>
       </div>
@@ -161,7 +162,7 @@ function renderHome() {
     <h2 class="sec-h" id="all">All tools</h2>
     <p class="sec-sub">Pick a tool, then drop your file on its page.</p>
     <div class="allgrid">${menuHTML()}</div>
-    <div class="foot"><span>Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/write">Handwriting</a> · <a href="#/tool/edit">Edit PDF</a> · <a href="#/tool/organize">PDF tools</a> · <a href="#/recent">Recent files</a></span></div>
+    <div class="foot"><span>Ghost Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/write">Handwriting</a> · <a href="#/tool/edit">Edit PDF</a> · <a href="#/tool/organize">PDF tools</a> · <a href="#/recent">Recent files</a></span></div>
   </div>`;
   wireDrop($("view_home"), (files) => intakeAny(files));
   $("view_home").querySelector("[data-pick-home]").onclick = () => pick(DOC_IN, true, intakeAny);
@@ -200,7 +201,7 @@ function renderTool(id) {
     </div>
     ${t.nofile ? "" : `<div class="steps">${(STEPS[t.mode] || STEPS.pdf).map((s, i) => `<div><b>${i + 1}</b><p>${esc(s)}</p></div>`).join("")}</div>`}
     ${related.length ? `<div class="related"><h2>More ${cat.toLowerCase()} tools</h2><div class="pop">${related.map(card).join("")}</div></div>` : ""}
-    <div class="foot"><span>Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/">All tools</a></span></div>
+    <div class="foot"><span>Ghost Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/">All tools</a></span></div>
   </div>`;
   const view = $("view_tool");
   if (t.nofile) view.querySelector("[data-start]").onclick = () => startNoFile(id);
@@ -338,7 +339,7 @@ async function route() {
   const [path] = h.slice(1).split("?");
   const parts = path.split("/").filter(Boolean);
   setNavCur(h);
-  if (!parts.length) { document.body.dataset.route = "home"; renderHome(); document.title = "Calligrapher — PDF tools & real handwriting"; window.scrollTo(0, 0); return; }
+  if (!parts.length) { document.body.dataset.route = "home"; renderHome(); document.title = "Ghost Calligrapher — PDF tools & real handwriting"; window.scrollTo(0, 0); return; }
   const [a, b] = parts;
   if (a === "tool" && TOOLS[b]) {
     const t = TOOLS[b];
@@ -347,23 +348,23 @@ async function route() {
     if (TOOLS[b].setup === "drawhand" || TOOLS[b].setup === "drawsig") { startNoFile(b); return; }
     if (window.__cal2HasDoc() && ON_DOC(b)) { go("#/edit/" + b); return; }
     if (t.mode === "write" && !t.setup) { go("#/write"); return; }   // no document open: the handwriting studio
-    document.body.dataset.route = "tool"; renderTool(b); document.title = t.name + " — Calligrapher"; window.scrollTo(0, 0); return;
+    document.body.dataset.route = "tool"; renderTool(b); document.title = t.name + " — Ghost Calligrapher"; window.scrollTo(0, 0); return;
   }
-  if (a === "recent") { document.body.dataset.route = "tool"; await renderRecent(); document.title = "Recent files — Calligrapher"; window.scrollTo(0, 0); return; }
+  if (a === "recent") { document.body.dataset.route = "tool"; await renderRecent(); document.title = "Recent files — Ghost Calligrapher"; window.scrollTo(0, 0); return; }
   await appReady();
   if (a === "edit") {
     if (!window.__cal2HasDoc()) { go(b && TOOLS[b] ? "#/tool/" + b : "#/tool/edit"); return; }
-    document.body.dataset.route = "work"; window.__cal2SetWork("doc"); document.title = (b && TOOLS[b] ? TOOLS[b].name + " — " : "Editor — ") + "Calligrapher";
+    document.body.dataset.route = "work"; window.__cal2SetWork("doc"); document.title = (b && TOOLS[b] ? TOOLS[b].name + " — " : "Editor — ") + "Ghost Calligrapher";
     if (b && TOOLS[b]) { setTimeout(() => { window.__cal2ApplyTool(b); if (TOOLS[b].arrive) toast(TOOLS[b].arrive.replace(/“Download PDF” on the right|Download PDF/g, "Download")); }, 40); history.replaceState(null, "", "#/edit"); }
     return;
   }
   if (a === "pdf") {
-    document.body.dataset.route = "work"; window.__cal2SetWork("pdf"); document.title = "PDF tools — Calligrapher";
+    document.body.dataset.route = "work"; window.__cal2SetWork("pdf"); document.title = "PDF tools — Ghost Calligrapher";
     if (b) setTimeout(() => window.__cal2OpenTool && window.__cal2OpenTool(b), 30);
     else if (window.__cal2PdfBack) window.__cal2PdfBack();
     return;
   }
-  if (a === "write") { document.body.dataset.route = "work"; window.__cal2SetWork("write"); document.title = "Handwriting — Calligrapher"; return; }
+  if (a === "write") { document.body.dataset.route = "work"; window.__cal2SetWork("write"); document.title = "Handwriting — Ghost Calligrapher"; return; }
   go("#/");
 }
 
