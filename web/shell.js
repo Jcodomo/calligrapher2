@@ -298,7 +298,7 @@ async function renderRecent() {
   wireBuilderPanel($("view_tool"));
 }
 async function openRecent(id, where) {
-  const rec = await getRecent(id); if (!rec) { toast("That file is no longer stored."); return; }
+  const rec = await getRecent(id); if (!rec) { toast("That file is no longer stored."); if (where === "sign" || where === "link") go("#/recent"); return; }
   await appReady();
   const u8 = new Uint8Array(rec.bytes);
   if (where === "pdf" && rec.type === "pdf") {
@@ -306,7 +306,7 @@ async function openRecent(id, where) {
     go("#/pdf");
   } else {
     await window.__cal2OpenDocBytes(u8, rec.name, rec.type === "pdf" ? "pdf" : "image");
-    go("#/edit");
+    go(where === "sign" ? "#/edit/sign" : "#/edit");
   }
 }
 
@@ -412,6 +412,8 @@ async function route() {
     if (t.mode === "write" && !t.setup) { go("#/write"); return; }   // no document open: the handwriting studio
     document.body.dataset.route = "tool"; renderTool(b); document.title = t.name + " — Ghost Calligrapher"; window.scrollTo(0, 0); return;
   }
+  // links from the document builder (mtgcalc): #/open/<id> and #/sign/<id> open a recent file
+  if ((a === "open" || a === "sign") && b) { await openRecent(decodeURIComponent(b), a === "sign" ? "sign" : "link"); return; }
   if (a === "recent") { document.body.dataset.route = "tool"; await renderRecent(); document.title = "Recent files — Ghost Calligrapher"; window.scrollTo(0, 0); return; }
   await appReady();
   if (a === "edit") {
