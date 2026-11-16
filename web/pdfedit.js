@@ -33,7 +33,7 @@ function dl(name, blob) {
 function note(msg, bad) {
   const e = $("pe_err"); if (!e) return;
   e.textContent = msg; e.className = "err" + (bad ? "" : " ok");
-  if (!bad) setTimeout(() => { if (e.textContent === msg) e.textContent = ""; }, 2600);
+  if (!bad) setTimeout(() => { if (e.textContent === msg) e.textContent = ""; }, 7000);
 }
 const scriptCache = new Map();
 function loadScript(src) {
@@ -247,8 +247,9 @@ async function rasterizeToPdf(entries, scale, quality) {
     }
     const u8 = dataURLtoU8(c.toDataURL("image/jpeg", quality));
     const img = await out.embedJpg(u8);
-    const pg = out.addPage([c.width, c.height]);
-    pg.drawImage(img, { x: 0, y: 0, width: c.width, height: c.height });
+    const pw = c.width / scale, ph = c.height / scale;   // keep the page's real size (points), whatever the render scale
+    const pg = out.addPage([pw, ph]);
+    pg.drawImage(img, { x: 0, y: 0, width: pw, height: ph });
   }
   return out;
 }
@@ -473,8 +474,14 @@ function openCompress() {
   $("pe_cmp_go").onclick = () => withBusy("Compressing…", async () => {
     const q = +$("pe_q").value / 100;
     const scale = 1 + q; // lower quality -> smaller render
-    const out = await rasterizeToPdf(pages, scale, q);
-    await save(out, "compressed.pdf"); note("Saved compressed.pdf.");
+    // two ways to shrink: re-save as is (compact structure) or pages as JPEG pictures; the smallest wins
+    const before = sources.reduce((n, q2) => n + q2.bytes.length, 0);
+    const lossless = await buildPdf(pages), lb = await lossless.save({ useObjectStreams: true });
+    const lossy = await rasterizeToPdf(pages, scale, q), yb = await lossy.save();
+    const best = Math.min(lb.length, yb.length);
+    if (best >= before && sources.length === 1) { note(`This PDF is already as small as it gets (${Math.round(before / 1024)} KB) — nothing saved.`); return; }
+    await save(yb.length < lb.length ? lossy : lossless, "compressed.pdf");
+    note(`Saved compressed.pdf — ${Math.round(before / 1024)} KB → ${Math.round(best / 1024)} KB` + (yb.length < lb.length ? " (pages turned into pictures; text is no longer selectable)." : " (text kept)."));
   });
 }
 function openImg() {

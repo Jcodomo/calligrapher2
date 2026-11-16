@@ -4,8 +4,22 @@
     {
       "name": "calligrapher2",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["server.js"],
+      "runtimeArgs": [
+        "server.js"
+      ],
       "port": 8787
+    },
+    {
+      "name": "mtgcalc",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8799",
+        "-d",
+        "C:/Users/jcill/Documents/Codex/2026-09-08/referenced-chatgpt-conversation-this-is-an-2/mtgcalc"
+      ],
+      "port": 8799
     }
   ]
 }
