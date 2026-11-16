@@ -3,387 +3,618 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Calligrapher 2.0</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c5cff'/%3E%3Cpath d='M7 23 C 12 10, 20 10, 25 9' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E" />
+<title>Calligrapher — PDF tools &amp; real handwriting</title>
+<meta name="description" content="Edit, sign, annotate and organize PDFs in your browser, with neural handwriting. Nothing is uploaded." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230055ff'/%3E%3Cpath d='M7 23 C 12 10, 20 10, 25 9' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500&family=Dancing+Script:wght@600&family=Great+Vibes&family=Homemade+Apple&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&family=Caveat:wght@500&family=Dancing+Script:wght@600&family=Great+Vibes&family=Homemade+Apple&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
-    --text:#e8eaf0; --muted:#9aa3b2; --accent:#7c5cff; --accent2:#00c2a8; --paper:#fbfaf6;
-  }
-  @media (prefers-color-scheme: light){
-    :root{ --bg:#eef0f4; --panel:#ffffff; --panel2:#f4f5f8; --line:#dfe3ea; --text:#1a1d24; --muted:#5b6475; }
+    --bg:#f4f4f4; --panel:#ffffff; --panel2:#f7f7f7; --line:#e8e8e8; --line2:#d9d9d9;
+    --text:#1a1a1a; --text2:#212121; --muted:#757575; --accent:#0055ff; --accent-h:#0044cc; --accent2:#1f9d55;
+    --tint:#f2f6ff; --paper:#fbfaf6; --top:57px; --danger:#d93025;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
-  body{background:var(--bg);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  .app{display:grid;grid-template-columns:348px 1fr;height:100vh}
-  @media (max-width:820px){ .app{grid-template-columns:1fr;height:auto} }
-  .panel{background:var(--panel);border-right:1px solid var(--line);padding:18px;overflow-y:auto}
-  h1{font-size:18px;margin:0 0 2px}
-  h1 b{color:var(--accent)}
-  .sub{color:var(--muted);font-size:12px;margin-bottom:14px}
-  textarea{width:100%;min-height:64px;resize:vertical;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:14px}
-  .group{margin-top:16px}
-  .group h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+  body{background:#fff;color:var(--text);font:15px/1.5 "Source Sans 3",Arial,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  button{font-family:inherit}
+  svg.i{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+  /* ---------- top bar ---------- */
+  .topbar{position:sticky;top:0;z-index:60;height:var(--top);background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:6px;padding:0 16px}
+  .wordmark{font-weight:700;font-size:21px;letter-spacing:-.2px;color:var(--text);margin-right:10px;white-space:nowrap}
+  .tools-btn{display:flex;align-items:center;gap:6px;height:40px;padding:0 12px;border:1px solid var(--line);border-radius:4px;background:#fff;cursor:pointer;font-size:15px;color:var(--text2)}
+  .tools-btn:hover,.tools-btn[aria-expanded=true]{border-color:var(--accent);color:var(--accent)}
+  .mainnav{display:flex;gap:22px;margin-left:18px}
+  .mainnav a{color:var(--text2);font-size:15px;height:var(--top);display:flex;align-items:center;border-bottom:2px solid transparent}
+  .mainnav a:hover,.mainnav a.cur{color:var(--accent);border-bottom-color:var(--accent)}
+  .spacer{flex:1}
+  .toplink{color:var(--text2);font-size:15px;margin-right:12px;white-space:nowrap}
+  .toplink:hover{color:var(--accent)}
+  .btn-blue{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:40px;padding:0 16px;border:0;border-radius:4px;background:var(--accent);color:#fff;font-weight:700;font-size:15px;cursor:pointer;white-space:nowrap}
+  .btn-blue:hover{background:var(--accent-h)}
+  .burger{display:none;width:40px;height:40px;border:1px solid var(--line);border-radius:4px;background:#fff;cursor:pointer;align-items:center;justify-content:center}
+  @media (max-width:1023px){ .mainnav,.toplink{display:none} .burger{display:flex} }
+  @media (max-width:560px){ .tools-btn .lbl{display:none} #top_choose .lbl{display:none} .wordmark{font-size:18px} }
+
+  /* mega menu */
+  .mega{display:none;position:fixed;left:0;right:0;top:var(--top);z-index:59;background:#fff;border-bottom:1px solid var(--line);box-shadow:0 12px 24px rgba(0,0,0,.08);max-height:calc(100vh - var(--top));overflow:auto}
+  .mega.open{display:block}
+  .mega-in{max-width:1240px;margin:0 auto;padding:20px 24px;columns:190px;column-gap:20px}
+  .msec{break-inside:avoid;margin-bottom:18px}
+  .msec h4{margin:0 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .msec a{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:4px;color:var(--text2);font-size:14px}
+  .msec a:hover{background:var(--tint);color:var(--accent)}
+  .ico{width:24px;height:24px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;color:#fff;flex:none}
+  .ico svg.i{width:15px;height:15px;stroke-width:1.9}
+
+  /* ---------- views ---------- */
+  .view{display:none}
+  .work{display:none}
+  body[data-route=home] #view_home,body[data-route=tool] #view_tool{display:block}
+  body[data-route=work] #view_work{display:flex}
+  .wrap{max-width:1200px;margin:0 auto;padding:0 24px}
+
+  /* home */
+  .hero{display:grid;grid-template-columns:1.05fr 1fr;gap:40px;align-items:center;padding:56px 0 28px}
+  .hero h1{font-size:56px;line-height:1.08;margin:0 0 14px;letter-spacing:-.6px}
+  .hero p{font-size:20px;color:#444;margin:0 0 22px;max-width:520px}
+  .hero-cta{display:flex;gap:10px;flex-wrap:wrap}
+  .btn-ghost{display:inline-flex;align-items:center;height:40px;padding:0 16px;border:1px solid var(--accent);border-radius:4px;color:var(--accent);background:#fff;font-weight:700;cursor:pointer;font-size:15px}
+  .btn-ghost:hover{background:var(--tint)}
+  @media (max-width:860px){ .hero{grid-template-columns:1fr;padding-top:32px} .hero h1{font-size:40px} }
+  .sec-h{text-align:center;font-size:34px;margin:56px 0 6px;letter-spacing:-.3px}
+  .sec-sub{text-align:center;color:var(--muted);margin:0 0 26px}
+  .pop{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  @media (max-width:860px){ .pop{grid-template-columns:1fr} }
+  .card{display:flex;align-items:flex-start;gap:12px;padding:16px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--text);cursor:pointer;text-align:left;transition:box-shadow .15s,border-color .15s}
+  .card:hover{border-color:#c9d8ff;box-shadow:0 6px 18px rgba(0,40,120,.08)}
+  .card .ico{width:32px;height:32px;border-radius:6px}
+  .card .ico svg.i{width:18px;height:18px}
+  .card b{display:block;font-size:16px;margin-bottom:2px}
+  .card span{color:var(--muted);font-size:14px;line-height:1.4}
+  .card .chev{margin-left:auto;color:var(--muted)}
+  .allgrid{columns:220px;column-gap:24px;margin-top:8px}
+  .allgrid .msec a{font-size:15px}
+  .recent-band{margin:12px 0 0}
+  .recents-big{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
+  .recents-big .rec-card{width:110px}
+  .recents-big .rec-card img{height:90px}
+  .recents-big .rec-card .rn{font-size:12px;padding:4px 6px}
+  .foot{margin-top:72px;border-top:1px solid var(--line);padding:28px 0 40px;color:var(--muted);font-size:14px;display:flex;gap:18px;flex-wrap:wrap;justify-content:space-between}
+
+  /* drop zone (home + tool pages) */
+  .drop{position:relative;border-radius:8px;background:var(--dc,#0055ff);padding:12px;color:#fff}
+  .drop-in{border:2px dashed rgba(255,255,255,.65);border-radius:6px;min-height:250px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;transition:background .15s}
+  .drop.over .drop-in{background:rgba(255,255,255,.14)}
+  .drop .files-art{opacity:.95}
+  .drop .choose{display:inline-flex;align-items:center;gap:8px;height:52px;padding:0 26px;border:0;border-radius:4px;background:#fff;color:var(--text2);font-weight:700;font-size:16px;letter-spacing:.3px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+  .drop .choose:hover{background:#f6f6f6}
+  .drop .hint{font-size:15px;opacity:.95}
+  .drop.small .drop-in{min-height:200px}
+
+  /* tool landing */
+  .crumbs{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--muted);padding:16px 0 0}
+  .crumbs a{color:var(--muted)} .crumbs a:hover{color:var(--accent)}
+  .tool-head{max-width:960px;margin:0 auto;padding:14px 0 0}
+  .tool-head h1{text-align:center;font-size:40px;margin:6px 0 20px;letter-spacing:-.4px}
+  .tool-intro{display:grid;grid-template-columns:1.2fr 1fr;gap:28px;margin-top:20px;color:#333}
+  .tool-intro p{margin:0;font-size:16px}
+  .checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:15px}
+  .checks li{display:flex;gap:8px;align-items:center}
+  .checks svg{color:var(--accent2)}
+  @media (max-width:760px){ .tool-intro{grid-template-columns:1fr} .tool-head h1{font-size:30px} }
+  .steps{max-width:960px;margin:44px auto 0;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .steps div{background:var(--panel2);border-radius:8px;padding:18px}
+  .steps b{display:inline-flex;width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;align-items:center;justify-content:center;font-size:14px;margin-bottom:8px}
+  .steps p{margin:0;font-size:15px;color:#333}
+  @media (max-width:760px){ .steps{grid-template-columns:1fr} }
+  .related{max-width:960px;margin:40px auto 0}
+  .related h2{font-size:22px;margin:0 0 12px}
+  .related .pop{grid-template-columns:repeat(3,1fr)}
+  @media (max-width:760px){ .related .pop{grid-template-columns:1fr} }
+
+  /* ---------- workspace ---------- */
+  .work{flex-direction:column;height:calc(100vh - var(--top));background:var(--bg)}
+  .workbody{flex:1;min-height:0;display:flex}
+  .stage{position:relative;flex:1;min-width:0;display:flex;align-items:flex-start;justify-content:center;padding:28px;overflow:auto}
+  body[data-work=write] .stage{align-items:center}
+  .panel{width:340px;flex:none;background:var(--panel);border-left:1px solid var(--line);padding:18px;overflow-y:auto}
+  @media (max-width:900px){ .workbody{flex-direction:column} .panel{width:auto;border-left:0;border-top:1px solid var(--line);max-height:45vh} .work{height:auto;min-height:calc(100vh - var(--top))} .stage{min-height:55vh} }
+  .panel-title{font-size:18px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:14px}
+  textarea{width:100%;min-height:68px;resize:vertical;background:#fff;color:var(--text);border:1px solid var(--line2);border-radius:6px;padding:10px;font:15px/1.4 inherit;font-family:inherit}
+  textarea:focus,select:focus,input:focus{outline:2px solid #b3c9ff;outline-offset:0}
+  .group{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+  .group h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;font-weight:600}
   .row{display:flex;align-items:center;gap:10px;margin:8px 0}
-  .row label{flex:0 0 92px;color:var(--muted);font-size:12px}
+  .row label{flex:0 0 88px;color:#555;font-size:13px}
   .row input[type=range]{flex:1;accent-color:var(--accent)}
-  .row .val{flex:0 0 46px;text-align:right;font-variant-numeric:tabular-nums}
-  select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:9px}
+  .row .val{flex:0 0 46px;text-align:right;font-variant-numeric:tabular-nums;font-size:13px;color:#555}
+  select{width:100%;background:#fff;color:var(--text);border:1px solid var(--line2);border-radius:4px;padding:8px;font-family:inherit;font-size:14px}
   .swatches{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-  .sw{width:26px;height:26px;border-radius:50%;border:2px solid transparent;cursor:pointer;background-size:cover}
-  .sw.sq{border-radius:8px}
-  .sw.sel{border-color:var(--text)}
-  input[type=color]{width:30px;height:30px;padding:0;border:1px solid var(--line);border-radius:8px;background:none;cursor:pointer}
-  .seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
-  .seg button{flex:1;background:var(--panel2);color:var(--muted);border:0;padding:8px;cursor:pointer;font-size:13px}
-  .seg button.sel{background:var(--accent);color:#fff}
+  .sw{width:26px;height:26px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px var(--line2);cursor:pointer;background-size:cover}
+  .sw.sq{border-radius:6px}
+  .sw.sel{box-shadow:0 0 0 2px var(--accent)}
+  input[type=color]{width:30px;height:30px;padding:0;border:1px solid var(--line2);border-radius:6px;background:none;cursor:pointer}
+  .seg{display:flex;border:1px solid var(--line2);border-radius:4px;overflow:hidden}
+  .seg button{flex:1;background:#fff;color:#555;border:0;border-left:1px solid var(--line);padding:7px 8px;cursor:pointer;font-size:14px}
+  .seg button:first-child{border-left:0}
+  .seg button.sel{background:var(--tint);color:var(--accent);font-weight:600}
   .switch{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin:10px 0}
-  .switch .t{font-size:13px}
-  .switch .d{color:var(--muted);font-size:11px}
-  .sw-toggle{position:relative;width:40px;height:22px;flex:0 0 40px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;cursor:pointer;transition:.15s}
-  .sw-toggle.on{background:var(--accent);border-color:var(--accent)}
-  .sw-toggle i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.15s}
-  .sw-toggle.on i{left:20px}
-  .btn{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:9px 10px;cursor:pointer;font-size:13px;width:100%}
-  .btn:hover{border-color:var(--accent)}
+  .switch .t{font-size:14px}
+  .switch .d{color:var(--muted);font-size:12px}
+  .sw-toggle{position:relative;width:38px;height:22px;flex:0 0 38px;background:#d6d6d6;border-radius:999px;cursor:pointer;transition:.15s}
+  .sw-toggle.on{background:var(--accent)}
+  .sw-toggle i{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .sw-toggle.on i{left:19px}
+  .btn{background:#fff;color:var(--text2);border:1px solid var(--line2);border-radius:4px;padding:8px 10px;cursor:pointer;font-size:14px;width:100%}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+  .btn.primary:hover{background:var(--accent-h)}
   .actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-  details summary{cursor:pointer;color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin:16px 0 8px}
+  details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:.06em;text-transform:uppercase;margin:18px 0 8px;font-weight:600}
   .seedline{display:flex;gap:8px;align-items:center}
-  .seedline input{flex:1;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px}
-  .err{color:#ff6b6b;font-size:12px;margin-top:8px;white-space:pre-wrap;min-height:1em}
+  .seedline input{flex:1;background:#fff;color:var(--text);border:1px solid var(--line2);border-radius:4px;padding:7px}
+  .err{color:var(--danger);font-size:13px;margin-top:8px;white-space:pre-wrap;min-height:1em}
   .err.ok{color:var(--accent2)}
-  .stage{position:relative;display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto}
-  .sheet{position:relative;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.35);max-width:100%;background-repeat:repeat}
-  .sheet.doc{box-shadow:0 20px 60px rgba(0,0,0,.45)}
-  #docbg{display:block;max-width:100%;border-radius:14px}
-  #overlay{position:absolute;left:0;top:0;cursor:grab;touch-action:none;transform-origin:top left}
-  #overlay.drag{cursor:grabbing}
-  .hint{position:absolute;top:10px;left:16px;color:var(--muted);font-size:11px;background:rgba(0,0,0,.25);padding:3px 8px;border-radius:8px}
-  .credit{position:absolute;bottom:10px;right:16px;color:var(--muted);font-size:11px}
   .file{display:none}
-  #overlay{overflow:visible}
+  .note{color:var(--muted);font-size:12px;margin-top:6px}
+  .tierseg{margin-bottom:12px}
+  body[data-work=doc] [data-show=write],body[data-work=write] [data-show=doc],body[data-work=pdf] [data-show=doc],body[data-work=pdf] [data-show=write]{display:none!important}
+
+  /* handwriting sheet (write mode) */
+  .sheet{position:relative;border-radius:6px;box-shadow:0 10px 40px rgba(0,0,0,.12);max-width:100%;background-repeat:repeat}
+  body[data-work=doc] .sheet,body[data-work=pdf] .sheet{display:none}
+  .savedhand{display:inline-flex;align-items:center;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:3px 7px;font-size:13px;cursor:pointer}
+  .savedhand .x{color:var(--danger);font-weight:700}
+
+  /* ---------- document editor (Smallpdf-style) ---------- */
+  .edbar,.edctx,.thumbs,#ed_pages{display:none}
+  body[data-work=doc] .edbar{display:flex}
+  body[data-work=doc] .edctx{display:flex}
+  body[data-work=doc] .thumbs{display:block}
+  body[data-work=doc] #ed_pages{display:flex}
+  .edbar{align-items:center;gap:8px;height:56px;padding:0 12px;background:#fff;border-bottom:1px solid var(--line);flex:none}
+  .ed-tools{flex:1;display:flex;align-items:center;justify-content:center;gap:2px;min-width:0;overflow-x:auto;scrollbar-width:none}
+  .ed-tools::-webkit-scrollbar{display:none}
+  .tb{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;min-width:52px;height:46px;padding:2px 6px;border:0;border-radius:6px;background:none;color:var(--text2);cursor:pointer;font-size:11px;white-space:nowrap;position:relative}
+  .tb:hover{background:#f2f2f2}
+  .tb.on{background:var(--tint);color:var(--accent)}
+  .tb[disabled]{opacity:.35;cursor:default;background:none}
+  .tb .car{position:absolute;right:2px;bottom:4px;width:8px;height:8px}
+  .tsep{width:1px;height:28px;background:var(--line);margin:0 4px;flex:none}
+  /* narrower screens: icon-only tools (the title tooltip still names each one) */
+  @media (max-width:1240px){ .tb{min-width:38px;font-size:0;gap:0} .tb .car{bottom:6px} .edbar{gap:4px;padding:0 6px} }
+  @media (max-width:700px){ .zoomval,#ed_zout,#ed_zin,.ed-side .tsep{display:none} .edbar [data-ddbtn=dl]{padding:0 10px;font-size:0} }
+  .ed-side{display:flex;align-items:center;gap:4px;flex:none}
+  .ibtn{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border:0;border-radius:6px;background:none;color:var(--text2);cursor:pointer;font-size:18px}
+  .ibtn:hover{background:#f2f2f2}
+  .ibtn[disabled]{opacity:.35;cursor:default;background:none}
+  .zoomval{min-width:46px;text-align:center;font-size:13px;color:#555;font-variant-numeric:tabular-nums;cursor:pointer}
+  .pagectr{font-size:13px;color:#555;min-width:54px;text-align:center;font-variant-numeric:tabular-nums}
+  .dd{position:relative;display:inline-flex}
+  .ddm{display:none;position:absolute;top:calc(100% + 4px);left:50%;transform:translateX(-50%);z-index:30;background:#fff;border:1px solid var(--line);border-radius:6px;box-shadow:0 10px 28px rgba(0,0,0,.14);padding:6px;min-width:178px}
+  .ddm.right{left:auto;right:0;transform:none}
+  .dd.open .ddm{display:block}
+  .ddm button{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:0;background:none;border-radius:4px;cursor:pointer;font-size:14px;color:var(--text2);text-align:left;white-space:nowrap}
+  .ddm button:hover{background:var(--tint);color:var(--accent)}
+  .ddm small{color:var(--muted);font-size:12px;display:block}
+  .edctx{align-items:center;gap:14px;min-height:46px;padding:6px 14px;background:#fff;border-bottom:1px solid var(--line);flex:none;flex-wrap:wrap;font-size:13px;color:#444}
+  .edctx .cg{display:none;align-items:center;gap:8px}
+  .edctx .cg.on{display:flex}
+  .edctx label{color:var(--muted);font-size:12px}
+  .edctx select,.edctx input[type=date],.edctx input[type=time]{width:auto;padding:5px 6px;font-size:13px;border:1px solid var(--line2);border-radius:4px;background:#fff;font-family:inherit}
+  .edctx input[type=range]{width:110px;accent-color:var(--accent)}
+  .edctx .seg button{padding:5px 10px;font-size:13px}
+  .edctx .btn{width:auto;padding:5px 10px;font-size:13px}
+  .edctx .hint{color:var(--muted)}
+  .cdots{display:flex;gap:5px}
+  .cdot{width:20px;height:20px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px var(--line2);cursor:pointer}
+  .cdot.sel{box-shadow:0 0 0 2px var(--accent)}
+  .thumbs{width:150px;flex:none;background:#fff;border-right:1px solid var(--line);overflow-y:auto;padding:12px 18px}
+  .thumb{display:block;width:100%;margin:0 0 14px;padding:0;border:0;background:none;cursor:pointer;text-align:center;color:#555;font-size:12px}
+  .thumb img{display:block;width:100%;border:1px solid var(--line2);border-radius:2px;background:#fff;margin-bottom:4px}
+  .thumb.cur img{outline:2px solid var(--accent);outline-offset:1px}
+  .thumb.cur{color:var(--accent);font-weight:600}
+  @media (max-width:900px){ body[data-work=doc] .thumbs{display:none} }
+  #ed_pages{flex-direction:column;align-items:center;gap:22px;padding-bottom:40px}
+  .pg{position:relative;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.12)}
+  .pg>img{display:block;width:100%;height:100%;user-select:none;-webkit-user-drag:none}
+  .pgov{position:absolute;left:0;top:0;overflow:visible;touch-action:none}
+  .pgnum{position:absolute;left:-36px;top:0;font-size:12px;color:var(--muted)}
+  body.placing .pgov{cursor:crosshair}
+  body.placing .pgov .ditem,body.placing .pgov .dfield,body.placing .pgov .drawhit{pointer-events:none!important}
+  .drawhit{cursor:move}
   .ditem{position:absolute;cursor:grab;touch-action:none;user-select:none}
-  .ditem.sel{outline:1.5px solid #4a90ff;outline-offset:2px}
+  .ditem.sel{outline:1.5px solid var(--accent);outline-offset:2px;cursor:move}
   .ditem .dtext{width:100%;height:100%;display:flex;align-items:center;white-space:nowrap;line-height:1;pointer-events:none}
-  .dhandle{position:absolute;width:12px;height:12px;background:#fff;border:1.5px solid #4a90ff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.3);z-index:3}
-  .dhandle.nw{left:-6px;top:-6px;cursor:nwse-resize}
-  .dhandle.ne{right:-6px;top:-6px;cursor:nesw-resize}
-  .dhandle.sw{left:-6px;bottom:-6px;cursor:nesw-resize}
-  .dhandle.se{right:-6px;bottom:-6px;cursor:nwse-resize}
-  .dtrash{position:absolute;left:50%;bottom:-42px;transform:translateX(-50%);width:36px;height:30px;background:#15233a;color:#fff;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.35);z-index:3}
-  .dfield{position:absolute;background:rgba(74,144,255,.08);border:1px solid rgba(74,144,255,.55);border-radius:3px;color:#15233a;padding:0 3px;box-sizing:border-box;font-family:system-ui,sans-serif}
-  .ditem .dtext[contenteditable]{outline:none;cursor:text}
-  .ditem.sel{cursor:move}
-  #overlay.drawon{cursor:crosshair}
-  #overlay.drawon .ditem{pointer-events:none}
-  .dfieldbox{width:100%;height:100%;border:1px dashed rgba(90,90,110,.6);border-radius:4px;box-sizing:border-box;position:relative;background:rgba(74,144,255,.05)}
-  .dfcap{position:absolute;top:1px;left:4px;font-size:9px;line-height:1;color:rgba(80,80,100,.85);font-family:system-ui,sans-serif;pointer-events:none}
+  .ditem .dtext[contenteditable]{outline:none;cursor:text;pointer-events:auto}
+  .dhandle{position:absolute;width:12px;height:12px;background:#fff;border:1.5px solid var(--accent);border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.3);z-index:3}
+  .dhandle.nw{left:-7px;top:-7px;cursor:nwse-resize}
+  .dhandle.ne{right:-7px;top:-7px;cursor:nesw-resize}
+  .dhandle.sw{left:-7px;bottom:-7px;cursor:nesw-resize}
+  .dhandle.se{right:-7px;bottom:-7px;cursor:nwse-resize}
+  .dfield{position:absolute;background:rgba(0,85,255,.07);border:1px solid rgba(0,85,255,.5);border-radius:3px;color:#15233a;padding:0 3px;font-family:system-ui,sans-serif}
+  .dfieldbox{width:100%;height:100%;border:1px dashed rgba(70,80,110,.6);border-radius:4px;position:relative;background:rgba(0,85,255,.05)}
+  .dfcap{position:absolute;top:1px;left:4px;font-size:9px;line-height:1;color:rgba(70,80,110,.85);font-family:system-ui,sans-serif;pointer-events:none}
   .dfieldbox .dtext{position:absolute;left:5px;right:5px;top:11px;bottom:2px;height:auto;white-space:nowrap}
-  /* floating on-canvas add button */
-  #addfab{position:absolute;right:16px;bottom:16px;z-index:6;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
-  #addfab .fabmenu{display:none;flex-direction:column;gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
-  #addfab.open .fabmenu{display:flex}
-  #addfab .fabmenu button{white-space:nowrap}
-  #addfab .fabbtn{width:52px;height:52px;border-radius:50%;background:var(--accent);color:#fff;border:0;font-size:28px;line-height:1;cursor:pointer;box-shadow:0 6px 18px rgba(124,92,255,.5);transition:transform .15s}
-  #addfab.open .fabbtn{transform:rotate(45deg)}
-  .savedhand{display:inline-flex;align-items:center;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:3px 6px;font-size:12px;cursor:pointer}
-  .savedhand .x{color:#c0392b;font-weight:700}
-  /* ---- PDF editor mode ---- */
+  .dnote{width:100%;height:100%;background:var(--nc,#ffd54f);border-radius:3px 3px 3px 10px;box-shadow:0 2px 5px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;color:rgba(0,0,0,.55)}
+  .dnote svg{width:62%;height:62%}
+  .notepop{position:absolute;left:calc(100% + 8px);top:0;width:220px;background:#fffbe6;border:1px solid #f0d878;border-radius:6px;box-shadow:0 8px 22px rgba(0,0,0,.18);padding:8px;z-index:5;cursor:default}
+  .notepop textarea{min-height:90px;border:0;background:transparent;padding:2px;font-size:14px;outline:none}
+  .notepop .nmeta{font-size:11px;color:#8a7a2a;margin-bottom:4px}
+  .drawsel{fill:none;stroke:var(--accent);stroke-width:1;stroke-dasharray:4 3;pointer-events:none}
+
+  /* ---------- PDF tools workspace ---------- */
   #pdfedit_panel{display:none}
   #pdfedit_stage{display:none}
-  body.pdfmode .panel > .group,
-  body.pdfmode .panel > details,
-  body.pdfmode .panel > textarea,
-  body.pdfmode .panel > #tier,
-  body.pdfmode #neural_status{display:none}
+  body.pdfmode .panel > *:not(#pdfedit_panel){display:none!important}
   body.pdfmode #pdfedit_panel{display:block}
-  body.pdfmode .sheet{display:none}
-  body.pdfmode #addfab{display:none}
-  body.pdfmode .stage{align-items:stretch;justify-content:flex-start;padding:0}
-  body.pdfmode #pdfedit_stage{display:flex;flex-wrap:wrap;align-content:flex-start;gap:14px;padding:22px;width:100%;overflow:auto}
-  .pe-thumb{position:relative;width:150px;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:grab}
+  body.pdfmode #pdfedit_stage{display:flex;flex-wrap:wrap;align-content:flex-start;justify-content:center;gap:16px;width:100%}
+  .pe-thumb{position:relative;width:160px;background:#fff;border:1px solid var(--line);border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.08);cursor:grab}
   .pe-thumb.sel{outline:2px solid var(--accent);outline-offset:1px}
-  .pe-thumb.drop{outline:2px dashed var(--accent2)}
-  .pe-thumb img,.pe-thumb .pe-ph{display:block;width:100%;border-radius:8px 8px 0 0;background:#fff}
-  .pe-thumb .pe-ph{display:flex;align-items:center;justify-content:center;color:var(--muted);height:190px}
-  .pe-num{position:absolute;top:5px;left:6px;background:rgba(10,12,18,.72);color:#fff;font-size:11px;padding:1px 6px;border-radius:7px;font-variant-numeric:tabular-nums}
-  .pe-chk{position:absolute;top:5px;right:6px;width:17px;height:17px;accent-color:var(--accent);cursor:pointer}
-  .pe-bar{display:flex;gap:3px;padding:5px;justify-content:center;background:var(--panel2);border-radius:0 0 8px 8px}
-  .pe-bar button{flex:1;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 0;font-size:13px;cursor:pointer;line-height:1}
-  .pe-bar button:hover{border-color:var(--accent)}
+  .pe-thumb.drop{outline:2px dashed var(--accent)}
+  .pe-thumb img,.pe-thumb .pe-ph{display:block;width:100%;border-radius:4px 4px 0 0;background:#fff}
+  .pe-thumb .pe-ph{display:flex;align-items:center;justify-content:center;color:var(--muted);height:200px}
+  .pe-num{position:absolute;top:6px;left:6px;background:rgba(26,26,26,.72);color:#fff;font-size:11px;padding:1px 7px;border-radius:8px;font-variant-numeric:tabular-nums}
+  .pe-chk{position:absolute;top:6px;right:6px;width:17px;height:17px;accent-color:var(--accent);cursor:pointer}
+  .pe-bar{display:flex;gap:3px;padding:5px;justify-content:center;background:var(--panel2);border-top:1px solid var(--line);border-radius:0 0 4px 4px}
+  .pe-bar button{flex:1;background:#fff;color:var(--text2);border:1px solid var(--line);border-radius:4px;padding:3px 0;font-size:13px;cursor:pointer;line-height:1}
+  .pe-bar button:hover{border-color:var(--accent);color:var(--accent)}
   #pdfedit_panel .row label{flex:0 0 72px}
   .pe-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .pe-tile{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 9px;cursor:pointer;font-size:12px;text-align:left;color:var(--text)}
-  .pe-tile:hover{border-color:var(--accent)}
-  .pe-tile.srv{opacity:.66}
-  .pe-tile .ic{width:25px;height:25px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex:0 0 25px;color:#fff}
+  .pe-tile{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);border-radius:6px;padding:8px 9px;cursor:pointer;font-size:13px;text-align:left;color:var(--text2)}
+  .pe-tile:hover{border-color:var(--accent);background:var(--tint)}
+  .pe-tile.srv{opacity:.6}
+  .pe-tile .ic{width:24px;height:24px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex:0 0 24px;color:#fff}
   #pe_toolpanel{margin-top:10px}
-  #pe_toolpanel input[type=text],#pe_toolpanel input[type=password],#pe_toolpanel select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px}
+  #pe_toolpanel input[type=text],#pe_toolpanel input[type=password],#pe_toolpanel select{background:#fff;color:var(--text);border:1px solid var(--line2);border-radius:4px;padding:7px}
   #pe_toolpanel .btn{margin-top:4px}
-  .pe-back{background:none;border:0;color:var(--accent);cursor:pointer;padding:0;font-size:12px;margin-bottom:10px;display:block}
-  .pe-imgwrap img{display:block;width:100%;border-radius:8px 8px 0 0}
+  .pe-back{background:none;border:0;color:var(--accent);cursor:pointer;padding:0;font-size:14px;margin-bottom:10px;display:block}
+  .pe-imgwrap img{display:block;width:100%;border-radius:4px 4px 0 0}
   .pe-redactbox{background:rgba(0,0,0,.82);border:1px solid #000;pointer-events:none}
   /* recent documents */
-  .recents{display:flex;gap:7px;margin-top:9px;flex-wrap:wrap}
-  .rec-card{position:relative;width:62px;cursor:pointer;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:#fff}
+  .recents{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .rec-card{position:relative;width:64px;cursor:pointer;border:1px solid var(--line2);border-radius:4px;overflow:hidden;background:#fff}
   .rec-card:hover{border-color:var(--accent)}
-  .rec-card img{display:block;width:100%;height:46px;object-fit:cover;object-position:top;background:#fff}
-  .rec-card .rn{font-size:9px;color:var(--text);background:var(--panel2);padding:2px 3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .rec-card .rx{position:absolute;top:0;right:0;background:rgba(0,0,0,.55);color:#fff;font-size:11px;line-height:1;padding:1px 4px;border-radius:0 0 0 6px;display:none}
+  .rec-card img{display:block;width:100%;height:48px;object-fit:cover;object-position:top;background:#fff}
+  .rec-card .rn{font-size:10px;color:var(--text2);background:var(--panel2);padding:2px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .rec-card .rx{position:absolute;top:0;right:0;background:rgba(0,0,0,.55);color:#fff;font-size:12px;line-height:1;padding:2px 5px;border-radius:0 0 0 6px;display:none}
   .rec-card:hover .rx{display:block}
-  .recents .rlabel{flex-basis:100%;font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.02em}
+  .recents .rlabel{flex-basis:100%;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
   /* Edit Text mode */
-  #et_wrap{position:relative;margin:auto;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+  #et_wrap{position:relative;margin:auto;box-shadow:0 4px 18px rgba(0,0,0,.14)}
   #et_wrap canvas{display:block}
   #et_layer{position:absolute;left:0;top:0;transform-origin:top left}
   .et-span{position:absolute;white-space:pre;transform-origin:left top;color:transparent;cursor:text;outline:none;line-height:1;border-radius:2px}
-  .et-span:hover{box-shadow:0 0 0 1px rgba(74,144,255,.5) inset}
+  .et-span:hover{box-shadow:0 0 0 1px rgba(0,85,255,.5) inset}
   .et-span.editing{box-shadow:0 0 0 1px var(--accent) inset}
-  #et_addmode #et_layer{cursor:crosshair}
+
+  /* toast */
+  #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(20px);background:#1a1a1a;color:#fff;padding:10px 16px;border-radius:6px;font-size:14px;opacity:0;pointer-events:none;transition:.2s;z-index:90;max-width:90vw}
+  #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 </style>
 </head>
-<body>
-<div class="app">
-  <aside class="panel">
-    <h1>Calligrapher <b>2.0</b></h1>
-    <div class="sub">Neural handwriting (Graves RNN) — Simple is the classic app; Advanced adds every Calligrapher 2 feature.</div>
+<body data-route="home" data-work="write">
 
-    <div class="seg" id="appmode" style="margin-bottom:10px">
-      <button data-app="sign" class="sel">Sign &amp; scan</button>
-      <button data-app="pdf">PDF editor</button>
+<!-- ================= top bar ================= -->
+<header class="topbar">
+  <a class="wordmark" href="#/" aria-label="Home">Calligrapher</a>
+  <button class="tools-btn" id="tools_btn" aria-expanded="false" aria-controls="mega">
+    <svg class="i" viewBox="0 0 20 20"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="12" y="3" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="12" y="12" width="5" height="5" rx="1"/></svg>
+    <span class="lbl">Tools</span>
+    <svg class="i" viewBox="0 0 20 20" style="width:14px;height:14px"><path d="M5 8l5 5 5-5"/></svg>
+  </button>
+  <nav class="mainnav" id="mainnav">
+    <a href="#/tool/compress">Compress</a>
+    <a href="#/tool/pdf2img">Convert</a>
+    <a href="#/tool/merge">Merge</a>
+    <a href="#/tool/edit">Edit</a>
+    <a href="#/tool/sign">Sign</a>
+    <a href="#/write">Write</a>
+  </nav>
+  <span class="spacer"></span>
+  <a class="toplink" href="#/recent">Recent files</a>
+  <button class="btn-blue" id="top_choose"><svg class="i" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg><span class="lbl">Choose file</span></button>
+  <button class="burger" id="burger" aria-label="Menu"><svg class="i" viewBox="0 0 20 20"><path d="M3 6h14M3 10h14M3 14h14"/></svg></button>
+</header>
+<nav class="mega" id="mega" aria-label="All tools"><div class="mega-in" id="mega_in"></div></nav>
+
+<!-- ================= home & tool landing (rendered by shell.js) ================= -->
+<section class="view" id="view_home"></section>
+<section class="view" id="view_tool"></section>
+
+<!-- ================= workspace ================= -->
+<div class="work" id="view_work">
+
+  <!-- editor toolbar (document mode) -->
+  <div class="edbar" id="edbar">
+    <div class="ed-side">
+      <button class="ibtn" id="ed_undo" title="Undo (Ctrl+Z)" disabled><svg class="i" viewBox="0 0 20 20"><path d="M7.5 5L4 8.5 7.5 12"/><path d="M4 8.5h8.5a4 4 0 010 8H10"/></svg></button>
+      <button class="ibtn" id="ed_redo" title="Redo (Ctrl+Y)" disabled><svg class="i" viewBox="0 0 20 20"><path d="M12.5 5L16 8.5 12.5 12"/><path d="M16 8.5H7.5a4 4 0 000 8H10"/></svg></button>
     </div>
-
-    <div id="pdfedit_panel">
-      <div class="group">
-        <h2>PDF editor</h2>
-        <button class="btn" id="pe_open">Open PDF(s)</button>
-        <div style="color:var(--muted);font-size:11px;margin-top:6px">Drag thumbnails to reorder. Rotate, duplicate, delete or tick pages. Then pick a tool. Everything stays on your device.</div>
-        <div id="pe_recent" class="recents"></div>
-      </div>
-      <div class="group" id="pe_toolswrap">
-        <div class="actions" style="grid-template-columns:1fr 1fr;margin-bottom:10px">
-          <button class="btn" id="pe_selall">Select all</button>
-          <button class="btn" id="pe_export">⤓ Edited PDF</button>
+    <div class="ed-tools" id="ed_tools">
+      <button class="tb on" data-tool="select" title="Select, move and resize"><svg class="i" viewBox="0 0 20 20"><path d="M5 3l11 6.3-5 1.3L8.5 16z"/></svg>Select</button>
+      <span class="tsep"></span>
+      <button class="tb" data-tool="text" title="Add text — click on the page"><svg class="i" viewBox="0 0 20 20"><path d="M4 5h12M10 5v11M7.5 16h5"/></svg>Text</button>
+      <button class="tb" data-tool="sig" title="Place your handwritten signature"><svg class="i" viewBox="0 0 20 20"><path d="M2.5 14c2.5-5.5 4-5.5 4-2.2s1.5 3.2 3-.2 2.4-3 3.4 0 2.2 1.6 4.6.4M3 17.5h14"/></svg>Sign</button>
+      <button class="tb" data-tool="date" title="Add a date — click on the page"><svg class="i" viewBox="0 0 20 20"><rect x="3.5" y="4.5" width="13" height="12" rx="1.5"/><path d="M3.5 8.5h13M7 3v3M13 3v3"/></svg>Date</button>
+      <button class="tb" data-tool="check" title="Tick or cross — click on the page"><svg class="i" viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9"/></svg>Tick</button>
+      <div class="dd" data-dd="field">
+        <button class="tb" data-ddbtn="field" title="Form fields"><svg class="i" viewBox="0 0 20 20"><rect x="2.5" y="6" width="15" height="8" rx="1.5"/><path d="M5.5 10h5"/></svg>Fields<svg class="i car" viewBox="0 0 10 10"><path d="M2 4l3 3 3-3"/></svg></button>
+        <div class="ddm">
+          <button data-tool="field:text">▭ Text field<small>&nbsp;</small></button>
+          <button data-tool="field:date">▭ Date field</button>
+          <button data-tool="field:check">☐ Checkbox field</button>
+          <button data-tool="field:sig">✒ Signature field</button>
         </div>
-        <h2 id="pe_toolhead">Tools</h2>
-        <div id="pe_toolgrid" class="pe-grid"></div>
-        <div id="pe_toolpanel"></div>
-        <div class="err" id="pe_err"></div>
       </div>
+      <span class="tsep"></span>
+      <button class="tb" data-tool="image" title="Insert an image"><svg class="i" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.5"/><circle cx="7.5" cy="8.5" r="1.5"/><path d="M4 15l4.5-4.5 3 3 2-2 3 3"/></svg>Image</button>
+      <div class="dd" data-dd="shape">
+        <button class="tb" data-ddbtn="shape" title="Shapes"><svg class="i" viewBox="0 0 20 20"><rect x="2.5" y="2.5" width="8" height="8" rx="1"/><circle cx="13" cy="13" r="4.5"/></svg>Shapes<svg class="i car" viewBox="0 0 10 10"><path d="M2 4l3 3 3-3"/></svg></button>
+        <div class="ddm">
+          <button data-tool="shape:rect">▭ Rectangle</button>
+          <button data-tool="shape:ellipse">◯ Ellipse</button>
+          <button data-tool="line">╱ Line</button>
+          <button data-tool="arrow">➝ Arrow</button>
+        </div>
+      </div>
+      <button class="tb" data-tool="pen" title="Draw freehand"><svg class="i" viewBox="0 0 20 20"><path d="M4 16l1-4 8.5-8.5 3 3L8 15z"/><path d="M12 5l3 3"/></svg>Draw</button>
+      <div class="dd" data-dd="markup">
+        <button class="tb" data-ddbtn="markup" title="Highlight, underline, strike through"><svg class="i" viewBox="0 0 20 20"><path d="M6 13.5l1.6-4.6 6-6 3 3-6 6z"/><path d="M3 17.5h9" stroke-width="3" opacity=".45"/></svg>Highlight<svg class="i car" viewBox="0 0 10 10"><path d="M2 4l3 3 3-3"/></svg></button>
+        <div class="ddm">
+          <button data-tool="highlight">▬ Highlighter</button>
+          <button data-tool="underline">U̲ Underline</button>
+          <button data-tool="strike">S̶ Strikethrough</button>
+        </div>
+      </div>
+      <button class="tb" data-tool="note" title="Sticky note — click on the page"><svg class="i" viewBox="0 0 20 20"><path d="M4 4h12v8l-4 4H4z"/><path d="M12 16v-4h4"/></svg>Note</button>
+      <button class="tb" data-tool="whiteout" title="Whiteout — drag over content to cover it"><svg class="i" viewBox="0 0 20 20"><rect x="3" y="5.5" width="14" height="9" rx="1"/><path d="M6 10h8" stroke-dasharray="1.5 2"/></svg>Whiteout</button>
+      <span class="tsep"></span>
+      <button class="tb" data-tool="edittext" title="Change the PDF's own text"><svg class="i" viewBox="0 0 20 20"><path d="M3 5h9M7.5 5v10"/><path d="M11 16.5l.8-3 5-5 2.2 2.2-5 5z"/></svg>Edit text</button>
     </div>
-
-    <div class="seg" id="tier" style="margin-bottom:12px">
-      <button data-tier="simple" class="sel">Simple</button>
-      <button data-tier="advanced">Advanced</button>
+    <div class="ed-side">
+      <button class="ibtn" id="ed_zout" title="Zoom out">−</button>
+      <span class="zoomval" id="ed_zval" title="Fit width">100%</span>
+      <button class="ibtn" id="ed_zin" title="Zoom in">+</button>
+      <span class="tsep"></span>
+      <span class="pagectr" id="ed_pagectr">1 / 1</span>
+      <div class="dd" data-dd="dl">
+        <button class="btn-blue" data-ddbtn="dl"><svg class="i" viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M4 17h12"/></svg>Download</button>
+        <div class="ddm right">
+          <button data-dl="pdf"><b>PDF</b><small>Everything baked in, all pages</small></button>
+          <button data-dl="fill"><b>Fillable PDF</b><small>Form fields stay fillable</small></button>
+          <button data-dl="png"><b>PNG image</b><small>The current page</small></button>
+        </div>
+      </div>
+      <button class="ibtn" id="ed_close" title="Close document">✕</button>
     </div>
-    <div id="neural_status" class="err" style="min-height:0"></div>
+  </div>
 
-    <textarea id="text" spellcheck="false">The quick brown fox
+  <!-- contextual options for the active tool / selected object -->
+  <div class="edctx" id="edctx">
+    <span class="cg hint" id="ctx_hint"></span>
+    <span class="cg" id="ctx_color"><label>Colour</label><span class="cdots" id="ctx_dots"></span><input type="color" id="draw_color" value="#e23b3b" title="Custom colour"></span>
+    <span class="cg" id="ctx_size"><label>Thickness</label><input id="draw_size" type="range" min="1" max="14" value="3"></span>
+    <span class="cg" id="ctx_fill"><label>Fill</label><div class="seg" id="fill_seg"><button data-fill="none" class="sel">None</button><button data-fill="solid">Solid</button></div></span>
+    <span class="cg" id="item_font_row"><label>Font</label><select id="item_font"></select></span>
+    <span class="cg" id="item_date_row"><label>Date</label><input id="item_date" type="date"><input id="item_time" type="time"><select id="item_tz"></select></span>
+    <span class="cg" id="item_mark_row"><div class="seg" id="mark_seg"><button data-mark="check" class="sel">✓ Tick</button><button data-mark="x">✗ Cross</button></div></span>
+    <span class="cg" id="ctx_sig"><button class="btn" id="ctx_newhand">↻ New hand</button></span>
+    <span class="cg" id="ctx_opacity"><label>Opacity</label><input id="item_opacity" type="range" min="10" max="100" value="100"><span id="item_opacity_v"></span></span>
+    <span class="cg" id="ctx_actions"><button class="btn" id="ctx_dup">Duplicate</button><button class="btn" id="ctx_del" style="color:var(--danger)">Delete</button></span>
+    <span class="spacer"></span>
+    <span class="cg on" id="ctx_signer"><label>Signer</label><select id="signer_sel"></select><button class="btn" id="add_signer" title="Add a signer">+</button></span>
+  </div>
+
+  <div class="workbody">
+    <aside class="thumbs" id="ed_thumbs" aria-label="Pages"></aside>
+
+    <main class="stage" id="stage">
+      <div class="sheet" id="sheet"></div>
+      <div id="ed_pages"></div>
+      <div id="pdfedit_stage"></div>
+    </main>
+
+    <aside class="panel" id="panel">
+      <!-- PDF tools (pdf mode) -->
+      <div id="pdfedit_panel">
+        <h1 class="panel-title">PDF tools</h1>
+        <div class="sub">Drag pages to reorder; rotate, duplicate, delete or tick them, then pick a tool.</div>
+        <button class="btn primary" id="pe_open">Add PDF(s)</button>
+        <div id="pe_recent" class="recents"></div>
+        <div class="group" id="pe_toolswrap">
+          <div class="actions" style="margin:0 0 12px">
+            <button class="btn" id="pe_selall">Select all</button>
+            <button class="btn" id="pe_export">⤓ Download PDF</button>
+          </div>
+          <h2 id="pe_toolhead">Tools</h2>
+          <div id="pe_toolgrid" class="pe-grid"></div>
+          <div id="pe_toolpanel"></div>
+          <div class="err" id="pe_err"></div>
+        </div>
+      </div>
+
+      <h1 class="panel-title"><span data-show="write">Handwriting</span><span data-show="doc">Signature &amp; handwriting</span></h1>
+      <div class="sub" data-show="write">Neural handwriting that never repeats a letter the same way.</div>
+      <div class="sub" data-show="doc">Type below to create a signature — pick <b>Sign</b> in the toolbar and click the page to place it.</div>
+
+      <div class="seg tierseg" id="tier">
+        <button data-tier="simple" class="sel">Simple</button>
+        <button data-tier="advanced">Advanced</button>
+      </div>
+      <div id="neural_status" class="err" style="min-height:0"></div>
+
+      <textarea id="text" spellcheck="false">The quick brown fox
 jumps over the lazy dog</textarea>
 
-    <div class="group" data-tier="adv">
-      <h2>Mode</h2>
-      <div class="seg" id="mode">
-        <button data-m="writing" class="sel">Writing</button>
-        <button data-m="signature">Signature</button>
-      </div>
-    </div>
-
-
-    <div class="group" data-tier="adv">
-      <h2>Signatures</h2>
-      <button class="btn" id="sig_btn">Import or paste a signature screenshot</button>
-      <input class="file" id="sig_file" type="file" accept="image/*" />
-      <div style="color:var(--muted);font-size:11px;margin-top:6px">Paste a screenshot of a signature with Ctrl/Cmd+V — it's traced to a clean vector. Use only a signature you're authorized to use.</div>
-      <div id="sig_controls" style="display:none">
-        <div class="switch"><div><div class="t">Use this signature</div><div class="d">Show the traced signature instead of typed text.</div></div><div class="sw-toggle" data-k="usesig"><i></i></div></div>
-        <div class="row"><label>Threshold</label><input id="sig_threshold" type="range" min="20" max="240" value="150"><span class="val" id="sig_threshold_v"></span></div>
-        <button class="btn" id="sig_match">Match style for typing</button>
-        <button class="btn" id="sig_clear" style="margin-top:8px">Remove signature</button>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px">
-        <div style="color:var(--muted);font-size:11px;letter-spacing:.06em;text-transform:uppercase">Saved (max 10)</div>
-        <button class="btn" id="sig_save" style="width:auto;padding:5px 9px;font-size:12px">Save current</button>
-      </div>
-      <div id="sig_saved" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
-    </div>
-
-    <div class="group">
-      <h2>Style</h2>
-      <select id="hand">
-        <option value="r">Random</option>
-        <option value="44">Hand 1</option>
-        <option value="54">Hand 2</option>
-        <option value="23">Hand 3</option>
-        <option value="1" selected>Hand 4</option>
-        <option value="19">Hand 5</option>
-        <option value="6">Hand 6</option>
-        <option value="30">Hand 7</option>
-        <option value="11">Hand 8</option>
-        <option value="21">Hand 9</option>
-        <option value="7">Hand 10</option>
-        <option value="42">Hand 11</option>
-        <option value="88">Hand 12</option>
-        <option value="123">Hand 13</option>
-        <option value="256">Hand 14</option>
-        <option value="314">Hand 15</option>
-      </select>
-      <select id="style" data-tier="adv" style="margin-top:8px">
-        <option value="random">Random preset</option>
-        <option value="Casual" selected>Casual</option>
-        <option value="Neat">Neat</option>
-        <option value="Formal">Formal</option>
-        <option value="Elegant">Elegant</option>
-        <option value="Script">Script</option>
-        <option value="Signature">Signature</option>
-        <option value="Rounded">Rounded</option>
-        <option value="Hurried">Hurried</option>
-        <option value="Scrawl">Scrawl</option>
-        <option value="Spiky">Spiky</option>
-        <option value="Architect">Architect</option>
-        <option value="Marker">Marker</option>
-        <option value="Kid">Kid</option>
-      </select>
-      <div class="row" style="margin-top:10px"><label>Speed</label><input id="speed" type="range" min="0" max="100" value="55"><span class="val" id="speed_v"></span></div>
-      <div class="row"><label>Legibility</label><input id="legibility" type="range" min="0" max="100" value="72"><span class="val" id="legibility_v"></span></div>
-      <div class="row"><label>Thickness</label><input id="thickness" type="range" min="10" max="90" value="36"><span class="val" id="thickness_v"></span></div>
-    </div>
-
-    <div class="group" data-tier="adv">
-      <h2>Realism</h2>
-      <div class="switch"><div><div class="t">Vary each letter</div><div class="d">Repeated letters never look exactly the same.</div></div><div class="sw-toggle on" data-k="vary"><i></i></div></div>
-      <div class="switch"><div><div class="t">Natural movement</div><div class="d">Words and line spacing drift like a real hand.</div></div><div class="sw-toggle on" data-k="natural"><i></i></div></div>
-      <div class="switch"><div><div class="t">Inkflow</div><div class="d">Pressure changes the stroke, like a real pen.</div></div><div class="sw-toggle on" data-k="inkflow"><i></i></div></div>
-      <div class="switch"><div><div class="t">Tilt each letter</div><div class="d">A hand-printed look; turns off natural movement.</div></div><div class="sw-toggle" data-k="tilt"><i></i></div></div>
-      <div class="switch"><div><div class="t">Cursive capitals</div><div class="d">Flowing capital letters that join the word.</div></div><div class="sw-toggle" data-k="cursivecaps"><i></i></div></div>
-    </div>
-
-    <div class="group">
-      <h2>Ink</h2>
-      <div class="swatches" id="ink"></div>
-    </div>
-
-    <div class="group" data-tier="adv">
-      <h2>Page look</h2>
-      <div class="row"><label>Paper</label><span class="swatches" id="paper" style="flex:1"></span></div>
-      <div style="color:var(--muted);font-size:11px;margin:10px 0 6px">Paper texture</div>
-      <div class="swatches" id="textures"></div>
-      <div class="row" style="margin-top:8px"><label>Intensity</label><input id="tex_intensity" type="range" min="0" max="60" value="18"><span class="val" id="tex_intensity_v"></span></div>
-      <div class="row"><label>Guide</label><select id="paper_style"><option value="blank">Blank</option><option value="ruled">Ruled</option><option value="grid">Grid</option></select></div>
-    </div>
-
-    <div class="group" data-tier="adv">
-      <h2>Document to sign / write on</h2>
-      <button class="btn" id="upload_btn">Upload PDF or image</button>
-      <input class="file" id="file" type="file" accept="application/pdf,image/*" />
-      <div id="recent_sign" class="recents"></div>
-      <div id="doc_controls" style="display:none">
-        <div class="actions" style="margin-top:10px;grid-template-columns:1fr 1fr">
-          <button class="btn" id="add_sig">+ Signature</button>
-          <button class="btn" id="add_text">+ Writing</button>
-          <button class="btn" id="add_date">+ Date</button>
-          <button class="btn" id="add_check">+ Check</button>
+      <div class="group" data-tier="adv">
+        <h2>Mode</h2>
+        <div class="seg" id="mode">
+          <button data-m="writing" class="sel">Writing</button>
+          <button data-m="signature">Signature</button>
         </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:12px;font-weight:600;letter-spacing:.02em">FORM BUILDER</div>
-        <div class="actions" style="margin-top:6px;grid-template-columns:1fr 1fr">
-          <button class="btn" id="field_text">▭ Text field</button>
-          <button class="btn" id="field_date">▭ Date field</button>
-          <button class="btn" id="field_check">☐ Checkbox</button>
-          <button class="btn" id="field_sig">✒ Signature</button>
+      </div>
+
+      <div class="group">
+        <h2>Style</h2>
+        <select id="hand">
+          <option value="r">Random</option>
+          <option value="44">Hand 1</option>
+          <option value="54">Hand 2</option>
+          <option value="23">Hand 3</option>
+          <option value="1" selected>Hand 4</option>
+          <option value="19">Hand 5</option>
+          <option value="6">Hand 6</option>
+          <option value="30">Hand 7</option>
+          <option value="11">Hand 8</option>
+          <option value="21">Hand 9</option>
+          <option value="7">Hand 10</option>
+          <option value="42">Hand 11</option>
+          <option value="88">Hand 12</option>
+          <option value="123">Hand 13</option>
+          <option value="256">Hand 14</option>
+          <option value="314">Hand 15</option>
+        </select>
+        <select id="style" data-tier="adv" style="margin-top:8px">
+          <option value="random">Random preset</option>
+          <option value="Casual" selected>Casual</option>
+          <option value="Neat">Neat</option>
+          <option value="Formal">Formal</option>
+          <option value="Elegant">Elegant</option>
+          <option value="Script">Script</option>
+          <option value="Signature">Signature</option>
+          <option value="Rounded">Rounded</option>
+          <option value="Hurried">Hurried</option>
+          <option value="Scrawl">Scrawl</option>
+          <option value="Spiky">Spiky</option>
+          <option value="Architect">Architect</option>
+          <option value="Marker">Marker</option>
+          <option value="Kid">Kid</option>
+        </select>
+        <div class="row" style="margin-top:10px"><label>Speed</label><input id="speed" type="range" min="0" max="100" value="55"><span class="val" id="speed_v"></span></div>
+        <div class="row"><label>Legibility</label><input id="legibility" type="range" min="0" max="100" value="72"><span class="val" id="legibility_v"></span></div>
+        <div class="row"><label>Thickness</label><input id="thickness" type="range" min="10" max="90" value="36"><span class="val" id="thickness_v"></span></div>
+      </div>
+
+      <div class="group">
+        <h2>Ink</h2>
+        <div class="swatches" id="ink"></div>
+      </div>
+
+      <div class="group">
+        <h2>Seed / hand</h2>
+        <div class="seedline"><input id="seed" type="number" value="1337" /><button class="btn" id="reroll" style="width:auto">New hand</button></div>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn" id="last_hand">↶ Last hand</button>
+          <button class="btn" id="save_hand">★ Save hand</button>
         </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:12px;font-weight:600;letter-spacing:.02em">DRAW &amp; ANNOTATE</div>
-        <div class="seg" id="draw_seg" style="margin-top:6px;flex-wrap:wrap">
-          <button data-draw="" class="sel">Select</button>
-          <button data-draw="pen">✏ Pen</button>
-          <button data-draw="highlight">🖊 Mark</button>
-          <button data-draw="rect">▭ Box</button>
-          <button data-draw="line">／ Line</button>
-          <button data-draw="arrow">➔ Arrow</button>
+        <div id="saved_hands" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+      </div>
+
+      <div class="group" data-tier="adv">
+        <h2>Signatures</h2>
+        <button class="btn" id="sig_btn">Import or paste a signature picture</button>
+        <input class="file" id="sig_file" type="file" accept="image/*" />
+        <div class="note">Paste a screenshot of a signature with Ctrl/Cmd+V — it's traced to a clean vector. Use only a signature you're authorized to use.</div>
+        <div id="sig_controls" style="display:none">
+          <div class="switch"><div><div class="t">Use this signature</div><div class="d">Show the traced signature instead of typed text.</div></div><div class="sw-toggle" data-k="usesig"><i></i></div></div>
+          <div class="row"><label>Threshold</label><input id="sig_threshold" type="range" min="20" max="240" value="150"><span class="val" id="sig_threshold_v"></span></div>
+          <button class="btn" id="sig_match">Match style for typing</button>
+          <button class="btn" id="sig_clear" style="margin-top:8px">Remove signature</button>
         </div>
-        <div class="row" style="margin-top:6px"><label>Ink</label><input type="color" id="draw_color" value="#e23b3b" style="width:42px;padding:2px;flex:none"><input id="draw_size" type="range" min="1" max="12" value="3" style="flex:1"><button class="btn" id="draw_undo" style="width:auto;padding:7px 10px">Undo</button><button class="btn" id="draw_clear" style="width:auto;padding:7px 10px">Clear</button></div>
-        <div class="row" style="margin-top:8px"><label>Signer</label><select id="signer_sel" style="flex:1"></select><button class="btn" id="add_signer" style="width:auto;padding:7px 10px">+</button></div>
-        <div class="row" id="item_font_row" style="display:none"><label>Font</label><select id="item_font" style="flex:1"></select></div>
-        <div id="item_date_row" style="display:none">
-          <div class="row"><label>Date</label><input id="item_date" type="date" style="flex:1"></div>
-          <div class="row"><label>Time</label><input id="item_time" type="time" style="flex:1"></div>
-          <div class="row"><label>Zone</label><select id="item_tz" style="flex:1"></select></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px">
+          <div style="color:var(--muted);font-size:12px;letter-spacing:.04em;text-transform:uppercase">Saved (max 10)</div>
+          <button class="btn" id="sig_save" style="width:auto;padding:4px 9px;font-size:13px">Save current</button>
         </div>
-        <div class="row" id="item_mark_row" style="display:none"><label>Mark</label><div class="seg" id="mark_seg" style="flex:1"><button data-mark="check" class="sel">✓ Check</button><button data-mark="x">✗ X</button></div></div>
-        <div class="row"><label>Opacity</label><input id="item_opacity" type="range" min="10" max="100" value="100"><span class="val" id="item_opacity_v"></span></div>
-        <div class="row"><label>PDF page</label><input id="pdf_page" type="number" min="1" value="1" style="width:70px"><span style="color:var(--muted);font-size:11px" id="pdf_pages"></span></div>
-        <button class="btn" id="clear_doc" style="margin-top:8px">Remove document</button>
-        <div style="color:var(--muted);font-size:11px;margin-top:6px">Click to select, drag to move, corner dots to resize, trash to delete. Double-click text to edit it live. With a signature selected, <b>New hand</b> re-rolls just that one. Fillable PDF fields show as inputs you can type into.</div>
+        <div id="sig_saved" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
       </div>
-    </div>
 
-    <div class="group" data-tier="adv">
-      <h2>Scan &amp; finish</h2>
-      <div class="switch"><div><div class="t">Scanned look</div><div class="d">Make the whole page look like it came off a scanner. Live preview + baked into exports.</div></div><div class="sw-toggle" data-k="scanned"><i></i></div></div>
-      <div id="scan_opts">
-      <div class="row"><label>Colorspace</label><select id="cspace" style="flex:1"><option value="color" selected>Colorful</option><option value="gray">Grayscale</option><option value="bw">Black &amp; white</option></select></div>
-      <div class="switch"><div><div class="t">Border</div><div class="d">Dark scanner edge around the page.</div></div><div class="sw-toggle" data-k="border"><i></i></div></div>
-      <div class="row"><label>Rotate</label><input id="scan_rotate" type="range" min="-30" max="30" value="0"><span class="val" id="scan_rotate_v"></span></div>
-      <div class="row"><label>Rotate var</label><input id="scan_rotvar" type="range" min="0" max="30" value="6"><span class="val" id="scan_rotvar_v"></span></div>
-      <div class="row"><label>Brightness</label><input id="scan_bright" type="range" min="60" max="140" value="101"><span class="val" id="scan_bright_v"></span></div>
-      <div class="row"><label>Contrast</label><input id="scan_contrast" type="range" min="60" max="180" value="108"><span class="val" id="scan_contrast_v"></span></div>
-      <div class="row"><label>Blur</label><input id="blur" type="range" min="0" max="40" value="0"><span class="val" id="blur_v"></span></div>
-      <div class="row"><label>Sharpness</label><input id="sharpen" type="range" min="0" max="100" value="0"><span class="val" id="sharpen_v"></span></div>
-      <div class="row"><label>Noise</label><input id="scan_noise" type="range" min="0" max="100" value="18"><span class="val" id="scan_noise_v"></span></div>
-      <div class="row"><label>Yellowish</label><input id="scan_yellow" type="range" min="0" max="100" value="8"><span class="val" id="scan_yellow_v"></span></div>
-      <div class="row"><label>Blemish</label><input id="blemish" type="range" min="0" max="100" value="22"><span class="val" id="blemish_v"></span></div>
-      <div class="row"><label>Resolution</label><input id="resolution" type="range" min="1" max="4" step="1" value="2"><span class="val" id="resolution_v"></span></div>
+      <div class="group" data-tier="adv">
+        <h2>Realism</h2>
+        <div class="switch"><div><div class="t">Vary each letter</div><div class="d">Repeated letters never look exactly the same.</div></div><div class="sw-toggle on" data-k="vary"><i></i></div></div>
+        <div class="switch"><div><div class="t">Natural movement</div><div class="d">Words and line spacing drift like a real hand.</div></div><div class="sw-toggle on" data-k="natural"><i></i></div></div>
+        <div class="switch"><div><div class="t">Inkflow</div><div class="d">Pressure changes the stroke, like a real pen.</div></div><div class="sw-toggle on" data-k="inkflow"><i></i></div></div>
+        <div class="switch"><div><div class="t">Tilt each letter</div><div class="d">A hand-printed look; turns off natural movement.</div></div><div class="sw-toggle" data-k="tilt"><i></i></div></div>
+        <div class="switch"><div><div class="t">Cursive capitals</div><div class="d">Flowing capital letters that join the word.</div></div><div class="sw-toggle" data-k="cursivecaps"><i></i></div></div>
       </div>
-    </div>
 
-    <details data-tier="adv">
-      <summary>Fine-tuning</summary>
-      <div class="row"><label>Size</label><input id="font_px" type="range" min="28" max="140" value="64"><span class="val" id="font_px_v"></span></div>
-      <div class="row"><label>Slant</label><input id="slant" type="range" min="-10" max="30" value="9"><span class="val" id="slant_v"></span></div>
-      <div class="row"><label>Nib</label><input id="contrast" type="range" min="0" max="100" value="55"><span class="val" id="contrast_v"></span></div>
-      <div class="row"><label>Spacing</label><input id="spacing" type="range" min="-10" max="40" value="4"><span class="val" id="spacing_v"></span></div>
-      <div class="row"><label>Line</label><input id="line_spacing" type="range" min="70" max="200" value="108"><span class="val" id="line_spacing_v"></span></div>
-      <div class="row"><label>Align</label><div class="seg" id="align" style="flex:1">
-        <button data-a="0" class="sel">Left</button><button data-a="0.5">Center</button><button data-a="1">Right</button></div></div>
-      <div class="switch"><div class="t">Transparent PNG background</div><div class="sw-toggle" data-k="transparent"><i></i></div></div>
-    </details>
-
-    <div class="group">
-      <h2>Seed / hand</h2>
-      <div class="seedline"><input id="seed" type="number" value="1337" /><button class="btn" id="reroll" style="width:auto">New hand</button></div>
-      <div class="actions" style="grid-template-columns:1fr 1fr;margin-top:8px">
-        <button class="btn" id="last_hand">↶ Last hand</button>
-        <button class="btn" id="save_hand">★ Save hand</button>
+      <div class="group" data-tier="adv" data-show="write">
+        <h2>Page look</h2>
+        <div class="row"><label>Paper</label><span class="swatches" id="paper" style="flex:1"></span></div>
+        <div style="color:var(--muted);font-size:12px;margin:10px 0 6px">Paper texture</div>
+        <div class="swatches" id="textures"></div>
+        <div class="row" style="margin-top:8px"><label>Intensity</label><input id="tex_intensity" type="range" min="0" max="60" value="18"><span class="val" id="tex_intensity_v"></span></div>
+        <div class="row"><label>Guide</label><select id="paper_style"><option value="blank">Blank</option><option value="ruled">Ruled</option><option value="grid">Grid</option></select></div>
       </div>
-      <div id="saved_hands" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
-    </div>
 
-    <div class="group">
-      <h2>Export &amp; share</h2>
-      <div class="actions">
-        <button class="btn" id="pdf">PDF (flattened)</button>
-        <button class="btn" id="pdf_fill">Fillable PDF</button>
-        <button class="btn" id="png">PNG image</button>
-        <button class="btn" id="svg">SVG</button>
+      <div class="group" data-tier="adv">
+        <h2>Scan look</h2>
+        <div class="switch"><div><div class="t">Scanned look</div><div class="d">Make the page look like it came off a scanner. Live preview, baked into downloads.</div></div><div class="sw-toggle" data-k="scanned"><i></i></div></div>
+        <div id="scan_opts">
+        <div class="row"><label>Colours</label><select id="cspace" style="flex:1"><option value="color" selected>Colour</option><option value="gray">Grayscale</option><option value="bw">Black &amp; white</option></select></div>
+        <div class="switch"><div><div class="t">Border</div><div class="d">Dark scanner edge around the page.</div></div><div class="sw-toggle" data-k="border"><i></i></div></div>
+        <div class="row"><label>Rotate</label><input id="scan_rotate" type="range" min="-30" max="30" value="0"><span class="val" id="scan_rotate_v"></span></div>
+        <div class="row"><label>Rotate var</label><input id="scan_rotvar" type="range" min="0" max="30" value="6"><span class="val" id="scan_rotvar_v"></span></div>
+        <div class="row"><label>Brightness</label><input id="scan_bright" type="range" min="60" max="140" value="101"><span class="val" id="scan_bright_v"></span></div>
+        <div class="row"><label>Contrast</label><input id="scan_contrast" type="range" min="60" max="180" value="108"><span class="val" id="scan_contrast_v"></span></div>
+        <div class="row"><label>Blur</label><input id="blur" type="range" min="0" max="40" value="0"><span class="val" id="blur_v"></span></div>
+        <div class="row"><label>Sharpness</label><input id="sharpen" type="range" min="0" max="100" value="0"><span class="val" id="sharpen_v"></span></div>
+        <div class="row"><label>Noise</label><input id="scan_noise" type="range" min="0" max="100" value="18"><span class="val" id="scan_noise_v"></span></div>
+        <div class="row"><label>Yellowish</label><input id="scan_yellow" type="range" min="0" max="100" value="8"><span class="val" id="scan_yellow_v"></span></div>
+        <div class="row"><label>Blemish</label><input id="blemish" type="range" min="0" max="100" value="22"><span class="val" id="blemish_v"></span></div>
+        <div class="row"><label>Resolution</label><input id="resolution" type="range" min="1" max="4" step="1" value="2"><span class="val" id="resolution_v"></span></div>
+        </div>
       </div>
-      <button class="btn" id="share" style="margin-top:8px">Copy shareable link</button>
-      <div style="color:var(--muted);font-size:11px;margin-top:6px"><b>Flattened</b>: everything baked into the page (not editable). <b>Fillable PDF</b>: your Form-builder fields stay as boxes anyone can type into or tick in a PDF reader; signatures, writing and drawings are baked in.</div>
-      <div class="err" id="err"></div>
-    </div>
-  </aside>
 
-  <main class="stage">
-    <div class="sheet" id="sheet"></div>
-    <div id="pdfedit_stage"></div>
-    <div class="credit">Calligrapher 2.0 · yours to deploy</div>
-  </main>
+      <details data-tier="adv">
+        <summary>Fine-tuning</summary>
+        <div class="row"><label>Size</label><input id="font_px" type="range" min="28" max="140" value="64"><span class="val" id="font_px_v"></span></div>
+        <div class="row"><label>Slant</label><input id="slant" type="range" min="-10" max="30" value="9"><span class="val" id="slant_v"></span></div>
+        <div class="row"><label>Nib</label><input id="contrast" type="range" min="0" max="100" value="55"><span class="val" id="contrast_v"></span></div>
+        <div class="row"><label>Spacing</label><input id="spacing" type="range" min="-10" max="40" value="4"><span class="val" id="spacing_v"></span></div>
+        <div class="row"><label>Line</label><input id="line_spacing" type="range" min="70" max="200" value="108"><span class="val" id="line_spacing_v"></span></div>
+        <div class="row"><label>Align</label><div class="seg" id="align" style="flex:1">
+          <button data-a="0" class="sel">Left</button><button data-a="0.5">Center</button><button data-a="1">Right</button></div></div>
+        <div class="switch"><div class="t">Transparent PNG background</div><div class="sw-toggle" data-k="transparent"><i></i></div></div>
+      </details>
+
+      <div class="group">
+        <h2><span data-show="write">Write on a document</span><span data-show="doc">Document</span></h2>
+        <button class="btn" id="upload_btn"><span data-show="write">Open a PDF or image to sign</span><span data-show="doc">Open another file</span></button>
+        <input class="file" id="file" type="file" accept="application/pdf,image/*" />
+        <div id="recent_sign" class="recents"></div>
+        <button class="btn" id="clear_doc" data-show="doc" style="margin-top:10px">Close document</button>
+        <div class="note" data-show="doc">Pick a tool above the page, then click (or drag) on the page. Select an object to move it, resize it from a corner, or change it in the bar above. Double-click text to edit it. Delete removes the selection; Ctrl+Z undoes.</div>
+      </div>
+
+      <div class="group">
+        <h2>Download &amp; share</h2>
+        <div class="actions">
+          <button class="btn primary" id="pdf">PDF</button>
+          <button class="btn" id="pdf_fill" data-show="doc">Fillable PDF</button>
+          <button class="btn" id="png">PNG image</button>
+          <button class="btn" id="svg" data-show="write">SVG</button>
+        </div>
+        <button class="btn" id="share" style="margin-top:8px" data-show="write">Copy shareable link</button>
+        <div class="note" data-show="doc"><b>PDF</b>: every page with everything baked in. <b>Fillable PDF</b>: your form fields stay as boxes anyone can type into or tick; sticky notes become PDF comments.</div>
+        <div class="err" id="err"></div>
+      </div>
+    </aside>
+  </div>
 </div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=11"></script>
+<script type="module" src="./app.js?v=13"></script>
+<script type="module" src="./shell.js?v=1"></script>
 </body>
 </html>

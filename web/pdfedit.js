@@ -121,7 +121,7 @@ function pickFiles(accept, multiple, cb) {
 }
 
 // ---- thumbnail grid (the page workspace) -----------------------------------
-async function thumb(entry, scale = 0.36) {
+async function thumb(entry, scale = 0.6) {
   const key = entry.srcId + "|" + entry.srcIndex + "|" + entry.rot;
   if (thumbCache.has(key)) return thumbCache.get(key);
   const c = await rasterize(entry, scale);
@@ -131,7 +131,7 @@ async function thumb(entry, scale = 0.36) {
 function renderGrid() {
   const stage = $("pdfedit_stage"); if (!stage) return;
   if (!pages.length) {
-    stage.innerHTML = '<div style="margin:auto;color:var(--muted);font-size:14px">No PDF open yet — click “Open PDF(s)”.</div>';
+    stage.innerHTML = '<div style="margin:auto;color:var(--muted);font-size:14px">No PDF open yet — use “Add PDF(s)” on the right, or drop PDFs here.</div>';
     return;
   }
   stage.innerHTML = "";
@@ -320,7 +320,7 @@ const TOOLS = [
 
 function openInSign() {
   const buf = sources.length ? sources[0].bytes.slice() : null;
-  if (window.__cal2OpenInSign) window.__cal2OpenInSign(buf);
+  if (window.__cal2OpenInSign) window.__cal2OpenInSign(buf, sources.length ? sources[0].name : "document.pdf");
 }
 
 function buildGrid() {
@@ -486,15 +486,29 @@ function openImg() {
     }
     dl("pages.zip", await zip.generateAsync({ type: "blob" })); note("Saved pages.zip (" + pages.length + " images).");
   });
-  $("pe_img2pdf").onclick = () => pickFiles("image/*", true, (files) => withBusy("Building…", async () => {
+  $("pe_img2pdf").onclick = () => pickFiles("image/*", true, imagesToPdf);
+}
+// Pictures → one PDF (also used when pictures are chosen on the "JPG to PDF" page).
+function imagesToPdf(files) {
+  return withBusy("Building…", async () => {
     const L = PDFLib(); const out = await L.PDFDocument.create();
     for (const f of files) {
       const u8 = new Uint8Array(await f.arrayBuffer());
-      const img = /\.png$/i.test(f.name) || f.type === "image/png" ? await out.embedPng(u8) : await out.embedJpg(u8);
+      const isPng = /\.png$/i.test(f.name) || f.type === "image/png", isJpg = /\.jpe?g$/i.test(f.name) || f.type === "image/jpeg";
+      let img;
+      if (isPng) img = await out.embedPng(u8);
+      else if (isJpg) img = await out.embedJpg(u8);
+      else { // GIF / WebP / BMP → PNG through a canvas
+        const url = URL.createObjectURL(f);
+        const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+        const c = document.createElement("canvas"); c.width = im.naturalWidth; c.height = im.naturalHeight;
+        c.getContext("2d").drawImage(im, 0, 0); URL.revokeObjectURL(url);
+        img = await out.embedPng(dataURLtoU8(c.toDataURL("image/png")));
+      }
       const pg = out.addPage([img.width, img.height]); pg.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
     }
     await save(out, "images.pdf"); note("Saved images.pdf (" + files.length + " pages).");
-  }));
+  });
 }
 function openOcr() {
   panelShell("PDF OCR", `
@@ -831,8 +845,22 @@ export function initPdfEditor() {
   // Load a PDF straight into the editor by bytes (used by the Sign→editor handoff).
   window.__cal2RefreshPeRecents = renderPeRecents;
   window.__cal2OpenPdfEditorBytes = async (bytes, name) => {
-    sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1;
+    resetAll();
     try { await addSourceBytes(name || "document.pdf", new Uint8Array(bytes)); buildGrid(); renderGrid(); rememberSource(sources[0]).catch(() => {}); }
     catch (e) { note("Could not open: " + (e.message || e), true); }
   };
+  // Hooks for the page shell: open a tool by id, add/reset files, convert helpers.
+  window.__cal2OpenTool = (id) => {
+    const t = TOOLS.find((x) => x.id === id);
+    if (!t) { backToGrid(); return; }
+    if (t.kind === "action" && !["merge", "txt2pdf"].includes(t.id) && !pages.length) return;  // waits for a file
+    openTool(t);
+  };
+  window.__cal2AddPdfFiles = (files) => addFiles(files);
+  window.__cal2ResetPdf = () => { resetAll(); backToGrid(); };
+  window.__cal2PdfPageCount = () => pages.length;
+  window.__cal2TxtToPdf = (f) => txtToPdf(f);
+  window.__cal2ImagesToPdf = (files) => imagesToPdf(files);
+  window.__cal2PdfBack = () => backToGrid();
 }
+function resetAll() { sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1; etSrc = null; etEdits.clear(); }
