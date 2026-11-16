@@ -3,6 +3,9 @@
 
 import { initPdfEditor } from "./pdfedit.js?v=7";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
+import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
+import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont } from "./fonts.js?v=1";
+import { scanPdfWatermarks, removePdfWatermarks, eraseColor, inpaint, pageBackground } from "./watermark.js?v=1";
 
 const WASM_URL = "./calligrapher2.wasm";
 let wasm = null;
@@ -50,7 +53,7 @@ let neuralWorker = null, neuralReqId = 0;
 const neuralWaiters = new Map();
 function getWorker() {
   if (neuralWorker) return neuralWorker;
-  neuralWorker = new Worker("./neural-worker.js?v=1", { type: "module" });
+  neuralWorker = new Worker("./neural-worker.js?v=2", { type: "module" });
   neuralWorker.onmessage = (e) => {
     const { id, type } = e.data;
     if (type === "status") { nStatus().textContent = e.data.msg === "loading" ? "Loading neural model (~15 MB, once)…" : ""; return; }
@@ -61,11 +64,14 @@ function getWorker() {
   neuralWorker.onerror = () => { nStatus().textContent = "Neural model unavailable (worker failed)."; };
   return neuralWorker;
 }
+// A saved sample of your own handwriting: when set, every new line is written in its style.
+let activePrime = null;            // { id, name, text, offsets }
+const primeKey = () => (activePrime ? "|P" + activePrime.id : "");
 function sampleLines(lines, bias, seed) {
   return new Promise((resolve, reject) => {
     const id = ++neuralReqId;
     neuralWaiters.set(id, { resolve, reject });
-    getWorker().postMessage({ id, lines, bias, seed, baseUrl: "./model/" });
+    getWorker().postMessage({ id, lines, bias, seed, baseUrl: "./model/", prime: activePrime ? { text: activePrime.text, offsets: activePrime.offsets } : null });
   });
 }
 
@@ -155,7 +161,7 @@ const neuralInflight = new Set();
 let neuralLatestKey = null;
 function neuralSVG(text, p) {
   const bias = neuralBias(), seed = p.seed;
-  const key = text + "|" + bias.toFixed(3) + "|" + seed;
+  const key = text + "|" + bias.toFixed(3) + "|" + seed + primeKey();
   neuralLatestKey = key; // the most recently requested render always wins
   const cached = neuralCache.get(key);
   if (cached) return buildNeuralSVG(cached, p);
@@ -467,25 +473,12 @@ const CLICK_TOOLS = new Set(["text", "sig", "handwrite", "date", "check", "note"
 const BOX_TOOLS = new Set(["shape:rect", "shape:ellipse", "whiteout", "redact"]);
 const STICKY_TOOLS = new Set(["check"]);
 const PALETTE = ["#000000", "#1b1b1f", "#5f6368", "#ffffff", "#e23b3b", "#f0a500", "#ffd400", "#1f9d55", "#0b7285", "#398dff", "#11295b", "#7c5cff"];
-const TEXT_FONTS = [
-  { k: "arial", n: "Arial", css: "Arial, Helvetica, 'Liberation Sans', sans-serif" },
-  { k: "helvetica", n: "Helvetica", css: "Helvetica, Arial, sans-serif" },
-  { k: "times", n: "Times New Roman", css: "'Times New Roman', Times, 'Liberation Serif', serif" },
-  { k: "georgia", n: "Georgia", css: "Georgia, 'Times New Roman', serif" },
-  { k: "calibri", n: "Calibri", css: "Calibri, Carlito, 'Segoe UI', sans-serif" },
-  { k: "segoe", n: "Segoe UI", css: "'Segoe UI', 'Source Sans 3', Arial, sans-serif" },
-  { k: "verdana", n: "Verdana", css: "Verdana, Geneva, sans-serif" },
-  { k: "courier", n: "Courier New", css: "'Courier New', Courier, monospace" },
-  { k: "source", n: "Source Sans 3", css: "'Source Sans 3', Arial, sans-serif" },
-  { k: "docusign", n: "Signature script", css: "'Dancing Script', 'Segoe Script', cursive" },
-  { k: "vibes", n: "Elegant script", css: "'Great Vibes', cursive" },
-  { k: "caveat", n: "Handwritten", css: "Caveat, 'Segoe Print', cursive" },
-  { k: "apple", n: "Marker", css: "'Homemade Apple', cursive" },
-];
-const fontByKey = (k) => TEXT_FONTS.find((f) => f.k === k) || TEXT_FONTS[0];
+// Text fonts come from the font library (fonts.js); older font keys map onto it.
+const LEGACY_FONT = { arial: "Arimo", helvetica: "Arimo", times: "Tinos", georgia: "Gelasio", calibri: "Carlito", segoe: "Segoe UI", verdana: "Verdana", courier: "Cousine", source: "Source Sans 3", docusign: "Dancing Script", vibes: "Great Vibes", caveat: "Caveat", apple: "Homemade Apple" };
+const fontByKey = (k) => fontEntry(LEGACY_FONT[k] || k) || fontEntry("Arimo");
 // Defaults for new objects, remembered as you change them in the property bar.
 const TD = {
-  text: { ff: "arial", pt: 12, color: "#000000", bg: "none", bold: false, italic: false, align: "left" },
+  text: { ff: "Arimo", pt: 12, color: "#000000", bg: "none", bold: false, italic: false, align: "left" },
   shape: { fill: "none", stroke: "#e23b3b", width: 3 },
   pen: { color: "#1b1b1f", width: 3 }, line: { color: "#e23b3b", width: 3 }, arrow: { color: "#e23b3b", width: 3 },
   highlight: { color: "#ffd400", width: 4 }, underline: { color: "#398dff", width: 2 }, strike: { color: "#e23b3b", width: 2 },
@@ -502,7 +495,8 @@ const TOOL_HINTS = {
   "shape:rect": "Drag on the page to draw a rectangle.", "shape:ellipse": "Drag on the page to draw an ellipse.",
   whiteout: "Drag over anything you want to cover in white.", redact: "Drag over anything that must be removed for good.",
   pen: "Draw freehand on the page.", highlight: "Drag across text to highlight it.", underline: "Drag along text to underline it.",
-  strike: "Drag through text to strike it out.", line: "Drag to draw a line.", arrow: "Drag to draw an arrow.",
+  strike: "Drag through text to strike it out.",
+  "wm-pick": "Click the watermark on the page to pick its colour.", "wm-brush": "Paint over the watermark, then press Fill in painted areas on the right.", line: "Drag to draw a line.", arrow: "Drag to draw an arrow.",
 };
 
 function selectedItem() { return docItems.find((i) => i.id === selId); }
@@ -725,15 +719,13 @@ function renderOrganize() {
 // ---- the PDF's own text: find it, edit it in its own font, remove it -----------------
 const textBlocks = new Map();      // page key:rot -> Promise<blocks>
 const pdfFonts = new Map();        // source:fontName -> { loadedName, map, inv, fallback }
+// The closest available font for a PDF font (downloaded on demand), used for any
+// characters the PDF's own embedded font does not contain — or when it has none.
 function fontFallback(fo) {
-  const raw = (fo && fo.name ? String(fo.name) : "").replace(/^[A-Z]{6}\+/, "");
-  const fam = raw.split(/[-,]/)[0].replace(/(MT|PS|Std|Pro)$/i, "").replace(/([a-z])([A-Z])/g, "$1 $2").trim();
-  const bold = /bold|black|heavy|semibold|demi/i.test(raw), italic = /italic|oblique/i.test(raw);
-  const generic = fo && fo.isMonospace ? "monospace" : fo && fo.isSerifFont ? "serif" : "sans-serif";
-  const known = /calibri/i.test(raw) ? "Calibri, Carlito" : /cambria/i.test(raw) ? "Cambria, Caladea" : /arial|helvetica/i.test(raw) ? "Arial, Helvetica" :
-    /times/i.test(raw) ? "'Times New Roman', Times" : /courier/i.test(raw) ? "'Courier New', Courier" : /segoe/i.test(raw) ? "'Segoe UI'" :
-    /verdana/i.test(raw) ? "Verdana" : /georgia/i.test(raw) ? "Georgia" : /garamond/i.test(raw) ? "Garamond, 'EB Garamond'" : generic === "serif" ? "'Times New Roman'" : generic === "monospace" ? "'Courier New'" : "Arial";
-  return { css: `${fam ? `"${fam}", ` : ""}${known}, ${generic}`, weight: bold ? 700 : 400, style: italic ? "italic" : "normal", serif: generic === "serif", mono: generic === "monospace" };
+  const m = matchPdfFont(fo && fo.name, { serif: !!(fo && fo.isSerifFont), mono: !!(fo && fo.isMonospace) });
+  ensureFont(m.family);
+  const f = fontEntry(m.family);
+  return { css: m.css, family: m.family, weight: m.weight, style: m.style, serif: !!f && f.cat === "Serif", mono: !!f && f.cat === "Mono" };
 }
 function registerPdfFont(si, fontName, page) {
   const key = si + ":" + fontName;
@@ -832,7 +824,7 @@ function createTextEdit(pi, b, bid, cx, cy) {
   const padX = b.fsN * 0.08, padY = b.nh * 0.1;
   const it = {
     id: "it" + itemSeq++, type: "text", tbox: true, tedit: true, page: pi, blockId: bid, pfont: b.pfont,
-    ff: info && info.fallback.serif ? "times" : info && info.fallback.mono ? "courier" : "arial",
+    ff: info ? info.fallback.family : "Arimo",
     fs: b.fsN, asc: b.asc, color: fg, bg: "none", coverBg: bg, opacity: 1, signer: activeSigner, align: "left",
     cover: { nx: b.nx - padX, ny: b.ny - padY, nw: b.nw + padX * 2, nh: b.nh + padY * 2 },
     nx: b.nx, ny: b.ny, nw: b.nw + padX, ar: (b.nh / (b.nw + padX)) / pageAspect(pi), text: b.str, orig: b.str,
@@ -875,7 +867,7 @@ function currentSignature(wm) {
 async function generateSig(text, p, m) {
   m = m || mode;
   const bias = neuralBias();
-  const key = text + "|" + bias.toFixed(3) + "|" + p.seed;
+  const key = text + "|" + bias.toFixed(3) + "|" + p.seed + primeKey();
   let lines = neuralCache.get(key);
   if (!lines) {
     const lineTexts = (m === "signature") ? [text] : String(text).split("\n");
@@ -1112,6 +1104,7 @@ function renderDoc() {
     if (edTool === "edittext") renderTextBlocks(ov, i, dispW, dispH);
     docItems.forEach((it) => { if ((it.page || 0) === i) ov.appendChild(itemEl(it, dispW, dispH)); });
     renderDraws(ov, dispW, dispH, i, false);
+    renderWmMask(ov, i, dispW, dispH);
   });
   document.body.classList.toggle("placing", edTool !== "select" && edTool !== "edittext");
   document.body.dataset.tool = edTool;
@@ -1133,6 +1126,8 @@ function onPagePointerDown(e, ov, pi, dispW, dispH) {
   if (e.button && e.button !== 0) return;
   closePops();
   if (pi !== curPage) setCurPage(pi, false);
+  if (edTool === "wm-pick") { pickWmColor(e, ov, pi, dispW, dispH); return; }
+  if (edTool === "wm-brush") { startWmBrush(e, ov, pi, dispW, dispH); return; }
   if (DRAW_TOOLS.has(edTool)) { startDraw(e, ov, dispW, dispH, pi); return; }
   if (BOX_TOOLS.has(edTool)) { startBoxCreate(e, ov, dispW, dispH, pi); return; }
   if (CLICK_TOOLS.has(edTool)) {
@@ -1190,7 +1185,8 @@ function tboxFont(it) {
     if (info.loadedName && !it.ffOverride) return { css: `"${info.loadedName}", ${fb.css}`, weight: it.bold ? 700 : 400, style: it.italic ? "italic" : "normal", synth: !it.bold && !it.italic };
     if (!it.ffOverride) return { css: fb.css, weight: it.bold != null ? (it.bold ? 700 : 400) : fb.weight, style: it.italic != null ? (it.italic ? "italic" : "normal") : fb.style };
   }
-  return { css: fontByKey(it.ff).css, weight: it.bold ? 700 : 400, style: it.italic ? "italic" : "normal" };
+  const fe = fontByKey(it.ff); if (fe.google) ensureFont(fe.name);
+  return { css: fe.css, weight: it.bold ? 700 : 400, style: it.italic ? "italic" : "normal" };
 }
 const tboxDisplay = (it) => { const info = pfontInfo(it); return info && info.loadedName && !it.ffOverride ? toFontStr(info, it.text || "") : (it.text || ""); };
 function shapeSVG(it, w, h) {
@@ -1533,7 +1529,7 @@ function openSide(on) { document.body.classList.toggle("side-open", !!on); $("ed
 function setEdMode(m) {
   edMode = m; document.body.dataset.edmode = m;
   document.querySelectorAll("#ed_tabs .tab").forEach((t) => t.classList.toggle("on", t.dataset.edmode === m));
-  closePanelTool(); closePops();
+  closePanelTool(); closePops(); document.body.classList.remove("wmpanel");
   edTool = "select"; selId = null; selDraw = null;
   if (m === "sign") openSide(true); else if (m === "organize" || m === "edit") openSide(false);
   pagesSig = ""; render();
@@ -1543,6 +1539,8 @@ function setEdTool(t) {
   if (!t) t = "select";
   if (t.startsWith("panel:")) { openPanelTool(t.slice(6)); return; }
   if (t === "image") { setEdTool("select"); pickImageForDoc(); return; }
+  if (t === "wm") { openWmPanel(); return; }
+  if (t === "drawsig") { openDrawPad("sig"); return; }
   edTool = t;
   if (edTool !== "select") { selId = null; selDraw = null; }
   if (t === "sig" || t === "handwrite") openSide(true);
@@ -1562,6 +1560,7 @@ const TOOL_MAP = {
   sign: ["sign", "sig"], fillsign: ["sign", "text"], adddate: ["sign", "date"], forms: ["sign", "field:text"], fillform: ["sign", "select"],
   write: ["sign", "handwrite"], handwrite: ["sign", "handwrite"], signature: ["sign", "sig", "signature"], sigimport: ["sign", "sig", "sigimport"],
   merge: ["organize"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "panel:split"], extract: ["organize", "panel:extract"], number: ["organize", "panel:number"],
+  unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"],
   compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"],
 };
 function applyTool(id) {
@@ -1626,6 +1625,45 @@ function colorBtn(value, allowNone, onPick, title) {
   };
   return b;
 }
+// Font picker: every font in the library, searchable, each shown in its own face.
+function fontPicker(value, hasPdf, onPick) {
+  const b = mk("button", { className: "fbtn", type: "button", title: "Font" });
+  const ent = fontEntry(value), label = value === "__pdf" ? "Original PDF font" : value;
+  if (ent && ent.google) ensureFont(ent.name);
+  b.innerHTML = `<span style="font-family:${ent ? ent.css.replace(/"/g, "'") : "inherit"}">${escapeHTML(label)}</span><svg class="i" viewBox="0 0 10 10" style="width:12px;height:12px"><path d="M2 4l3 3 3-3"/></svg>`;
+  b.onclick = (e) => {
+    e.stopPropagation();
+    if (popEl && popEl._for === b) { closePops(); return; }
+    closePops();
+    const pop = mk("div", { className: "fpop" }); pop._for = b;
+    const q = mk("input", { type: "search", placeholder: "Search " + FONT_LIB.length + " fonts…" });
+    const list = mk("div", { className: "fl" });
+    const io = new IntersectionObserver((ents) => ents.forEach((en) => { if (en.isIntersecting) { ensureFont(en.target.dataset.f); io.unobserve(en.target); } }), { root: list });
+    const build = () => {
+      list.innerHTML = ""; const term = q.value.trim().toLowerCase();
+      if (hasPdf && !term) { const ob = mk("button", { className: value === "__pdf" ? "on" : "" }); ob.textContent = "Original PDF font"; ob.onclick = () => { closePops(); onPick("__pdf"); }; list.appendChild(ob); }
+      for (const cat of FONT_CATS) {
+        const fonts = FONT_LIB.filter((f) => f.cat === cat && (!term || f.name.toLowerCase().includes(term)));
+        if (!fonts.length) continue;
+        list.appendChild(mk("h5", {}, cat));
+        for (const f of fonts) {
+          const fb = mk("button", { className: f.name === value ? "on" : "", title: f.name });
+          fb.textContent = f.name; fb.style.fontFamily = f.css; fb.dataset.f = f.name;
+          fb.onclick = () => { closePops(); onPick(f.name); };
+          list.appendChild(fb); if (f.google) io.observe(fb);
+        }
+      }
+    };
+    q.oninput = build; q.onkeydown = (ev) => ev.stopPropagation();
+    pop.append(q, list); pop.onpointerdown = (ev) => ev.stopPropagation();
+    document.body.appendChild(pop);
+    const r = b.getBoundingClientRect();
+    pop.style.left = Math.max(8, Math.min(innerWidth - 300, r.left)) + "px"; pop.style.top = (r.bottom + 6 + scrollY) + "px";
+    popEl = pop; build(); q.focus();
+  };
+  return b;
+}
+
 function numBox(value, min, max, step, onChange, title) {
   const n = mk("input", { type: "number", value: String(value), min, max, step: step || 1, title: title || "" });
   n.onchange = () => { const v = Math.max(min, Math.min(max, +n.value || min)); n.value = v; onChange(v); };
@@ -1658,8 +1696,7 @@ function renderProps() {
   if (edMode === "convert" && !it && !d) { add(mk("div", { className: "phint" }, "Pick a tool above. It works on the document as you see it; results that change the document update it here (Ctrl+Z undoes).")); return; }
   if (it && it.tbox) {
     const info = pfontInfo(it);
-    const opts = (info ? [["__pdf", "Original PDF font"]] : []).concat(TEXT_FONTS.map((f) => [f.k, f.n]));
-    add(pcell(selBox(opts, info && !it.ffOverride ? "__pdf" : (it.ff || "arial"), (v) => { if (v === "__pdf") it.ffOverride = false; else { it.ff = v; if (info) it.ffOverride = true; TD.text.ff = v; } render(); }, "Font")));
+    add(pcell(fontPicker(info && !it.ffOverride ? "__pdf" : fontByKey(it.ff).name, !!info, (v) => { if (v === "__pdf") it.ffOverride = false; else { it.ff = v; if (info) it.ffOverride = true; if (!it.tedit) TD.text.ff = v; ensureFont(v); } render(); })));
     const pts = pagePts(it.page || 0);
     add(pcell(numBox(Math.round(it.fs * pts * 10) / 10, 4, 200, 1, (v) => { it.fs = v / pts; if (!it.tedit) TD.text.pt = v; render(); }, "Font size (pt)")));
     add(pcell(colorBtn(it.color || "#000000", false, (c) => { it.color = c; if (!it.tedit) TD.text.color = c; render(); }, "Text colour"), colorBtn(it.bg || "none", true, (c) => { it.bg = c; render(); }, "Background")));
@@ -1721,7 +1758,7 @@ function renderProps() {
     add(pcell(colorBtn(TD.shape.fill, true, (c) => { TD.shape.fill = c; propsSig = ""; renderProps(); }, "Fill colour"), colorBtn(TD.shape.stroke, true, (c) => { TD.shape.stroke = c; propsSig = ""; renderProps(); }, "Border colour")));
     add(pcell(mk("span", { title: "Border width" }, ICON_LW), numBox(TD.shape.width, 0, 40, 1, (v) => { TD.shape.width = v; }, "Border width")));
   } else if (t === "text") {
-    add(pcell(selBox(TEXT_FONTS.map((f) => [f.k, f.n]), TD.text.ff, (v) => { TD.text.ff = v; }, "Font")));
+    add(pcell(fontPicker(fontByKey(TD.text.ff).name, false, (v) => { TD.text.ff = v; ensureFont(v); propsSig = ""; renderProps(); })));
     add(pcell(numBox(TD.text.pt, 4, 200, 1, (v) => { TD.text.pt = v; }, "Font size (pt)")));
     add(pcell(colorBtn(TD.text.color, false, (c) => { TD.text.color = c; propsSig = ""; renderProps(); }, "Text colour")));
   } else if (t === "whiteout") add(pcell(colorBtn(TD.whiteout.color, false, (c) => { TD.whiteout.color = c; propsSig = ""; renderProps(); }, "Cover colour")));
@@ -1955,9 +1992,11 @@ async function drawDocItemToCtx(ctx, it, W, H, res) {
     if (it.tedit && it.cover) { const c = it.cover; ctx.save(); ctx.globalAlpha = 1; ctx.fillStyle = it.coverBg || "#fff"; ctx.fillRect(c.nx * W, c.ny * H, c.nw * W, c.nh * H); ctx.restore(); }
     const f = tboxFont(it), fsPx = it.fs * W, pad = it.tedit ? 0 : fsPx * 0.2;
     if (it.bg && it.bg !== "none") { ctx.fillStyle = it.bg; ctx.fillRect(x, y, w, h); }
+    await ensureFontsIn(f.css);
     ctx.font = `${f.style} ${f.weight} ${fsPx}px ${f.css}`;
     ctx.fillStyle = itemColor(it); ctx.textBaseline = "alphabetic";
     const disp = tboxDisplay(it);
+    try { await document.fonts.load(ctx.font, disp.slice(0, 60) || "A"); } catch (_) {}
     if (it.tedit) ctx.fillText(disp, x, y + (it.asc || 0.86) * fsPx);
     else {
       const lh = fsPx * 1.2, lines = wrapLines(ctx, disp, Math.max(4, w - pad * 2));
@@ -2480,6 +2519,7 @@ function applySavedStyle(s) {
   const text = $("text").value;
   applyState({ ...s.state, t: text });
   buildSwatches(); syncToggles(); refreshLabels();
+  activatePrime(s);
   const l = loadSavedHands(); const x = l.find((y) => y.id === s.id); if (x) { x.usedAt = Date.now(); storeSavedHands(l); }
   const it = selectedItem();
   if (it && it.type === "sig" && it.dynamic) { it.seed = +$("seed").value; regenItem(it, undefined, true); } else render(true);
@@ -2491,7 +2531,7 @@ function renderSavedHands() {
   if (!list.length) { host.innerHTML = '<div class="note" style="margin:0">No saved styles yet — ★ Save style keeps every setting.</div>'; return; }
   list.forEach((s) => {
     const chip = document.createElement("span"); chip.className = "chip"; chip.title = `Kept ${daysLeft(s)} more day${daysLeft(s) > 1 ? "s" : ""} — click to apply`;
-    chip.innerHTML = `<span>${escapeHTML(s.name)}</span><small>${daysLeft(s)}d</small><span class="x" title="Delete">×</span>`;
+    chip.innerHTML = `<span>${s.prime ? "✍ " : ""}${escapeHTML(s.name)}</span><small>${daysLeft(s)}d</small><span class="x" title="Delete">×</span>`;
     chip.onclick = (e) => { if (e.target.classList.contains("x")) { e.stopPropagation(); storeSavedHands(loadSavedHands().filter((h) => h.id !== s.id)); renderSavedHands(); return; } applySavedStyle(s); };
     host.appendChild(chip);
   });
@@ -2504,12 +2544,14 @@ function saveHand() {
 }
 // Your last settings come back next time (within 60 days), unless a share link says otherwise.
 let lastStyleTimer = 0;
-function rememberLastStyle() { clearTimeout(lastStyleTimer); lastStyleTimer = setTimeout(() => lsSet(LAST_KEY, { at: Date.now(), state: st() }), 700); }
+function rememberLastStyle() { clearTimeout(lastStyleTimer); lastStyleTimer = setTimeout(() => lsSet(LAST_KEY, { at: Date.now(), state: st(), primeId: activePrime ? activePrime.id : null }), 700); }
 function restoreLastStyle() {
   const v = lsGet(LAST_KEY, null);
   if (!v || !v.state || Date.now() - v.at > KEEP_MS) return false;
   const s = JSON.parse(JSON.stringify(v.state)); if (s.tg) delete s.tg.usesig;
-  applyState(s); return true;
+  applyState(s);
+  if (v.primeId) { const st2 = loadSavedHands().find((h) => h.id === v.primeId && h.prime); if (st2) activatePrime(st2); }
+  return true;
 }
 
 // ---- hands: new / last ---------------------------------------------------------------
@@ -2530,6 +2572,290 @@ function lastHand() {
   const it = selectedItem();
   if (it && it.type === "sig" && it.dynamic) { regenItem(it, prev); return; }
   render(true); rememberLastStyle();
+}
+
+// ---- draw pad: signatures and handwriting samples (mouse, finger or stylus) -------
+const dp = { mode: "sig", strokes: [], cur: null, color: "#1b1b1f", size: 3, ctx: null, wired: false };
+const DP_INKS = ["#1b1b1f", "#1d3a8a", "#0b2a6b", "#6d1a36"];
+function openDrawPad(m) {
+  const dlg = $("dpad"); if (!dlg) return;
+  dpWire();
+  dp.strokes = []; dp.cur = null; dpSetMode(m || "sig");
+  $("dp_text").value = ""; $("dp_name").value = "";
+  if (!dlg.open) dlg.showModal();
+  requestAnimationFrame(() => { dpResize(); dpRedraw(); });
+}
+function dpSetMode(m) {
+  dp.mode = m;
+  $("dpad").classList.toggle("hand", m === "hand");
+  $("dp_mode").querySelectorAll("button").forEach((b) => b.classList.toggle("sel", b.dataset.dp === m));
+  $("dp_title").textContent = m === "hand" ? "Teach it your handwriting" : "Draw your signature";
+  $("dp_hint").textContent = m === "hand"
+    ? "Write a short sentence on the line the way you normally write (10–40 letters works best), then type exactly what you wrote. New text will be written in your style. Saved for 60 days."
+    : "Sign with your mouse, finger or a stylus. It's saved for 60 days so you can use it again.";
+  $("dp_ph").textContent = m === "hand" ? "Write a sentence here" : "Sign here";
+  $("dp_place").textContent = m === "hand" ? "Save & write with it" : (workMode === "doc" && doc ? "Save & place" : "Save & use");
+  $("dp_warn").textContent = "";
+}
+function dpResize() {
+  const c = $("dp_canvas"), r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  c.width = Math.max(1, Math.round(r.width * dpr)); c.height = Math.max(1, Math.round(r.height * dpr));
+  dp.ctx = c.getContext("2d"); dp.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function dpPt(e) { const r = $("dp_canvas").getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" && e.pressure ? e.pressure : 0.5, t: e.timeStamp }; }
+function dpRedraw() {
+  const c = $("dp_canvas"), x = dp.ctx;
+  const all = dp.cur ? [...dp.strokes, dp.cur] : dp.strokes;
+  $("dp_ph").style.display = all.length ? "none" : "";
+  if (!x) return;
+  x.clearRect(0, 0, c.width, c.height);
+  if (all.length) { x.fillStyle = dp.color; x.fill(new Path2D(inkPath(all, dp.size))); }
+}
+// Smooth, pressure/speed-sensitive ink: each stroke becomes a filled outline.
+function inkPath(strokes, size) {
+  let d = "";
+  for (const s0 of strokes) {
+    if (!s0.length) continue;
+    if (s0.length === 1) { const p = s0[0], r = size * 0.6; d += `M${(p.x + r).toFixed(2)},${p.y.toFixed(2)}a${r},${r} 0 1 0 ${-2 * r},0a${r},${r} 0 1 0 ${2 * r},0Z`; continue; }
+    let s = s0;
+    for (let k = 0; k < 2; k++) {                 // Chaikin smoothing, ends kept
+      const o = [s[0]];
+      for (let i = 0; i < s.length - 1; i++) { const a = s[i], b = s[i + 1]; o.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25, p: (a.p * 3 + b.p) / 4, t: a.t }, { x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75, p: (a.p + b.p * 3) / 4, t: b.t }); }
+      o.push(s[s.length - 1]); s = o;
+    }
+    const n = s.length, w = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = s[Math.max(0, i - 1)], b = s[Math.min(n - 1, i + 1)];
+      const v = Math.hypot(b.x - a.x, b.y - a.y) / Math.max(1, (b.t - a.t) || 8);
+      const speed = Math.max(0.55, Math.min(1.2, 1.2 - v * 0.35));
+      const edge = Math.min(1, Math.min(i, n - 1 - i) / Math.max(2, n * 0.08));
+      w[i] = size * (0.55 + 0.9 * (s[i].p || 0.5)) * speed * (0.45 + 0.55 * edge);
+    }
+    for (let i = 1; i < n - 1; i++) w[i] = (w[i - 1] + w[i] * 2 + w[i + 1]) / 4;
+    const L = [], R = [];
+    for (let i = 0; i < n; i++) {
+      const a = s[Math.max(0, i - 1)], b = s[Math.min(n - 1, i + 1)];
+      let dx = b.x - a.x, dy = b.y - a.y; const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
+      const h = Math.max(0.35, w[i] / 2);
+      L.push([s[i].x - dy * h, s[i].y + dx * h]); R.push([s[i].x + dy * h, s[i].y - dx * h]);
+    }
+    d += "M" + L.map((q) => q[0].toFixed(2) + "," + q[1].toFixed(2)).join("L");
+    d += "L" + R.reverse().map((q) => q[0].toFixed(2) + "," + q[1].toFixed(2)).join("L") + "Z";
+  }
+  return d;
+}
+function dpSvg() {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const s of dp.strokes) for (const p of s) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  const pad = dp.size * 2 + 4, w = Math.ceil(x1 - x0 + pad * 2), h = Math.ceil(y1 - y0 + pad * 2);
+  const moved = dp.strokes.map((s) => s.map((p) => ({ ...p, x: p.x - x0 + pad, y: p.y - y0 + pad })));
+  return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="currentColor" stroke="none"><g><path d="${inkPath(moved, dp.size)}"/></g></svg>`, w, h };
+}
+function dpSave(use) {
+  const warn = $("dp_warn");
+  if (!dp.strokes.length) { warn.textContent = dp.mode === "hand" ? "Write a sentence on the pad first." : "Sign on the pad first."; return; }
+  if (dp.mode === "sig") {
+    const g = dpSvg();
+    addSavedSig({ name: "Drawn signature", svg: g.svg, w: g.w, h: g.h, drawn: true, color: dp.color });
+    $("dpad").close();
+    if (!use) { toast("Signature saved — find it under Saved signatures."); return; }
+    sigSVG = g.svg; sigBox = { w: g.w, h: g.h }; toggles.usesig = true; syncToggles();
+    if (workMode === "doc" && doc) {
+      if (edMode !== "sign") setEdMode("sign");
+      const it = addSigItem(undefined, undefined, "signature");
+      if (it) { it.color = dp.color; render(); }
+      toast("Signature placed — drag it into position.");
+    } else { render(); toast("Signature ready. Open a document and use Sign to place it."); }
+    return;
+  }
+  const text = $("dp_text").value.replace(/\s+/g, " ").trim();
+  if (!text) { warn.textContent = "Type exactly what you wrote, so it can learn which marks are which letters."; $("dp_text").focus(); return; }
+  if (dp.strokes.length < 3 || text.length < 3) { warn.textContent = "Write a little more — a short sentence works best."; return; }
+  const bad = [...new Set([...text].filter((c) => !supportedChar(c)))];
+  const prime = primeFromStrokes(dp.strokes, text);
+  if (!prime) { warn.textContent = "Could not read that sample — try again."; return; }
+  const name = $("dp_name").value.trim() || "My handwriting";
+  const list = loadSavedHands();
+  const entry = { id: Date.now() + "-" + Math.floor(Math.random() * 1e4), name, state: styleState(), prime, savedAt: Date.now(), usedAt: Date.now() };
+  list.unshift(entry); storeSavedHands(list); renderSavedHands();
+  $("dpad").close();
+  if (use) { activatePrime(entry); const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it, undefined, true); else render(true); }
+  toast(`Saved “${name}” for 60 days.` + (bad.length ? ` (${bad.join(" ")} can't be learned and will be skipped.)` : "") + (use ? " New writing now uses your handwriting." : ""));
+}
+function dpWire() {
+  if (dp.wired) return; dp.wired = true;
+  const c = $("dp_canvas");
+  c.addEventListener("pointerdown", (e) => { e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch (_) {} dp.cur = [dpPt(e)]; $("dp_warn").textContent = ""; dpRedraw(); });
+  c.addEventListener("pointermove", (e) => { if (!dp.cur) return; const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e]; for (const ev of (evs.length ? evs : [e])) dp.cur.push(dpPt(ev)); dpRedraw(); });
+  const end = () => { if (dp.cur) { dp.strokes.push(dp.cur); dp.cur = null; dpRedraw(); } };
+  c.addEventListener("pointerup", end); c.addEventListener("pointercancel", end);
+  $("dp_mode").querySelectorAll("button").forEach((b) => b.onclick = () => dpSetMode(b.dataset.dp));
+  $("dp_undo").onclick = () => { dp.strokes.pop(); dpRedraw(); };
+  $("dp_clear").onclick = () => { dp.strokes = []; dpRedraw(); };
+  $("dp_size").oninput = () => { dp.size = +$("dp_size").value; dpRedraw(); };
+  const inks = $("dp_ink"); inks.innerHTML = "";
+  DP_INKS.forEach((col, i) => { const b = document.createElement("div"); b.className = "sw" + (i === 0 ? " sel" : ""); b.style.background = col; b.title = col; b.onclick = () => { dp.color = col; inks.querySelectorAll(".sw").forEach((x) => x.classList.toggle("sel", x === b)); dpRedraw(); }; inks.appendChild(b); });
+  $("dp_x").onclick = $("dp_cancel").onclick = () => $("dpad").close();
+  $("dp_save").onclick = () => dpSave(false);
+  $("dp_place").onclick = () => dpSave(true);
+  [$("dp_text"), $("dp_name")].forEach((i) => i.addEventListener("keydown", (e) => e.stopPropagation()));
+  window.addEventListener("resize", () => { if ($("dpad").open) { dpResize(); dpRedraw(); } });
+}
+// Use (or stop using) a saved sample of your own handwriting for new writing.
+function activatePrime(s) {
+  activePrime = s && s.prime ? { id: s.id, name: s.name, text: s.prime.text, offsets: s.prime.offsets } : null;
+  // writing in your own hand: show the writing, not a stored signature picture
+  if (activePrime && toggles.usesig) { toggles.usesig = false; syncToggles(); }
+  const chip = $("prime_chip");
+  if (chip) { chip.classList.toggle("on", !!activePrime); $("prime_name").textContent = activePrime ? "✍ Writing in your handwriting: " + activePrime.name : ""; }
+  rememberLastStyle();
+}
+
+// ---- remove watermark ---------------------------------------------------------------
+let wmColor = null, wmCandidates = [];
+const wmMask = new Map();          // page index -> [{ pts:[[x,y]...], r }]  (normalised to the page)
+function openWmPanel() {
+  if (!doc) return;
+  if (edMode !== "edit") setEdMode("edit");
+  closePanelTool(); document.body.classList.add("wmpanel"); openSide(true);
+  $("wm_found").innerHTML = ""; $("wm_apply").hidden = true; $("wm_err").textContent = "";
+  const hasPdf = docPages.some((p) => docSources[p.src] && docSources[p.src].kind === "pdf");
+  $("wm_scan").disabled = !hasPdf;
+  $("wm_scan").textContent = hasPdf ? "Scan this document" : "Pictures: use colour or brush below";
+  $("panel").scrollTop = 0;
+}
+function closeWmPanel() { document.body.classList.remove("wmpanel"); if (edTool === "wm-pick" || edTool === "wm-brush") setEdTool("select"); }
+async function rotatedTextLabels(src) {
+  const counts = new Map();
+  try {
+    for (let i = 1; i <= Math.min(src.pdf.numPages, 6); i++) {
+      const tc = await (await src.pdf.getPage(i)).getTextContent();
+      for (const it of tc.items) { const t = it.transform, s = (it.str || "").trim(); if (s && Math.abs(t[1]) > 0.05 * Math.hypot(t[0], t[1])) counts.set(s, (counts.get(s) || 0) + 1); }
+    }
+  } catch (_) {}
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map((e) => e[0]).slice(0, 3);
+}
+async function wmScan() {
+  const host = $("wm_found"); host.innerHTML = '<div class="note">Scanning…</div>'; $("wm_apply").hidden = true;
+  const res = [];
+  const used = [...new Set(docPages.map((p) => p.src))].filter((si) => docSources[si] && docSources[si].kind === "pdf");
+  try {
+    for (const si of used) {
+      const src = docSources[si];
+      const found = await scanPdfWatermarks(src.bytes, { rotatedLabels: await rotatedTextLabels(src) });
+      found.forEach((f) => res.push({ ...f, si }));
+    }
+  } catch (e) { host.innerHTML = ""; $("wm_err").textContent = "Scan failed: " + (e.message || e); return; }
+  wmCandidates = res;
+  host.innerHTML = res.length ? "" : '<div class="note">Nothing was found automatically. If the watermark is part of a scan or picture, use Erase by colour or the brush below.</div>';
+  res.forEach((c, i) => {
+    const l = document.createElement("label");
+    l.innerHTML = `<input type="checkbox" data-i="${i}" ${c.checked ? "checked" : ""}><span>${escapeHTML(c.label)}<small>${escapeHTML(c.detail)}</small></span>`;
+    host.appendChild(l);
+  });
+  $("wm_apply").hidden = !res.length;
+}
+async function wmApply() {
+  const picked = [...$("wm_found").querySelectorAll("input:checked")].map((i) => wmCandidates[+i.dataset.i]);
+  if (!picked.length) { toast("Tick what to remove first."); return; }
+  snapshotNow(); toast("Removing…");
+  const bySrc = new Map(); picked.forEach((c) => { if (!bySrc.has(c.si)) bySrc.set(c.si, []); bySrc.get(c.si).push(c.id); });
+  const sources = docSources.slice(); let total = 0;
+  try {
+    for (const [si, ids] of bySrc) {
+      const r = await removePdfWatermarks(sources[si].bytes, ids);
+      total += r.removed;
+      const pdf = await window.pdfjsLib.getDocument({ data: r.bytes.slice(), fontExtraProperties: true }).promise;
+      sources[si] = { ...sources[si], bytes: r.bytes, pdf };
+    }
+  } catch (e) { $("wm_err").textContent = "Could not remove it: " + (e.message || e); return; }
+  docSources = sources;
+  const changed = new Set(bySrc.keys());
+  docPages = docPages.map((p) => changed.has(p.src) ? { ...p, img: null, url: BLANK_PAGE, _loading: null, fields: [], key: nextKey() } : p);
+  textBlocks.clear(); for (const k of [...pdfFonts.keys()]) if (changed.has(+k.split(":")[0])) pdfFonts.delete(k);
+  pagesSig = ""; await ensurePageImage(curPage); doc = docPages[curPage]; render(); renderPagesInBackground(loadToken);
+  $("wm_found").innerHTML = `<div class="note" style="color:var(--ok)">Removed ${total} watermark item${total === 1 ? "" : "s"}. Ctrl+Z puts it back.</div>`; $("wm_apply").hidden = true;
+  toast("Watermark removed.");
+}
+// Replace a page by a cleaned picture of itself (same size, objects stay where they are).
+async function replacePageWithCanvas(pi, c) {
+  const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+  const url = URL.createObjectURL(blob), img = await loadImgEl(url);
+  const old = docPages[pi];
+  const si = docSources.push({ bytes: new Uint8Array(await blob.arrayBuffer()), name: docName, kind: "image", img, url }) - 1;
+  docPages = docPages.slice();
+  docPages[pi] = { src: si, idx: 0, rot: 0, img, w: c.width, h: c.height, url, fields: old.fields || [], key: nextKey() };
+}
+async function pageCanvas(pi) {
+  const p = await ensurePageImage(pi);
+  const c = document.createElement("canvas"); c.width = p.w; c.height = p.h;
+  const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height); x.drawImage(p.img, 0, 0, c.width, c.height);
+  return c;
+}
+function pickWmColor(e, ov, pi, dispW, dispH) {
+  e.preventDefault();
+  const r = ov.getBoundingClientRect(), p = docPages[pi];
+  pageCanvas(pi).then((c) => {
+    const x = Math.round((e.clientX - r.left) / dispW * c.width), y = Math.round((e.clientY - r.top) / dispH * c.height);
+    const d = c.getContext("2d").getImageData(Math.max(0, x - 2), Math.max(0, y - 2), 5, 5).data;
+    let rr = 0, gg = 0, bb = 0, n = 0; for (let i = 0; i < d.length; i += 4) { rr += d[i]; gg += d[i + 1]; bb += d[i + 2]; n++; }
+    wmColor = [Math.round(rr / n), Math.round(gg / n), Math.round(bb / n)];
+    $("wm_swatch").style.background = `rgb(${wmColor.join(",")})`;
+    setEdTool("select"); toast("Colour picked — press Erase this colour.");
+  });
+}
+async function wmEraseColor() {
+  if (!wmColor) { toast("Pick the watermark colour first — then click it on the page."); return; }
+  const tol = +$("wm_tol").value, targets = $("wm_pages").value === "all" ? docPages.map((_, i) => i) : [curPage];
+  snapshotNow(); toast("Erasing…"); let n = 0;
+  for (const pi of targets) {
+    const c = await pageCanvas(pi), x = c.getContext("2d"), im = x.getImageData(0, 0, c.width, c.height);
+    n += eraseColor(im, pageBackground(im), wmColor, tol);
+    x.putImageData(im, 0, 0); await replacePageWithCanvas(pi, c);
+  }
+  pagesSig = ""; doc = docPages[curPage]; render();
+  toast(n ? `Erased that colour on ${targets.length} page${targets.length > 1 ? "s" : ""}. Ctrl+Z undoes.` : "Nothing matched — pick the colour again or raise the tolerance.");
+}
+function startWmBrush(e, ov, pi, dispW, dispH) {
+  e.preventDefault(); try { ov.setPointerCapture(e.pointerId); } catch (_) {}
+  const r = ov.getBoundingClientRect(), rad = (+$("wm_bsize").value / 2) / dispW;
+  const st = { pts: [[(e.clientX - r.left) / dispW, (e.clientY - r.top) / dispH]], r: rad };
+  if (!wmMask.has(pi)) wmMask.set(pi, []);
+  wmMask.get(pi).push(st);
+  const layer = ov.querySelector("svg.wmmask") || renderWmMask(ov, pi, dispW, dispH, true);
+  const draw = () => { layer.innerHTML = maskMarkup(pi, dispW, dispH); };
+  draw();
+  const mv = (ev) => { st.pts.push([(ev.clientX - r.left) / dispW, (ev.clientY - r.top) / dispH]); draw(); };
+  const up = () => { ov.removeEventListener("pointermove", mv); ov.removeEventListener("pointerup", up); };
+  ov.addEventListener("pointermove", mv); ov.addEventListener("pointerup", up);
+}
+function maskMarkup(pi, W, H) {
+  return (wmMask.get(pi) || []).map((s) => `<path d="M${s.pts.map((q) => (q[0] * W).toFixed(1) + "," + (q[1] * H).toFixed(1)).join("L")}" fill="none" stroke="#ff3355" stroke-opacity=".45" stroke-width="${(s.r * W * 2).toFixed(1)}" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
+}
+function renderWmMask(ov, pi, dispW, dispH, force) {
+  if (!force && !(wmMask.get(pi) || []).length) return null;
+  const svg = document.createElementNS(SVGNS, "svg"); svg.classList.add("wmmask");
+  svg.setAttribute("width", dispW); svg.setAttribute("height", dispH); svg.setAttribute("viewBox", `0 0 ${dispW} ${dispH}`);
+  svg.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;overflow:visible";
+  svg.innerHTML = maskMarkup(pi, dispW, dispH); ov.appendChild(svg); return svg;
+}
+async function wmFillBrushed() {
+  const pagesWithMask = [...wmMask.entries()].filter(([, v]) => v.length).map(([k]) => k);
+  if (!pagesWithMask.length) { toast("Pick 🖌 Brush and paint over the watermark first."); return; }
+  snapshotNow(); toast("Filling in…");
+  for (const pi of pagesWithMask) {
+    const c = await pageCanvas(pi), W = c.width, H = c.height;
+    const m = document.createElement("canvas"); m.width = W; m.height = H;
+    const mx = m.getContext("2d"); mx.strokeStyle = "#fff"; mx.lineCap = "round"; mx.lineJoin = "round";
+    for (const s of wmMask.get(pi)) { mx.lineWidth = s.r * W * 2; mx.beginPath(); s.pts.forEach((q, i) => (i ? mx.lineTo(q[0] * W, q[1] * H) : mx.moveTo(q[0] * W, q[1] * H))); if (s.pts.length === 1) mx.lineTo(s.pts[0][0] * W + 0.1, s.pts[0][1] * H); mx.stroke(); }
+    const md = mx.getImageData(0, 0, W, H).data, mask = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++) mask[i] = md[i * 4 + 3] > 20 ? 1 : 0;
+    const x = c.getContext("2d"), im = x.getImageData(0, 0, W, H);
+    inpaint(im, mask, 2); x.putImageData(im, 0, 0);
+    await replacePageWithCanvas(pi, c);
+  }
+  wmMask.clear(); setEdTool("select");
+  pagesSig = ""; doc = docPages[curPage]; render(); toast("Filled in. Ctrl+Z undoes.");
 }
 
 // ---- boot ----------------------------------------------------------------
@@ -2603,6 +2929,19 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("last_hand").addEventListener("click", lastHand);
   $("save_hand").addEventListener("click", saveHand);
   renderSavedHands();
+  // draw pad, your handwriting, watermark removal
+  $("sig_draw").onclick = () => openDrawPad("sig");
+  $("hand_draw").onclick = () => openDrawPad("hand");
+  $("prime_off").onclick = () => { activatePrime(null); const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it, undefined, true); else render(true); };
+  $("wm_back").onclick = closeWmPanel;
+  $("wm_scan").onclick = wmScan; $("wm_apply").onclick = wmApply;
+  $("wm_pick").onclick = () => { setEdTool("wm-pick"); toast("Click the watermark on the page."); };
+  $("wm_tol").oninput = () => { $("wm_tol_v").textContent = $("wm_tol").value; };
+  $("wm_color_go").onclick = wmEraseColor;
+  $("wm_brush").onclick = () => setEdTool("wm-brush");
+  $("wm_brush_go").onclick = wmFillBrushed;
+  $("wm_brush_clear").onclick = () => { wmMask.clear(); render(); };
+  if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener("loadingdone", () => { if (workMode === "doc") requestAnimationFrame(fitTextBoxes); });
 
   // ---- document: open / close ----
   $("upload_btn").onclick = () => $("file").click();
@@ -2623,7 +2962,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
     const dd = b.closest(".dd"), open = !dd.classList.contains("open");
     closeDropdowns(); if (open) dd.classList.add("open");
   }));
-  document.addEventListener("click", (e) => { if (!e.target.closest(".dd")) closeDropdowns(); if (!e.target.closest(".cpop") && !e.target.closest(".cbtn")) closePops(); });
+  document.addEventListener("click", (e) => { if (!e.target.closest(".dd")) closeDropdowns(); if (!e.target.closest(".cpop,.cbtn,.fpop,.fbtn")) closePops(); });
   document.querySelectorAll("#modebar [data-dl]").forEach((b) => b.addEventListener("click", () => {
     closeDropdowns(); const k = b.dataset.dl;
     if (k === "pdf") exportPDF(); else if (k === "fill") exportFillablePDF(); else exportPNG();
@@ -2717,6 +3056,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   window.__cal2Rerender = () => render(false);
   window.__cal2PickSignatureImage = () => { applyTier("advanced"); $("sig_file").click(); };
   window.__cal2InsertImageFile = insertImageFile;
+  window.__cal2OpenDrawPad = (m) => openDrawPad(m);
   window.__cal2PdfSaveHook = applyPdfResult;
   window.__cal2PdfPanelClosed = () => { closePanelTool(); render(); };
   window.__cal2RefreshRecents = refreshRecentLists;

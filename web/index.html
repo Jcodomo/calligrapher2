@@ -398,6 +398,48 @@
   .et-span:hover{box-shadow:0 0 0 1px rgba(57,141,255,.5) inset}
   .et-span.editing{box-shadow:0 0 0 1px var(--accent) inset}
 
+  /* draw pad */
+  .dpad{border:0;border-radius:12px;padding:0;width:min(760px,96vw);background:var(--surface);color:var(--text);box-shadow:0 20px 60px rgba(0,0,0,.4)}
+  .dpad::backdrop{background:rgba(10,12,18,.55)}
+  .dp-head{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line)}
+  .dp-head b{font-size:17px;flex:1}
+  .dp-body{padding:14px 16px}
+  .dp-hint{color:var(--muted);font-size:13.5px;margin-bottom:10px}
+  .dp-canvas{position:relative;height:260px;border-radius:8px;background:#fff;border:1px solid var(--line2);overflow:hidden;touch-action:none}
+  .dp-canvas canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none}
+  .dp-line{position:absolute;left:6%;right:6%;bottom:62px;border-bottom:1.5px solid #c9ced8;pointer-events:none}
+  .dp-x{position:absolute;left:6%;bottom:66px;color:#9aa3b2;font:600 20px/1 system-ui;pointer-events:none}
+  .dp-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#b8bec9;font-size:22px;pointer-events:none}
+  .dp-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}
+  .dp-tools .btn{width:auto;padding:6px 12px}
+  .dp-hand{display:none;gap:10px;margin-top:10px}
+  .dpad.hand .dp-hand{display:flex}
+  .dp-hand input{flex:1;background:var(--surface2);border:1px solid var(--line2);border-radius:6px;padding:9px;font:inherit;color:var(--text)}
+  .dp-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+  .dp-foot .btn{width:auto;padding:8px 16px}
+  .dp-warn{color:var(--danger);font-size:13px;min-height:1.2em;margin-top:6px}
+  .prime-chip{display:none;align-items:center;gap:6px;margin-top:8px;padding:6px 10px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:600}
+  .prime-chip.on{display:flex}
+  .prime-chip button{margin-left:auto;border:0;background:none;color:inherit;cursor:pointer;font-size:15px}
+  /* font picker */
+  .fbtn{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;min-width:170px;max-width:220px;height:32px;padding:0 8px;border:0;background:transparent;color:var(--text);cursor:pointer;font-size:15px;white-space:nowrap;overflow:hidden}
+  .fbtn span{overflow:hidden;text-overflow:ellipsis}
+  .fpop{position:absolute;z-index:45;width:290px;max-height:420px;display:flex;flex-direction:column;background:var(--pop);border:1px solid var(--line);border-radius:8px;box-shadow:var(--pop-shadow)}
+  .fpop input{margin:8px;padding:7px 9px;border:1px solid var(--line2);border-radius:6px;background:var(--surface2);font:inherit;font-size:14px}
+  .fpop .fl{overflow-y:auto;padding:0 6px 8px}
+  .fpop h5{margin:8px 6px 4px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  .fpop button{display:block;width:100%;text-align:left;border:0;background:none;padding:6px 8px;border-radius:5px;cursor:pointer;font-size:17px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fpop button:hover,.fpop button.on{background:var(--tint);color:var(--accent)}
+  /* watermark panel */
+  #wm_panel{display:none}
+  body.wmpanel .panel > *:not(#wm_panel){display:none!important}
+  body.wmpanel #wm_panel{display:block}
+  .wm-found{display:flex;flex-direction:column;gap:6px;margin:10px 0}
+  .wm-found label{display:flex;gap:8px;align-items:flex-start;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--surface2);cursor:pointer;font-size:14px}
+  .wm-found label small{display:block;color:var(--muted);font-size:12px}
+  .wm-sw{display:inline-block;width:26px;height:26px;border-radius:6px;border:1px solid var(--line2);vertical-align:middle;background:repeating-conic-gradient(#ccc 0 25%,#fff 0 50%) 0/10px 10px}
+  body[data-tool=wm-pick] .pgov{cursor:copy}
+  body[data-tool=wm-brush] .pgov{cursor:cell}
   #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(20px);background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:.2s;z-index:90;max-width:90vw;box-shadow:0 6px 20px rgba(0,0,0,.25)}
   #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
   .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
@@ -492,12 +534,14 @@
       <button class="tb" data-tool="redact" title="Black out content so it's removed for good"><svg class="i" viewBox="0 0 20 20"><path d="M3 6h14" stroke-width="3"/><path d="M3 10h6" stroke-width="3"/><path d="M3 14h14"/></svg><span class="tl">Redact</span></button>
       <button class="tb" data-tool="image" title="Insert an image"><svg class="i" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.5"/><circle cx="7.5" cy="8.5" r="1.5"/><path d="M4 15l4.5-4.5 3 3 2-2 3 3"/></svg><span class="tl">Image</span></button>
       <button class="tb" data-tool="note" title="Sticky note"><svg class="i" viewBox="0 0 20 20"><path d="M4 4h12v8l-4 4H4z"/><path d="M12 16v-4h4"/></svg><span class="tl">Note</span></button>
+      <button class="tb" data-tool="wm" title="Remove a watermark from this PDF or picture"><svg class="i" viewBox="0 0 20 20"><path d="M8 3h4v5l3 3v2H5v-2l3-3z"/><path d="M3 3l14 14"/></svg><span class="tl">Remove watermark</span></button>
       <button class="tb" data-tool="panel:watermark" title="Watermark every page"><svg class="i" viewBox="0 0 20 20"><path d="M8 3h4v5l3 3v2H5v-2l3-3z"/><path d="M4 17h12"/></svg><span class="tl">Watermark</span></button>
       <button class="tb" data-tool="panel:crop" title="Crop the pages"><svg class="i" viewBox="0 0 20 20"><path d="M6 2v12h12M2 6h12v12"/></svg><span class="tl">Crop</span></button>
     </div>
     <div class="toolrow" data-mode="sign">
       <button class="tb on" data-tool="select" title="Select, move and resize"><svg class="i" viewBox="0 0 20 20"><path d="M5 3l11 6.3-5 1.3L8.5 16z"/></svg><span class="tl">Select</span></button>
       <button class="tb" data-tool="sig" title="Place your handwritten signature"><svg class="i" viewBox="0 0 20 20"><path d="M2.5 14c2.5-5.5 4-5.5 4-2.2s1.5 3.2 3-.2 2.4-3 3.4 0 2.2 1.6 4.6.4M3 17.5h14"/></svg><span class="tl">Sign</span></button>
+      <button class="tb" data-tool="drawsig" title="Draw your signature with a mouse, finger or pen"><svg class="i" viewBox="0 0 20 20"><path d="M3 14c2-4 3.5-4 3.5-1.5S8 15 9.5 12s2-3 3 0 2 1.5 4.5 0"/><path d="M14 3l3 3-6 6-3.5.5.5-3.5z"/></svg><span class="tl">Draw</span></button>
       <button class="tb" data-tool="handwrite" title="Write anything in real-looking handwriting"><svg class="i" viewBox="0 0 20 20"><path d="M4 15.5l1-3.5 8-8 2.5 2.5-8 8z"/><path d="M3 18c2-1 3-1 4 0s2 1 3 0"/></svg><span class="tl">Handwrite</span></button>
       <button class="tb" data-tool="text" title="Add a text box"><svg class="i" viewBox="0 0 20 20"><path d="M4 5h12M10 5v11M7.5 16h5"/></svg><span class="tl">Add text</span></button>
       <button class="tb" data-tool="date" title="Add the date"><svg class="i" viewBox="0 0 20 20"><rect x="3.5" y="4.5" width="13" height="12" rx="1.5"/><path d="M3.5 8.5h13M7 3v3M13 3v3"/></svg><span class="tl">Date</span></button>
@@ -566,6 +610,34 @@
           <div id="pe_toolpanel"></div>
           <div class="err" id="pe_err"></div>
         </div>
+      </div>
+
+      <div id="wm_panel">
+        <button class="pe-back" id="wm_back">← Back</button>
+        <h1 class="panel-title">Remove watermark</h1>
+        <div class="note" style="margin-top:0">Only remove watermarks from documents and pictures you own or have the rights to change.</div>
+        <div class="group">
+          <h2>Find it automatically</h2>
+          <div class="note" style="margin-top:0">For PDFs: removes watermark layers, stamps, and repeated see-through or rotated text and pictures. Everything else stays sharp and selectable.</div>
+          <button class="btn primary" id="wm_scan" style="margin-top:10px">Scan this document</button>
+          <div class="wm-found" id="wm_found"></div>
+          <button class="btn primary" id="wm_apply" hidden>Remove selected</button>
+        </div>
+        <div class="group">
+          <h2>Erase by colour</h2>
+          <div class="note" style="margin-top:0">Best for light grey or coloured marks over dark text, and for pictures. The page becomes a picture.</div>
+          <div class="row" style="margin-top:10px"><button class="btn" id="wm_pick" style="width:auto">⌖ Pick the colour</button><span class="wm-sw" id="wm_swatch" title="Watermark colour"></span></div>
+          <div class="row"><label>Tolerance</label><input id="wm_tol" type="range" min="4" max="90" value="34"><span class="val" id="wm_tol_v">34</span></div>
+          <div class="row"><label>Pages</label><select id="wm_pages" style="flex:1"><option value="this">This page</option><option value="all">All pages</option></select></div>
+          <button class="btn primary" id="wm_color_go">Erase this colour</button>
+        </div>
+        <div class="group">
+          <h2>Paint over it</h2>
+          <div class="note" style="margin-top:0">Brush over what is left (or over a logo on a picture); it is filled in from its surroundings.</div>
+          <div class="row" style="margin-top:10px"><button class="btn" id="wm_brush" style="width:auto">🖌 Brush</button><label style="flex:0 0 auto">Size</label><input id="wm_bsize" type="range" min="4" max="80" value="22"></div>
+          <div class="actions"><button class="btn primary" id="wm_brush_go">Fill in painted areas</button><button class="btn" id="wm_brush_clear">Clear brush</button></div>
+        </div>
+        <div class="err" id="wm_err"></div>
       </div>
 
       <h1 class="panel-title"><span data-show="write">Handwriting</span><span data-show="doc">Signature &amp; handwriting</span></h1>
@@ -642,6 +714,8 @@ jumps over the lazy dog</textarea>
           <button class="btn" id="last_hand">↶ Last hand</button>
           <button class="btn" id="save_hand">★ Save style</button>
         </div>
+        <button class="btn" id="hand_draw" style="margin-top:8px">✍ Teach it your handwriting</button>
+        <div class="prime-chip" id="prime_chip"><span id="prime_name"></span><button id="prime_off" title="Stop using your handwriting">✕</button></div>
         <div class="note">Saved styles keep every setting and stay for 60 days after you last use them.</div>
         <div id="saved_hands" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
       </div>
@@ -649,8 +723,9 @@ jumps over the lazy dog</textarea>
       <div class="group">
         <h2>Saved signatures</h2>
         <div style="display:flex;gap:8px">
+          <button class="btn primary" id="sig_draw">✍ Draw</button>
           <button class="btn" id="sig_save">★ Save current</button>
-          <button class="btn" id="sig_btn">Import a picture</button>
+          <button class="btn" id="sig_btn">Import</button>
         </div>
         <input class="file" id="sig_file" type="file" accept="image/*" />
         <div class="note">Signatures you place are saved automatically and kept for 60 days after you last use them. Paste a signature picture with Ctrl/Cmd+V to trace it. Use only a signature you're authorized to use.</div>
@@ -741,11 +816,39 @@ jumps over the lazy dog</textarea>
   </div>
 </div>
 
+<dialog class="dpad" id="dpad">
+  <div class="dp-head">
+    <b id="dp_title">Draw your signature</b>
+    <div class="seg" id="dp_mode"><button data-dp="sig" class="sel">Signature</button><button data-dp="hand">My handwriting</button></div>
+    <button class="iconbtn" id="dp_x" title="Close">✕</button>
+  </div>
+  <div class="dp-body">
+    <div class="dp-hint" id="dp_hint">Sign with your mouse, finger or a stylus. It is saved for 60 days so you can use it again.</div>
+    <div class="dp-canvas" id="dp_wrap"><div class="dp-line"></div><div class="dp-x">✕</div><div class="dp-ph" id="dp_ph">Sign here</div><canvas id="dp_canvas"></canvas></div>
+    <div class="dp-tools">
+      <span class="swatches" id="dp_ink"></span>
+      <label style="font-size:13px;color:var(--muted)">Pen</label><input id="dp_size" type="range" min="1" max="12" value="3" style="width:120px">
+      <span class="spacer"></span>
+      <button class="btn" id="dp_undo">↶ Undo</button><button class="btn" id="dp_clear">Clear</button>
+    </div>
+    <div class="dp-hand">
+      <input id="dp_text" placeholder="Type exactly what you wrote" autocomplete="off">
+      <input id="dp_name" placeholder="Name this style (e.g. My handwriting)" autocomplete="off" style="flex:.7">
+    </div>
+    <div class="dp-warn" id="dp_warn"></div>
+  </div>
+  <div class="dp-foot">
+    <button class="btn" id="dp_cancel">Cancel</button>
+    <button class="btn" id="dp_save">Save</button>
+    <button class="btn primary" id="dp_place">Save &amp; use</button>
+  </div>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=15"></script>
-<script type="module" src="./shell.js?v=3"></script>
+<script type="module" src="./app.js?v=17"></script>
+<script type="module" src="./shell.js?v=4"></script>
 </body>
 </html>

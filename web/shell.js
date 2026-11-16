@@ -65,6 +65,7 @@ const TOOLS = {
   draw:      { name: "Draw on PDF", desc: "Sketch freehand with a pen in any colour.", c: C.edit, i: "pen", mode: "doc", tool: "pen", accept: DOC_IN },
   highlight: { name: "Highlight PDF", desc: "Make the important parts stand out.", c: C.edit, i: "marker", mode: "doc", tool: "highlight", accept: DOC_IN },
   whiteout:  { name: "Whiteout PDF", desc: "Cover anything on a page with a clean white box.", c: C.edit, i: "whiteout", mode: "doc", tool: "whiteout", accept: DOC_IN },
+  unwatermark: { name: "Remove Watermark", desc: "Take watermarks off PDFs and pictures you own.", c: C.prot, i: "whiteout", mode: "doc", tool: "wm", accept: DOC_IN },
   notes:     { name: "Comment on PDF", desc: "Stick notes on the page; they save as PDF comments.", c: C.edit, i: "note", mode: "doc", tool: "note", accept: DOC_IN },
   sign:      { name: "Sign PDF", desc: "Place a real-looking handwritten signature on any page.", c: C.sign, i: "sign", mode: "doc", tool: "sig", accept: DOC_IN },
   fillsign:  { name: "Fill & Sign", desc: "Type into a form, tick boxes, add the date and sign.", c: C.sign, i: "check", mode: "doc", tool: "text", accept: DOC_IN },
@@ -90,17 +91,19 @@ const TOOLS = {
   flatten:   { name: "Flatten PDF", desc: "Bake forms and annotations into the page.", c: C.prot, i: "flatten", mode: "pdf", tool: "", accept: PDF_IN, arrive: "Pick Flatten in Tools to download a flattened copy." },
   write:     { name: "Handwriting Generator", desc: "Turn typed text into handwriting that never repeats.", c: C.write, i: "pen", mode: "write", nofile: true },
   signature: { name: "Signature Maker", desc: "Create a handwritten signature to download or place.", c: C.write, i: "sign", mode: "write", nofile: true, setup: "signature" },
+  drawsig:   { name: "Draw a Signature", desc: "Sign with your mouse, finger or a stylus and keep it for later.", c: C.write, i: "sign", mode: "write", nofile: true, setup: "drawsig" },
+  drawhand:  { name: "Teach Your Handwriting", desc: "Write a sentence once; new text is written in your own style.", c: C.write, i: "pen", mode: "write", nofile: true, setup: "drawhand" },
   sigimport: { name: "Import a Signature", desc: "Trace a photo of your signature into a clean vector.", c: C.write, i: "image", mode: "write", nofile: true, setup: "sigimport" },
   scanlook:  { name: "Make PDF Look Scanned", desc: "Give a document a realistic scanned-paper look.", c: C.write, i: "scan", mode: "doc", tool: "select", setup: "scan", accept: DOC_IN },
 };
 const MENU = [
-  ["Edit", ["edit", "annotate", "edittext", "addtext", "addimage", "draw", "highlight", "whiteout", "notes"]],
+  ["Edit", ["edit", "annotate", "edittext", "addtext", "addimage", "draw", "highlight", "whiteout", "notes", "unwatermark"]],
   ["Fill & Sign", ["sign", "fillsign", "adddate", "forms", "fillform"]],
   ["Organize", ["merge", "split", "rotate", "delete", "extract", "organize"]],
   ["Optimize", ["compress", "number", "crop", "watermark"]],
   ["Convert", ["pdf2img", "img2pdf", "txt2pdf", "ocr"]],
   ["Protect", ["unlock", "redact", "flatten"]],
-  ["Handwriting", ["write", "signature", "sigimport", "scanlook"]],
+  ["Handwriting", ["write", "signature", "drawsig", "drawhand", "sigimport", "scanlook"]],
 ];
 const POPULAR = ["edit", "sign", "merge", "compress", "pdf2img", "write"];
 const toolHref = (id) => "#/tool/" + id;
@@ -304,12 +307,14 @@ async function intakeTool(id, files) {
 async function startNoFile(id) {
   const t = TOOLS[id];
   await appReady();
+  if (t.setup === "drawhand" || (t.setup === "drawsig" && !window.__cal2HasDoc())) { go(window.__cal2HasDoc() ? "#/edit" : "#/write"); setTimeout(() => applySetup(t.setup), 150); return; }
   if (window.__cal2HasDoc() && ON_DOC(id)) { go("#/edit/" + id); return; }
   if (t.mode === "pdf") { window.__cal2ResetPdf(); go("#/pdf/" + t.tool); return; }
   go("#/write");
   setTimeout(() => applySetup(t.setup), 120);
 }
 function applySetup(setup) {
+  if (setup === "drawsig" || setup === "drawhand") { if (window.__cal2OpenDrawPad) window.__cal2OpenDrawPad(setup === "drawhand" ? "hand" : "sig"); return; }
   if (setup === "signature") { const b = document.querySelector('#mode [data-m="signature"]'); if (b) b.click(); toast("Type your name in the box — the signature updates as you type."); }
   if (setup === "sigimport") { if (window.__cal2PickSignatureImage) window.__cal2PickSignatureImage(); }
   if (setup === "scan") {
@@ -339,6 +344,7 @@ async function route() {
     const t = TOOLS[b];
     await appReady();
     // With a document open, a tool works on it — the document stays in view.
+    if (TOOLS[b].setup === "drawhand" || TOOLS[b].setup === "drawsig") { startNoFile(b); return; }
     if (window.__cal2HasDoc() && ON_DOC(b)) { go("#/edit/" + b); return; }
     if (t.mode === "write" && !t.setup) { go("#/write"); return; }   // no document open: the handwriting studio
     document.body.dataset.route = "tool"; renderTool(b); document.title = t.name + " — Calligrapher"; window.scrollTo(0, 0); return;

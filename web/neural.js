@@ -173,14 +173,20 @@ export class NeuralHand {
   }
 
   // Sample stroke offsets [dx,dy,eos] for one line of text.
-  sample(text, { bias = 0.75, seed = 1, maxSteps = null } = {}) {
+  // prime = { text, offsets }: a sample of someone's handwriting (model-space offsets,
+  // as produced by primeFromStrokes). The network first reads the sample with its
+  // text (teacher forcing), then writes `text` continuing in that style — upstream's
+  // "style priming" (chars = prime.text + ' ' + text).
+  sample(text, { bias = 0.75, seed = 1, maxSteps = null, prime = null } = {}) {
     const g = this.g;
+    const P = prime && prime.offsets && prime.offsets.length > 1 ? prime.offsets : null;
+    const full = P ? prime.text + ' ' + text : text;
     // encode chars (+ trailing null, as upstream encode_ascii does)
     const cs = [];
-    for (const ch of text) cs.push(ALPHA_INDEX.get(ch) ?? 0);
+    for (const ch of full) cs.push(ALPHA_INDEX.get(ch) ?? 0);
     cs.push(0);
     const C = cs.length;
-    const steps = maxSteps ?? 40 * text.length + 20;
+    const steps = (maxSteps ?? 40 * text.length + 20) + (P ? P.length : 0);
     const rng = makeRng(seed);
 
     // state
@@ -189,7 +195,7 @@ export class NeuralHand {
     let h3 = new Float32Array(LSTM), c3 = new Float32Array(LSTM);
     let kappa = new Float32Array(K_ATTN);
     let wnd = new Float32Array(ALPHA_N); // attention window (one-hot weighted)
-    let inp = Float32Array.of(0, 0, 1);  // initial input [x,y,eos]
+    let inp = P ? Float32Array.from(P[0]) : Float32Array.of(0, 0, 1);  // initial input [x,y,eos]
 
     const out = [];
     for (let t = 0; t < steps; t++) {
@@ -234,6 +240,9 @@ export class NeuralHand {
       s3in.set(inp, 0); s3in.set(h2, 3); s3in.set(wnd, 3 + LSTM);
       [h3, c3] = lstmStep(s3in, h3, c3, g.lstm[2].kernel, g.lstm[2].bias, LSTM);
 
+      // While reading the style sample, the next input is the sample's next point.
+      if (P && t < P.length - 1) { inp = Float32Array.from(P[t + 1]); continue; }
+
       // output MDN: dense(h3 -> 121)
       const p = dense(h3, g.gmm.W, g.gmm.b, LSTM, OUT_UNITS);
       // split [pis(20), sigmas(40), rhos(20), mus(40), es(1)]
@@ -275,6 +284,52 @@ export class NeuralHand {
     return out;
   }
 }
+
+// ---------------------------------------------------------------------------
+// A drawn handwriting sample -> a style prime, preprocessed the way upstream
+// prepared its training data (prepare_data.py: y flipped up, align, denoise,
+// coords_to_offsets, normalize by the median step), resampled to roughly the
+// tablet density the model learned from (~25 points per character).
+// strokes: [[{x,y}, ...], ...] in screen coordinates (y down).
+// ---------------------------------------------------------------------------
+export function primeFromStrokes(strokes, text, pointsPerChar = 25) {
+  const segs = strokes.filter((s) => s && s.length);
+  if (!segs.length || !text) return null;
+  const lens = segs.map((s) => { let L = 0; for (let i = 1; i < s.length; i++) L += Math.hypot(s[i].x - s[i - 1].x, s[i].y - s[i - 1].y); return L; });
+  const total = lens.reduce((a, b) => a + b, 0) || 1;
+  const N = Math.max(60, Math.min(1150, Math.round(pointsPerChar * [...text].length)));
+  const X = [], Y = [], E = [], bounds = [];
+  segs.forEach((s, si) => {
+    const n = Math.max(2, Math.round(N * lens[si] / total));
+    const out = [];
+    if (s.length === 1 || lens[si] === 0) { for (let k = 0; k < n; k++) out.push(s[0]); }
+    else {
+      const cum = [0]; for (let i = 1; i < s.length; i++) cum.push(cum[i - 1] + Math.hypot(s[i].x - s[i - 1].x, s[i].y - s[i - 1].y));
+      let j = 0;
+      for (let k = 0; k < n; k++) {
+        const d = lens[si] * k / (n - 1);
+        while (j < s.length - 2 && cum[j + 1] < d) j++;
+        const seg = cum[j + 1] - cum[j] || 1, t = Math.min(1, Math.max(0, (d - cum[j]) / seg));
+        out.push({ x: s[j].x + (s[j + 1].x - s[j].x) * t, y: s[j].y + (s[j + 1].y - s[j].y) * t });
+      }
+    }
+    const a = X.length;
+    out.forEach((p, k) => { X.push(p.x); Y.push(-p.y); E.push(k === out.length - 1 ? 1 : 0); });
+    bounds.push([a, X.length]);
+  });
+  const fx = Float64Array.from(X), fy = Float64Array.from(Y);
+  align(fx, fy);
+  for (const [a, b] of bounds) {
+    const sx = savgol(fx.slice(a, b)), sy = savgol(fy.slice(a, b));
+    for (let i = a; i < b; i++) { fx[i] = sx[i - a]; fy[i] = sy[i - a]; }
+  }
+  const off = [[0, 0, 1]];
+  for (let i = 1; i < fx.length; i++) off.push([fx[i] - fx[i - 1], fy[i] - fy[i - 1], E[i]]);
+  const norms = off.map((o) => Math.hypot(o[0], o[1])).filter((v) => v > 1e-9).sort((a, b) => a - b);
+  const med = norms.length ? norms[Math.floor(norms.length / 2)] : 1;
+  return { text, offsets: off.map((o) => [+(o[0] / med).toFixed(4), +(o[1] / med).toFixed(4), o[2]]) };
+}
+export const supportedChar = (ch) => ALPHA_INDEX.has(ch);
 
 // ---------------------------------------------------------------------------
 // offsets -> coordinates -> stroke polylines, matching upstream post-processing.
