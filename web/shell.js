@@ -94,7 +94,7 @@ const TOOLS = {
   signature: { name: "Signature Maker", desc: "Create a handwritten signature to download or place.", c: C.write, i: "sign", mode: "write", nofile: true, setup: "signature" },
   drawsig:   { name: "Draw a Signature", desc: "Sign with your mouse, finger or a stylus and keep it for later.", c: C.write, i: "sign", mode: "write", nofile: true, setup: "drawsig" },
   drawhand:  { name: "Teach Your Handwriting", desc: "Write a sentence once; new text is written in your own style.", c: C.write, i: "pen", mode: "write", nofile: true, setup: "drawhand" },
-  sigimport: { name: "Import a Signature", desc: "Trace a photo of your signature into a clean vector.", c: C.write, i: "image", mode: "write", nofile: true, setup: "sigimport" },
+  sigimport: { name: "Import a Signature", desc: "Pull your signature out of a photo, screenshot or PDF and fine-tune it.", c: C.write, i: "image", mode: "write", nofile: true, setup: "sigimport" },
   scanlook:  { name: "Make PDF Look Scanned", desc: "Give a document a realistic scanned-paper look.", c: C.write, i: "scan", mode: "doc", tool: "select", setup: "scan", accept: DOC_IN },
 };
 const MENU = [

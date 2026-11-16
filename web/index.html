@@ -421,6 +421,27 @@
   .prime-chip{display:none;align-items:center;gap:6px;margin-top:8px;padding:6px 10px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:600}
   .prime-chip.on{display:flex}
   .prime-chip button{margin-left:auto;border:0;background:none;color:inherit;cursor:pointer;font-size:15px}
+  /* signature fine-tuning */
+  .fx{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 20px;margin-top:12px}
+  .fx label{display:flex;flex-direction:column;gap:2px;font-size:13px;color:var(--text2);cursor:default}
+  .fx .fxh{display:flex;justify-content:space-between}
+  .fx .fxh b{font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums}
+  .fx input[type=range]{width:100%}
+  .dp-fxbar{display:flex;align-items:center;gap:10px;margin-top:4px;font-size:12.5px;color:var(--muted)}
+  .linkbtn{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-weight:600;padding:0}
+  .dpad.hand .dp-fx{display:none}
+  .sx{width:min(1000px,96vw)}
+  .sx-grid{display:grid;grid-template-columns:1.25fr 1fr;gap:12px}
+  @media (max-width:700px){ .sx-grid{grid-template-columns:1fr} }
+  .sx-src{position:relative}
+  .sx-src canvas{display:block;width:100%;height:290px;background:#eceef2;border:1px solid var(--line2);border-radius:8px;cursor:crosshair;touch-action:none}
+  .sx-pg{position:absolute;left:8px;top:8px;display:none;align-items:center;gap:4px;background:var(--pop);border-radius:6px;padding:2px 6px;font-size:13px;box-shadow:var(--pop-shadow)}
+  .sx.pdf .sx-pg{display:flex}
+  #sx_reset{position:absolute;right:8px;top:8px;width:auto;padding:4px 10px;font-size:12.5px}
+  .sx-out{height:290px;background:#fff;border:1px solid var(--line2);border-radius:8px;display:flex;align-items:center;justify-content:center;padding:16px;overflow:hidden}
+  .sx-out svg{display:block;max-width:100%;max-height:100%}
+  .sx-wait{color:#8a93a3;font-size:14px;text-align:center;padding:0 12px}
+  .dp-head .btn{flex:none}
   /* PDF fonts dialog */
   .fs-status{color:var(--muted);font-size:13.5px;margin-bottom:10px}
   .fs-list{max-height:46vh;overflow:auto;display:flex;flex-direction:column;gap:6px}
@@ -745,12 +766,13 @@ jumps over the lazy dog</textarea>
           <button class="btn" id="sig_save">★ Save current</button>
           <button class="btn" id="sig_btn">Import</button>
         </div>
-        <input class="file" id="sig_file" type="file" accept="image/*" />
+        <input class="file" id="sig_file" type="file" accept="image/*,application/pdf,.pdf" />
         <div class="note">Signatures you place are saved automatically and kept for 60 days after you last use them. Paste a signature picture with Ctrl/Cmd+V to trace it. Use only a signature you're authorized to use.</div>
         <div id="sig_controls" style="display:none">
           <div class="switch"><div><div class="t">Use the imported signature</div><div class="d">Place the traced picture instead of typed text.</div></div><div class="sw-toggle" data-k="usesig"><i></i></div></div>
           <div class="row"><label>Threshold</label><input id="sig_threshold" type="range" min="20" max="240" value="150"><span class="val" id="sig_threshold_v"></span></div>
-          <button class="btn" id="sig_match">Match style for typing</button>
+          <button class="btn" id="sig_tune">Fine-tune the import…</button>
+          <button class="btn" id="sig_match" style="margin-top:8px">Match style for typing</button>
           <button class="btn" id="sig_clear" style="margin-top:8px">Remove imported signature</button>
         </div>
         <div id="sig_saved" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px"></div>
@@ -853,6 +875,8 @@ jumps over the lazy dog</textarea>
       <input id="dp_text" placeholder="Type exactly what you wrote" autocomplete="off">
       <input id="dp_name" placeholder="Name this style (e.g. My handwriting)" autocomplete="off" style="flex:.7">
     </div>
+    <div class="fx dp-fx" id="dp_fx"></div>
+    <div class="dp-fxbar dp-fx"><span>Fine-tune how the signature looks — changes show on the pad straight away.</span><button class="linkbtn" id="dp_fxreset" type="button">Reset</button></div>
     <div class="dp-warn" id="dp_warn"></div>
   </div>
   <div class="dp-foot">
@@ -877,11 +901,34 @@ jumps over the lazy dog</textarea>
   </div>
 </dialog>
 
+<dialog class="dpad sx" id="sigx">
+  <div class="dp-head"><b>Signature from a picture or PDF</b><button class="btn" id="sx_file" style="width:auto;padding:5px 12px">Choose another…</button><button class="iconbtn" id="sx_x" title="Close">✕</button></div>
+  <div class="dp-body">
+    <div class="dp-hint" id="sx_hint"></div>
+    <div class="sx-grid">
+      <div class="sx-src"><canvas id="sx_src"></canvas>
+        <div class="sx-pg"><button class="iconbtn" id="sx_prev" title="Previous page">‹</button><span id="sx_pgn"></span><button class="iconbtn" id="sx_next" title="Next page">›</button></div>
+        <button class="btn" id="sx_reset" title="Use the whole picture">Whole picture</button>
+      </div>
+      <div class="sx-out" id="sx_out"></div>
+    </div>
+    <div class="fx" id="sx_fx"></div>
+    <div class="dp-tools"><span class="swatches" id="sx_ink"></span><span class="spacer"></span><button class="btn" id="sx_defaults">Reset sliders</button></div>
+    <div class="note" style="margin-top:8px">Use only a signature you're authorized to use.</div>
+    <div class="dp-warn" id="sx_warn"></div>
+  </div>
+  <div class="dp-foot">
+    <button class="btn" id="sx_cancel">Cancel</button>
+    <button class="btn" id="sx_save">Save</button>
+    <button class="btn primary" id="sx_place">Save &amp; use</button>
+  </div>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=18"></script>
-<script type="module" src="./shell.js?v=5"></script>
+<script type="module" src="./app.js?v=19"></script>
+<script type="module" src="./shell.js?v=6"></script>
 </body>
 </html>

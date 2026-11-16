@@ -2268,6 +2268,7 @@ async function copyLink() {
 $("sig_btn").onclick = () => $("sig_file").click();
 $("sig_file").onchange = (e) => { const f = e.target.files[0]; if (f) loadSigFile(f); };
 $("sig_threshold").addEventListener("input", () => { refreshLabels(); processSignature(); render(); });
+$("sig_tune").onclick = () => { if (sx.src) openSigStudio(); else $("sig_file").click(); };
 $("sig_clear").onclick = () => { sigImg = null; sigSVG = ""; toggles.usesig = false; syncToggles(); $("sig_controls").style.display = "none"; render(); };
 $("sig_match").onclick = () => {
   if (!sigMetrics) return;
@@ -2279,71 +2280,14 @@ document.addEventListener("paste", (e) => {
   const items = (e.clipboardData && e.clipboardData.items) || [];
   for (const it of items) if (it.type && it.type.startsWith("image/")) { loadSigFile(it.getAsFile()); e.preventDefault(); break; }
 });
-function loadSigFile(f) {
-  if (!f) return;
-  const url = URL.createObjectURL(f);
-  const img = new Image();
-  img.onload = () => {
-    sigImg = img; processSignature();
-    if (sigSVG) { $("sig_controls").style.display = ""; toggles.usesig = true; syncToggles(); render(); }
-    URL.revokeObjectURL(url);
-  };
-  img.onerror = () => { errEl.textContent = "Could not read that image."; };
-  img.src = url;
-}
+function loadSigFile(f) { if (f) openSigStudio(f); }
 
+// The sidebar threshold re-traces the last imported signature with the same settings.
 function processSignature() {
   if (!sigImg) return;
-  const maxD = 880;
-  let w = sigImg.naturalWidth, h = sigImg.naturalHeight;
-  const sc = Math.min(1, maxD / Math.max(w, h)); w = Math.max(1, Math.round(w * sc)); h = Math.max(1, Math.round(h * sc));
-  const c = document.createElement("canvas"); c.width = w; c.height = h;
-  const cx = c.getContext("2d"); cx.drawImage(sigImg, 0, 0, w, h);
-  const d = cx.getImageData(0, 0, w, h).data;
-  const lum = new Float32Array(w * h), alpha = new Uint8Array(w * h);
-  for (let i = 0, p = 0; i < w * h; i++, p += 4) { lum[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2]; alpha[i] = d[p + 3]; }
-  // Adaptive (Bradley) threshold via an integral image — robust to shadows / uneven paper.
-  const integ = new Float64Array((w + 1) * (h + 1));
-  for (let y = 0; y < h; y++) { let rs = 0; for (let x = 0; x < w; x++) { rs += lum[y * w + x]; integ[(y + 1) * (w + 1) + (x + 1)] = integ[y * (w + 1) + (x + 1)] + rs; } }
-  const rad = Math.max(6, Math.round(Math.min(w, h) * 0.08));
-  const localMean = (x, y) => {
-    const x0 = Math.max(0, x - rad), y0 = Math.max(0, y - rad), x1 = Math.min(w - 1, x + rad), y1 = Math.min(h - 1, y + rad);
-    const A = integ[y0 * (w + 1) + x0], B = integ[y0 * (w + 1) + (x1 + 1)], C = integ[(y1 + 1) * (w + 1) + x0], D = integ[(y1 + 1) * (w + 1) + (x1 + 1)];
-    return (D - B - C + A) / ((x1 - x0 + 1) * (y1 - y0 + 1));
-  };
-  const margin = (1 - (+$("sig_threshold").value) / 255) * 44 + 4;
-  let mask = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; if (alpha[i] > 10 && lum[i] < 205 && localMean(x, y) - lum[i] > margin) mask[i] = 1; }
-  mask = despeckle(mask, w, h);
-  let area = 0, sumX = 0, sumY = 0, sumXY = 0, sumYY = 0, minx = w, miny = h, maxx = 0, maxy = 0;
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[y * w + x]) { area++; sumX += x; sumY += y; sumXY += x * y; sumYY += y * y; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; }
-  if (area < 24) { sigSVG = ""; errEl.textContent = "No clear ink found — adjust the threshold or use a cleaner image."; return; }
-  const minArea = Math.max(8, w * h * 0.00004);
-  let loops = marchingSquares(mask, w, h).map((L) => {
-    if (L.length > 1 && L[0][0] === L[L.length - 1][0] && L[0][1] === L[L.length - 1][1]) L = L.slice(0, -1);
-    return simplifyLoop(chaikin(chaikin(L)), 1.0);
-  }).filter((L) => L.length > 3 && polyArea(L) > minArea);
-  if (!loops.length) { sigSVG = ""; errEl.textContent = "Could not trace clean strokes — try a higher-contrast image."; return; }
-  // slant estimate: regression x = a*y + b over ink pixels
-  const n = area, meanX = sumX / n, meanY = sumY / n;
-  const a = (sumXY - n * meanX * meanY) / ((sumYY - n * meanY * meanY) || 1);
-  const slant = Math.max(-10, Math.min(30, Math.round(-a * 42)));
-  // weight estimate: 2*area / perimeter relative to ink height
-  let perim = 0;
-  for (const L of loops) for (let i = 1; i < L.length; i++) perim += Math.hypot(L[i][0] - L[i - 1][0], L[i][1] - L[i - 1][1]);
-  const strokeW = perim > 0 ? (2 * area) / perim : 4, bh = (maxy - miny) || 1;
-  const thickness = Math.max(10, Math.min(90, Math.round((strokeW / bh) * 620)));
-  sigMetrics = { slant, thickness };
-  const vbw = maxx - minx + 2, vbh = maxy - miny + 2;
-  let body = "";
-  for (const L of loops) {
-    let s = "M" + (L[0][0] - minx + 1).toFixed(1) + " " + (L[0][1] - miny + 1).toFixed(1);
-    for (let i = 1; i < L.length; i++) s += "L" + (L[i][0] - minx + 1).toFixed(1) + " " + (L[i][1] - miny + 1).toFixed(1);
-    body += '<path d="' + s + 'Z"/>';
-  }
-  sigSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="${vbw}" height="${vbh}" viewBox="0 0 ${vbw} ${vbh}" fill="currentColor" stroke="none"><g fill-rule="evenodd">${body}</g></svg>`;
-  sigBox = { w: vbw, h: vbh };
-  errEl.textContent = "";
+  const r = traceSig(sigImg, { ...sigFx, thresh: +$("sig_threshold").value });
+  if (r.err) { sigSVG = ""; errEl.textContent = r.err; return; }
+  sigSVG = r.svg; sigBox = { w: r.w, h: r.h }; sigMetrics = r.metrics; errEl.textContent = "";
 }
 
 // Marching squares over a binary mask -> array of closed loops of points.
@@ -2612,16 +2556,23 @@ function dpRedraw() {
   $("dp_ph").style.display = all.length ? "none" : "";
   if (!x) return;
   x.clearRect(0, 0, c.width, c.height);
-  if (all.length) { x.fillStyle = dp.color; x.fill(new Path2D(inkPath(all, dp.size))); }
+  if (all.length) { x.fillStyle = dp.color; x.fill(new Path2D(inkPath(all, dp.size, dpFx()))); }
 }
 // Smooth, pressure/speed-sensitive ink: each stroke becomes a filled outline.
-function inkPath(strokes, size) {
+// fx: smoothness (averaging + corner rounding), exactness (how many of the original
+// points are kept), realism (pressure/speed width changes, tapered ends, ink wobble).
+const INK_NEUTRAL = { smooth: 30, exact: 100, real: 100 };
+const dpFx = () => (dp.mode === "sig" ? sigFx : INK_NEUTRAL);
+function inkPath(strokes, size, fx = INK_NEUTRAL) {
+  const R = fx.real / 100, eps = Math.pow(1 - fx.exact / 100, 2) * 6, avg = Math.round(fx.smooth / 100 * 6), passes = Math.round(fx.smooth / 100 * 3);
   let d = "";
-  for (const s0 of strokes) {
-    if (!s0.length) continue;
-    if (s0.length === 1) { const p = s0[0], r = size * 0.6; d += `M${(p.x + r).toFixed(2)},${p.y.toFixed(2)}a${r},${r} 0 1 0 ${-2 * r},0a${r},${r} 0 1 0 ${2 * r},0Z`; continue; }
+  strokes.forEach((s0, si) => {
+    if (!s0.length) return;
+    if (s0.length === 1) { const p = s0[0], r = size * 0.6; d += `M${(p.x + r).toFixed(2)},${p.y.toFixed(2)}a${r},${r} 0 1 0 ${-2 * r},0a${r},${r} 0 1 0 ${2 * r},0Z`; return; }
     let s = s0;
-    for (let k = 0; k < 2; k++) {                 // Chaikin smoothing, ends kept
+    if (avg) s = s0.map((p, i) => { if (i === 0 || i === s0.length - 1) return p; let x = 0, y = 0, c = 0; for (let k = -avg; k <= avg; k++) { const q = s0[Math.min(s0.length - 1, Math.max(0, i + k))]; x += q.x; y += q.y; c++; } return { ...p, x: x / c, y: y / c }; });
+    if (eps > 0.05 && s.length > 2) { const kept = rdp(s.map((p, i) => [p.x, p.y, i]), eps); s = kept.map((q) => s[q[2]]); }
+    for (let k = 0; k < passes; k++) {               // Chaikin smoothing, ends kept
       const o = [s[0]];
       for (let i = 0; i < s.length - 1; i++) { const a = s[i], b = s[i + 1]; o.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25, p: (a.p * 3 + b.p) / 4, t: a.t }, { x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75, p: (a.p + b.p * 3) / 4, t: b.t }); }
       o.push(s[s.length - 1]); s = o;
@@ -2632,19 +2583,21 @@ function inkPath(strokes, size) {
       const v = Math.hypot(b.x - a.x, b.y - a.y) / Math.max(1, (b.t - a.t) || 8);
       const speed = Math.max(0.55, Math.min(1.2, 1.2 - v * 0.35));
       const edge = Math.min(1, Math.min(i, n - 1 - i) / Math.max(2, n * 0.08));
-      w[i] = size * (0.55 + 0.9 * (s[i].p || 0.5)) * speed * (0.45 + 0.55 * edge);
+      const real = size * (0.55 + 0.9 * (s[i].p || 0.5)) * speed * (0.45 + 0.55 * edge);
+      const flat = size * 0.95 * (0.8 + 0.2 * edge);
+      w[i] = flat + (real - flat) * R;
     }
     for (let i = 1; i < n - 1; i++) w[i] = (w[i - 1] + w[i] * 2 + w[i + 1]) / 4;
-    const L = [], R = [];
+    const amp = R * Math.min(0.7, size * 0.1), L = [], Rt = [];
     for (let i = 0; i < n; i++) {
       const a = s[Math.max(0, i - 1)], b = s[Math.min(n - 1, i + 1)];
       let dx = b.x - a.x, dy = b.y - a.y; const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
-      const h = Math.max(0.35, w[i] / 2);
-      L.push([s[i].x - dy * h, s[i].y + dx * h]); R.push([s[i].x + dy * h, s[i].y - dx * h]);
+      const h = Math.max(0.35, w[i] / 2), hl = h + fxNoise(i * 0.35, si + 1) * amp, hr = h + fxNoise(i * 0.35 + 31, si + 2) * amp;
+      L.push([s[i].x - dy * hl, s[i].y + dx * hl]); Rt.push([s[i].x + dy * hr, s[i].y - dx * hr]);
     }
     d += "M" + L.map((q) => q[0].toFixed(2) + "," + q[1].toFixed(2)).join("L");
-    d += "L" + R.reverse().map((q) => q[0].toFixed(2) + "," + q[1].toFixed(2)).join("L") + "Z";
-  }
+    d += "L" + Rt.reverse().map((q) => q[0].toFixed(2) + "," + q[1].toFixed(2)).join("L") + "Z";
+  });
   return d;
 }
 function dpSvg() {
@@ -2652,7 +2605,7 @@ function dpSvg() {
   for (const s of dp.strokes) for (const p of s) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
   const pad = dp.size * 2 + 4, w = Math.ceil(x1 - x0 + pad * 2), h = Math.ceil(y1 - y0 + pad * 2);
   const moved = dp.strokes.map((s) => s.map((p) => ({ ...p, x: p.x - x0 + pad, y: p.y - y0 + pad })));
-  return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="currentColor" stroke="none"><g><path d="${inkPath(moved, dp.size)}"/></g></svg>`, w, h };
+  return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="currentColor" stroke="none"><g><path d="${inkPath(moved, dp.size, dpFx())}"/></g></svg>`, w, h };
 }
 function dpSave(use) {
   const warn = $("dp_warn");
@@ -2696,6 +2649,8 @@ function dpWire() {
   $("dp_undo").onclick = () => { dp.strokes.pop(); dpRedraw(); };
   $("dp_clear").onclick = () => { dp.strokes = []; dpRedraw(); };
   $("dp_size").oninput = () => { dp.size = +$("dp_size").value; dpRedraw(); };
+  fxSliders($("dp_fx"), ["smooth", "exact", "real"], () => dpRedraw());
+  $("dp_fxreset").onclick = () => fxReset($("dp_fx"), dpRedraw);
   const inks = $("dp_ink"); inks.innerHTML = "";
   DP_INKS.forEach((col, i) => { const b = document.createElement("div"); b.className = "sw" + (i === 0 ? " sel" : ""); b.style.background = col; b.title = col; b.onclick = () => { dp.color = col; inks.querySelectorAll(".sw").forEach((x) => x.classList.toggle("sel", x === b)); dpRedraw(); }; inks.appendChild(b); });
   $("dp_x").onclick = $("dp_cancel").onclick = () => $("dpad").close();
@@ -3014,6 +2969,254 @@ async function saveScannedFonts() {
   toast(n ? `Saved ${n} font${n > 1 ? "s" : ""} — find them under “Your PDFs” in the font menu.` : "Tick the fonts you want to keep.");
   propsSig = ""; if (typeof renderProps === "function") renderProps();
   renderSavedFontList(); fsRenderFound();
+}
+
+// ---- signature fine-tuning: sliders for drawn and imported signatures -----------
+// threshold: how dark a mark must be to count as ink (pictures/PDFs)
+// smoothness: how much the strokes are rounded off; exactness: how closely the
+// result follows the original ("the pull"); realism: natural pen pressure, ink
+// shading and edge texture; thickness: thinner/bolder strokes (pictures/PDFs).
+const SIGFX_DEF = { thresh: 150, smooth: 45, exact: 70, real: 55, weight: 50 };
+const sigFx = { ...SIGFX_DEF, ...lsGet("cal2_sigfx", {}) };
+const FX_INFO = {
+  thresh: ["Threshold", "How dark a mark must be to count as ink. Raise it for faint pen, lower it to drop shadows and lines.", 20, 240],
+  smooth: ["Smoothness", "Rounds off shaky or jagged strokes.", 0, 100],
+  exact: ["Exactness", "How closely it follows the original — high keeps every detail, low gives simpler, flowing curves.", 0, 100],
+  real: ["Realism", "Natural pen pressure, ink shading and slightly rough edges. 0 is a clean, even line.", 0, 100],
+  weight: ["Thickness", "Makes the strokes thinner or bolder.", 0, 100],
+};
+function fxSliders(host, keys, onChange) {
+  host.innerHTML = "";
+  for (const k of keys) {
+    const [name, tip, min, max] = FX_INFO[k];
+    const lab = mk("label", { title: tip });
+    const head = mk("span", { className: "fxh" }, `<span>${name}</span><b></b>`);
+    const r = mk("input", { type: "range", min, max, value: sigFx[k] });
+    r.dataset.k = k;
+    const show = () => { head.querySelector("b").textContent = k === "thresh" ? r.value : r.value + "%"; };
+    r.oninput = () => { sigFx[k] = +r.value; show(); lsSet("cal2_sigfx", sigFx); onChange(k); };
+    show(); lab.append(head, r); host.appendChild(lab);
+  }
+}
+function fxReset(host, onChange) { Object.assign(sigFx, SIGFX_DEF); lsSet("cal2_sigfx", sigFx); host.querySelectorAll("input[type=range]").forEach((r) => { r.value = sigFx[r.dataset.k]; r.dispatchEvent(new Event("input")); }); onChange(); }
+// smooth deterministic noise (same signature -> same texture every time)
+const fxNoise = (i, seed) => (Math.sin(i * 0.71 + seed * 12.9898) + Math.sin(i * 0.23 + seed * 4.1414) * 0.6 + Math.sin(i * 1.93 + seed * 7.77) * 0.25) / 1.85;
+
+// ---- traced signature from a picture or a PDF page ---------------------------------
+function traceSig(source, fx) {
+  const maxD = 880;
+  let w = source.naturalWidth || source.width, h = source.naturalHeight || source.height;
+  const sc = Math.min(1, maxD / Math.max(w, h)); w = Math.max(1, Math.round(w * sc)); h = Math.max(1, Math.round(h * sc));
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, w, h); cx.drawImage(source, 0, 0, w, h);
+  const d = cx.getImageData(0, 0, w, h).data;
+  const lum = new Float32Array(w * h);
+  for (let i = 0, p = 0; i < w * h; i++, p += 4) lum[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+  // adaptive (Bradley) threshold via an integral image — robust to shadows / uneven paper
+  const integ = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) { let rs = 0; for (let x = 0; x < w; x++) { rs += lum[y * w + x]; integ[(y + 1) * (w + 1) + (x + 1)] = integ[y * (w + 1) + (x + 1)] + rs; } }
+  const rad = Math.max(6, Math.round(Math.min(w, h) * 0.08));
+  const boxMean = (I, x, y, r) => {
+    const x0 = Math.max(0, x - r), y0 = Math.max(0, y - r), x1 = Math.min(w - 1, x + r), y1 = Math.min(h - 1, y + r);
+    return (I[(y1 + 1) * (w + 1) + (x1 + 1)] - I[y0 * (w + 1) + (x1 + 1)] - I[(y1 + 1) * (w + 1) + x0] + I[y0 * (w + 1) + x0]) / ((x1 - x0 + 1) * (y1 - y0 + 1));
+  };
+  const margin = (1 - fx.thresh / 255) * 44 + 4, cut = 120 + fx.thresh * 0.55;
+  const local = new Float32Array(w * h);
+  let mask = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; local[i] = boxMean(integ, x, y, rad); if (lum[i] < cut && local[i] - lum[i] > margin) mask[i] = 1; }
+  mask = despeckle(mask, w, h);
+  // thickness: grow or shrink the ink by whole pixels
+  const morph = (m, grow) => {
+    const o = m.slice();
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x; if (!!m[i] === grow) continue;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue; if (!!m[yy * w + xx] === grow) { o[i] = grow ? 1 : 0; dy = dx = 2; } }
+    }
+    return o;
+  };
+  const k = Math.round((fx.weight - 50) / 22);
+  for (let n = 0; n < Math.abs(k); n++) mask = morph(mask, k > 0);
+  // smoothness: blur the ink shape and re-cut it at half — rounds jagged edges
+  const sr = Math.round(fx.smooth / 100 * 3);
+  if (sr) {
+    const I = new Float64Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) { let rs = 0; for (let x = 0; x < w; x++) { rs += mask[y * w + x]; I[(y + 1) * (w + 1) + (x + 1)] = I[y * (w + 1) + (x + 1)] + rs; } }
+    const o = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) o[y * w + x] = boxMean(I, x, y, sr) >= 0.5 ? 1 : 0;
+    mask = o;
+  }
+  let area = 0, sumX = 0, sumY = 0, sumXY = 0, sumYY = 0, minx = w, miny = h, maxx = 0, maxy = 0, inkMin = 255;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[y * w + x]) { area++; sumX += x; sumY += y; sumXY += x * y; sumYY += y * y; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; if (lum[y * w + x] < inkMin) inkMin = lum[y * w + x]; }
+  if (area < 24) return { err: "No clear ink found — raise the threshold, or drag a box around the signature.", mask, w, h };
+  const minArea = Math.max(8, w * h * 0.00004);
+  const passes = 1 + Math.round(fx.smooth / 100 * 2), eps = 0.25 + (1 - fx.exact / 100) * 2.6;
+  const R = fx.real / 100, rough = R * 0.55;
+  let loops = marchingSquares(mask, w, h).map((L, li) => {
+    if (L.length > 1 && L[0][0] === L[L.length - 1][0] && L[0][1] === L[L.length - 1][1]) L = L.slice(0, -1);
+    for (let n = 0; n < passes; n++) L = chaikin(L);
+    L = simplifyLoop(L, eps);
+    if (rough > 0.02) L = L.map((p, i) => [p[0] + fxNoise(i, li + 1) * rough, p[1] + fxNoise(i + 50, li + 3) * rough]);
+    return L;
+  }).filter((L) => L.length > 3 && polyArea(L) > minArea);
+  if (!loops.length) return { err: "Could not trace clean strokes — try a different threshold or a sharper picture.", mask, w, h };
+  const n = area, meanX = sumX / n, meanY = sumY / n;
+  const a = (sumXY - n * meanX * meanY) / ((sumYY - n * meanY * meanY) || 1);
+  const slant = Math.max(-10, Math.min(30, Math.round(-a * 42)));
+  let perim = 0;
+  for (const L of loops) for (let i = 1; i < L.length; i++) perim += Math.hypot(L[i][0] - L[i - 1][0], L[i][1] - L[i - 1][1]);
+  const strokeW = perim > 0 ? (2 * area) / perim : 4, bh = (maxy - miny) || 1;
+  const thickness = Math.max(10, Math.min(90, Math.round((strokeW / bh) * 620)));
+  const vbw = maxx - minx + 2, vbh = maxy - miny + 2;
+  let body = "";
+  for (const L of loops) {
+    let s = "M" + (L[0][0] - minx + 1).toFixed(1) + " " + (L[0][1] - miny + 1).toFixed(1);
+    for (let i = 1; i < L.length; i++) s += "L" + (L[i][0] - minx + 1).toFixed(1) + " " + (L[i][1] - miny + 1).toFixed(1);
+    body += '<path d="' + s + 'Z"/>';
+  }
+  // realism: keep the pen's own shading (darker where it pressed) plus a little paper grain
+  let defs = "", maskAttr = "";
+  if (R > 0.03) {
+    const bw = maxx - minx + 1, bhh = maxy - miny + 1;
+    const mc = document.createElement("canvas"); mc.width = bw; mc.height = bhh;
+    const mx = mc.getContext("2d"), md = mx.createImageData(bw, bhh);
+    for (let y = 0; y < bhh; y++) for (let x = 0; x < bw; x++) {
+      const i = (y + miny) * w + (x + minx), paper = local[i];
+      const shade = Math.max(0.2, Math.min(1, (paper - lum[i]) / Math.max(20, paper - inkMin)));
+      const rnd = (((Math.sin(x * 12.99 + y * 78.23) * 43758.5453) % 1) + 1) % 1, grain = 1 - 0.14 * R * rnd;
+      const v = Math.round(255 * Math.max(0.12, (1 - R + R * Math.pow(shade, 0.7)) * grain));
+      const p = (y * bw + x) * 4; md.data[p] = md.data[p + 1] = md.data[p + 2] = v; md.data[p + 3] = 255;
+    }
+    mx.putImageData(md, 0, 0);
+    const id = "ink" + Math.random().toString(36).slice(2, 9), href = mc.toDataURL("image/jpeg", 0.82);
+    defs = `<defs><mask id="${id}" maskUnits="userSpaceOnUse" x="0" y="0" width="${vbw}" height="${vbh}"><image x="1" y="1" width="${bw}" height="${bhh}" href="${href}" xlink:href="${href}" preserveAspectRatio="none"/></mask></defs>`;
+    maskAttr = ` mask="url(#${id})"`;
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${vbw}" height="${vbh}" viewBox="0 0 ${vbw} ${vbh}" fill="currentColor" stroke="none">${defs}<g fill-rule="evenodd"${maskAttr}>${body}</g></svg>`;
+  return { svg, w: vbw, h: vbh, metrics: { slant, thickness }, mask, mw: w, mh: h };
+}
+
+// ---- the import window: pick the area, fine-tune, save -----------------------------
+const sx = { src: null, pdf: null, page: 1, pages: 1, crop: null, color: DP_INKS[0], result: null, view: null, drag: null, timer: 0, wired: false };
+async function openSigStudio(file) {
+  const dlg = $("sigx"); sxWire();
+  $("sx_warn").textContent = "";
+  if (!dlg.open) dlg.showModal();
+  if (file) {
+    sx.src = null; sx.pdf = null; sx.crop = null; sx.result = null;
+    $("sx_out").innerHTML = '<span class="sx-wait">Reading…</span>';
+    const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name || "");
+    dlg.classList.toggle("pdf", isPdf);
+    try {
+      if (isPdf) {
+        sx.pdf = await window.pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+        sx.pages = sx.pdf.numPages; await sxPage(1);
+      } else {
+        const url = URL.createObjectURL(file), img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error("Could not read that picture.")); img.src = url; });
+        const s = Math.min(1, 2400 / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement("canvas"); c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+        sx.src = c;
+      }
+    } catch (err) { $("sx_warn").textContent = (err && err.message) || "Could not open that file."; return; }
+  }
+  $("sx_hint").textContent = sx.pdf ? "Drag a box around the signature on the page. Red shows the ink that will be kept." : "Drag a box around the signature to leave out anything else. Red shows the ink that will be kept.";
+  requestAnimationFrame(() => { sxDraw(); sxProcess(); });
+}
+async function sxPage(n) {
+  sx.page = Math.max(1, Math.min(sx.pages, n)); sx.crop = null;
+  const page = await sx.pdf.getPage(sx.page), v1 = page.getViewport({ scale: 1 });
+  const vp = page.getViewport({ scale: Math.min(3, 2200 / Math.max(v1.width, v1.height)) });
+  const c = document.createElement("canvas"); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+  const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  sx.src = c; $("sx_pgn").textContent = `Page ${sx.page} of ${sx.pages}`;
+}
+function sxCropCanvas() {
+  const s = sx.src, r = sx.crop || { x: 0, y: 0, w: s.width, h: s.height };
+  const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(r.w)); c.height = Math.max(1, Math.round(r.h));
+  c.getContext("2d").drawImage(s, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  return c;
+}
+function sxDraw() {
+  const cv = $("sx_src"), rr = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(1, Math.round(rr.width * dpr)); cv.height = Math.max(1, Math.round(rr.height * dpr));
+  const x = cv.getContext("2d"); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, rr.width, rr.height);
+  if (!sx.src) return;
+  const s = Math.min(rr.width / sx.src.width, rr.height / sx.src.height), ox = (rr.width - sx.src.width * s) / 2, oy = (rr.height - sx.src.height * s) / 2;
+  sx.view = { s, ox, oy };
+  x.drawImage(sx.src, ox, oy, sx.src.width * s, sx.src.height * s);
+  const c = sx.crop || { x: 0, y: 0, w: sx.src.width, h: sx.src.height };
+  const cx0 = ox + c.x * s, cy0 = oy + c.y * s, cw = c.w * s, ch = c.h * s;
+  if (sx.crop) {
+    x.fillStyle = "rgba(15,18,28,.45)";
+    x.fillRect(ox, oy, sx.src.width * s, cy0 - oy); x.fillRect(ox, cy0 + ch, sx.src.width * s, oy + sx.src.height * s - cy0 - ch);
+    x.fillRect(ox, cy0, cx0 - ox, ch); x.fillRect(cx0 + cw, cy0, ox + sx.src.width * s - cx0 - cw, ch);
+  }
+  const r = sx.result;
+  if (r && r.mask) {
+    const o = document.createElement("canvas"); o.width = r.mw || r.w; o.height = r.mh || r.h;
+    const od = o.getContext("2d").createImageData(o.width, o.height);
+    for (let i = 0; i < r.mask.length; i++) if (r.mask[i]) { od.data[i * 4] = 235; od.data[i * 4 + 1] = 40; od.data[i * 4 + 2] = 40; od.data[i * 4 + 3] = 170; }
+    o.getContext("2d").putImageData(od, 0, 0);
+    x.drawImage(o, cx0, cy0, cw, ch);
+  }
+  if (sx.crop) { x.strokeStyle = "#398dff"; x.lineWidth = 2; x.setLineDash([6, 4]); x.strokeRect(cx0, cy0, cw, ch); x.setLineDash([]); }
+}
+function sxProcess() {
+  clearTimeout(sx.timer);
+  sx.timer = setTimeout(() => {
+    if (!sx.src) return;
+    const r = traceSig(sxCropCanvas(), sigFx);
+    sx.result = r;
+    const out = $("sx_out");
+    if (r.err) { out.innerHTML = `<span class="sx-wait">${escapeHTML(r.err)}</span>`; }
+    else out.innerHTML = r.svg.replace(/ width="[\d.]+" height="[\d.]+"/, ' width="100%" height="100%"').replace("<svg ", `<svg style="color:${sx.color}" `);
+    sxDraw();
+  }, 60);
+}
+function sxSave(use) {
+  const r = sx.result;
+  if (!r || r.err) { $("sx_warn").textContent = (r && r.err) || "Choose a picture or PDF first."; return; }
+  sigImg = sxCropCanvas(); sigMetrics = r.metrics;
+  $("sig_threshold").value = sigFx.thresh; refreshLabels();
+  sigSVG = r.svg; sigBox = { w: r.w, h: r.h };
+  $("sig_controls").style.display = "";
+  addSavedSig({ name: "Imported signature", svg: r.svg, w: r.w, h: r.h, color: sx.color });
+  $("sigx").close();
+  if (!use) { toast("Signature saved — find it under Saved signatures."); return; }
+  toggles.usesig = true; syncToggles();
+  if (workMode === "doc" && doc) {
+    if (edMode !== "sign") setEdMode("sign");
+    const it = addSigItem(undefined, undefined, "signature");
+    if (it) { it.color = sx.color; render(); }
+    toast("Signature placed — drag it into position.");
+  } else { render(); toast("Signature ready to use."); }
+}
+function sxWire() {
+  if (sx.wired) return; sx.wired = true;
+  fxSliders($("sx_fx"), ["thresh", "smooth", "exact", "real", "weight"], sxProcess);
+  const cv = $("sx_src");
+  const toSrc = (e) => { const r = cv.getBoundingClientRect(), v = sx.view; return { x: Math.max(0, Math.min(sx.src.width, (e.clientX - r.left - v.ox) / v.s)), y: Math.max(0, Math.min(sx.src.height, (e.clientY - r.top - v.oy) / v.s)) }; };
+  cv.addEventListener("pointerdown", (e) => { if (!sx.src || !sx.view) return; e.preventDefault(); try { cv.setPointerCapture(e.pointerId); } catch (_) {} sx.drag = toSrc(e); });
+  cv.addEventListener("pointermove", (e) => {
+    if (!sx.drag) return; const p = toSrc(e);
+    const c = { x: Math.min(p.x, sx.drag.x), y: Math.min(p.y, sx.drag.y), w: Math.abs(p.x - sx.drag.x), h: Math.abs(p.y - sx.drag.y) };
+    if (c.w > 6 && c.h > 6) { sx.crop = c; sx.result = null; sxDraw(); }
+  });
+  const end = () => { if (sx.drag) { sx.drag = null; sxProcess(); } };
+  cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+  $("sx_reset").onclick = () => { sx.crop = null; sxProcess(); };
+  $("sx_prev").onclick = async () => { if (sx.pdf && sx.page > 1) { await sxPage(sx.page - 1); sxProcess(); } };
+  $("sx_next").onclick = async () => { if (sx.pdf && sx.page < sx.pages) { await sxPage(sx.page + 1); sxProcess(); } };
+  $("sx_defaults").onclick = () => fxReset($("sx_fx"), sxProcess);
+  $("sx_file").onclick = () => $("sig_file").click();
+  const inks = $("sx_ink"); inks.innerHTML = "";
+  DP_INKS.forEach((col, i) => { const b = document.createElement("div"); b.className = "sw" + (i === 0 ? " sel" : ""); b.style.background = col; b.title = col; b.onclick = () => { sx.color = col; inks.querySelectorAll(".sw").forEach((q) => q.classList.toggle("sel", q === b)); sxProcess(); }; inks.appendChild(b); });
+  $("sx_x").onclick = $("sx_cancel").onclick = () => $("sigx").close();
+  $("sx_save").onclick = () => sxSave(false);
+  $("sx_place").onclick = () => sxSave(true);
+  window.addEventListener("resize", () => { if ($("sigx").open) sxDraw(); });
 }
 
 // ---- boot ----------------------------------------------------------------
