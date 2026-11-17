@@ -774,6 +774,10 @@ jumps over the lazy dog</textarea>
         <div class="prime-chip" id="prime_chip"><span id="prime_name"></span><button id="prime_off" title="Stop using your handwriting">✕</button></div>
         <div class="note">Saved styles keep every setting and stay for 60 days after you last use them.</div>
         <div id="saved_hands" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn" id="styles_export" title="Save your handwriting styles (with your own handwriting samples) to a file">⤓ Export styles</button>
+          <button class="btn" id="styles_import" title="Load styles or signatures from an exported file">⤒ Import file</button>
+        </div>
       </div>
 
       <div class="group">
@@ -793,6 +797,12 @@ jumps over the lazy dog</textarea>
           <button class="btn" id="sig_clear" style="margin-top:8px">Remove imported signature</button>
         </div>
         <div id="sig_saved" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px"></div>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn" id="sigs_export" title="Save all your signatures to a file you can load on another computer or browser">⤓ Export signatures</button>
+          <button class="btn" id="sigs_import" title="Load signatures or styles from an exported file">⤒ Import file</button>
+        </div>
+        <div class="note">Each saved signature also has ⤓ to download it as a picture (PNG) or SVG.</div>
+        <input class="file" id="backup_file" type="file" accept=".json,application/json" />
       </div>
 
       <div class="group" data-show="doc">
@@ -945,7 +955,7 @@ jumps over the lazy dog</textarea>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=27"></script>
+<script type="module" src="./app.js?v=28"></script>
 <script type="module" src="./shell.js?v=9"></script>
 </body>
 </html>

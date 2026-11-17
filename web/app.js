@@ -2542,8 +2542,63 @@ function renderSavedSigs() {
     del.textContent = "×"; del.title = "Delete";
     del.style.cssText = "position:absolute;top:-1px;right:1px;color:#c62f24;font-weight:700;cursor:pointer;background:rgba(255,255,255,.85);line-height:1.1;padding:0 4px;border-radius:0 0 0 6px";
     del.onclick = (e) => { e.stopPropagation(); storeSavedSigs(loadSavedSigs().filter((x) => x.id !== s.id)); renderSavedSigs(); };
-    card.appendChild(del); host.appendChild(card);
+    const dl = document.createElement("div");
+    dl.textContent = "⤓"; dl.title = "Download this signature (PNG; Shift+click for SVG)";
+    dl.style.cssText = "position:absolute;bottom:-1px;right:1px;color:#2b6cff;font-weight:700;cursor:pointer;background:rgba(255,255,255,.85);line-height:1.1;padding:0 4px;border-radius:6px 0 0 0";
+    dl.onclick = (e) => { e.stopPropagation(); downloadSig(s, e.shiftKey ? "svg" : "png"); };
+    card.appendChild(del); card.appendChild(dl); host.appendChild(card);
   });
+}
+// ---- export / import of saved signatures and handwriting styles ----------------------
+// One JSON file format for both, so a backup made on one computer loads on another.
+const BACKUP_APP = "ghost-calligrapher";
+function sigFileName(s, ext) { return ((s.name || "signature").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-") || "signature") + "." + ext; }
+async function downloadSig(s, kind) {
+  const color = s.color || "#111111";
+  const svg = s.svg.replace("<svg ", `<svg style="color:${color}" `);
+  if (kind === "svg") { download(sigFileName(s, "svg"), new Blob([svg.replace(/currentColor/g, color)], { type: "image/svg+xml" })); toast("Saved " + sigFileName(s, "svg") + "."); return; }
+  const img = await svgToImage(svg), k = Math.max(1, 1200 / Math.max(1, s.w || img.width));
+  const c = document.createElement("canvas"); c.width = Math.round((s.w || img.width) * k); c.height = Math.round((s.h || img.height) * k);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);   // transparent background
+  c.toBlob((b) => { download(sigFileName(s, "png"), b); toast("Saved " + sigFileName(s, "png") + " (transparent background)."); }, "image/png");
+}
+function exportBackup(kind) {
+  const data = { app: BACKUP_APP, version: 1, exportedAt: new Date().toISOString() };
+  if (kind !== "styles") data.signatures = loadSavedSigs();
+  if (kind !== "signatures") data.styles = loadSavedHands();
+  const n = (data.signatures || []).length + (data.styles || []).length;
+  if (!n) { toast(kind === "styles" ? "No saved styles to export yet." : "No saved signatures to export yet."); return; }
+  const name = "ghost-calligrapher-" + kind + "-" + new Date().toISOString().slice(0, 10) + ".json";
+  download(name, new Blob([JSON.stringify(data, null, 1)], { type: "application/json" }));
+  toast(`Saved ${name} — ${kind === "styles" ? data.styles.length + " style" + (data.styles.length === 1 ? "" : "s") : data.signatures.length + " signature" + (data.signatures.length === 1 ? "" : "s")}.`);
+}
+// Imported items are merged: same id or same drawing are skipped, and everything gets a fresh 60 days.
+async function importBackup(file) {
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (_) { toast("That file isn't a Ghost Calligrapher export."); return; }
+  if (!data || data.app !== BACKUP_APP) { toast("That file isn't a Ghost Calligrapher export."); return; }
+  const now = Date.now(), okSvg = (v) => typeof v === "string" && /^\s*<svg[\s>]/i.test(v) && !/<script|\son\w+\s*=|javascript:/i.test(v);
+  let ns = 0, nh = 0;
+  if (Array.isArray(data.signatures)) {
+    const list = loadSavedSigs();
+    for (const s of data.signatures) {
+      if (!s || !okSvg(s.svg) || list.some((x) => x.id === s.id || x.svg === s.svg)) continue;
+      list.unshift({ id: String(s.id || now + "-" + ns), name: String(s.name || "Signature").slice(0, 60), svg: s.svg, w: +s.w || 400, h: +s.h || 120, text: s.text || "", seed: s.seed, drawn: !!s.drawn, color: typeof s.color === "string" ? s.color : undefined, savedAt: now, usedAt: now });
+      ns++;
+    }
+    storeSavedSigs(list); renderSavedSigs();
+  }
+  if (Array.isArray(data.styles)) {
+    const list = loadSavedHands();
+    for (const h of data.styles) {
+      if (!h || typeof h.state !== "object" || list.some((x) => x.id === h.id)) continue;
+      const prime = h.prime && typeof h.prime.text === "string" && Array.isArray(h.prime.offsets) ? { text: h.prime.text, offsets: h.prime.offsets } : undefined;
+      list.unshift({ id: String(h.id || now + "-h" + nh), name: String(h.name || "Style").slice(0, 60), state: h.state, prime, savedAt: now, usedAt: now });
+      nh++;
+    }
+    storeSavedHands(list); renderSavedHands();
+  }
+  toast(ns || nh ? `Imported ${[ns ? ns + " signature" + (ns > 1 ? "s" : "") : "", nh ? nh + " style" + (nh > 1 ? "s" : "") : ""].filter(Boolean).join(" and ")}.` : "Nothing new in that file — everything in it is already saved here.");
 }
 function addSavedSig(entry) {
   const list = loadSavedSigs();
@@ -3406,6 +3461,10 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("reroll").addEventListener("click", newHand);
   $("last_hand").addEventListener("click", lastHand);
   $("save_hand").addEventListener("click", saveHand);
+  $("styles_export").onclick = () => exportBackup("styles");
+  $("sigs_export").onclick = () => exportBackup("signatures");
+  $("styles_import").onclick = $("sigs_import").onclick = () => $("backup_file").click();
+  $("backup_file").onchange = () => { const f = $("backup_file").files[0]; if (f) importBackup(f); $("backup_file").value = ""; };
   renderSavedHands();
   // draw pad, your handwriting, watermark removal
   $("sig_draw").onclick = () => openDrawPad("sig");
