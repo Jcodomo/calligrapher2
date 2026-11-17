@@ -269,6 +269,16 @@
   .cpop .lbl{grid-column:1/-1;font-size:12px;color:var(--muted)}
 
   /* left rail: page thumbnails + recent files + Add PDF */
+  #sigmgr{width:min(760px,94vw)}
+  .mg-cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media (max-width:640px){.mg-cols{grid-template-columns:1fr}}
+  .mg-h{font-weight:600;font-size:13px;margin:4px 0;display:flex;gap:8px;align-items:center;justify-content:space-between}
+  .mg-list{max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px}
+  .mg-row{display:flex;gap:8px;align-items:center;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:13px}.mg-row:hover{background:var(--tint)}
+  .mg-pv{width:70px;height:34px;flex:none;background:#fff;border:1px solid var(--line);border-radius:5px;display:flex;align-items:center;justify-content:center;color:#333;overflow:hidden}
+  .mg-nm{flex:1;min-width:0}.mg-nm small{display:block;color:var(--muted);font-size:11.5px}
+  .mg-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}.mg-btns .btn{width:auto}
+  .mg-drop{margin-top:12px;border:1.5px dashed var(--line);border-radius:8px;padding:10px;font-size:12.5px;color:var(--muted)}
+  .mg-over{outline:2px dashed var(--accent);outline-offset:2px;background:var(--tint)}
   .formcol{display:none;flex-direction:column;width:330px;flex:none;background:var(--surface);border-left:1px solid var(--line);padding:12px 14px;overflow:auto;min-height:0}
   body.formcol-open[data-work=doc] .formcol{display:flex}
   .fc-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}.fc-x{border:0;background:none;color:var(--muted);cursor:pointer;font-size:15px}
@@ -377,6 +387,14 @@
   body.toolpanel #pdfedit_panel{display:block}
   body.toolpanel #pe_open,body.toolpanel #pe_recent,body.toolpanel #pe_toolgrid,body.toolpanel #pe_toolhead,body.toolpanel #pdfedit_panel>.panel-title,body.toolpanel #pdfedit_panel>.sub,body.toolpanel #pe_toolswrap>.actions{display:none!important}
   body.toolpanel #pe_toolswrap{margin-top:0;padding-top:0;border-top:0}
+  .pe-viewbar{width:100%;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center;position:sticky;top:-26px;z-index:3;background:var(--canvas);padding:6px 0}
+  .pe-seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}.pe-seg button{border:0;background:var(--surface);color:var(--text2);padding:6px 12px;cursor:pointer;font-size:13px}.pe-seg button.on{background:var(--accent);color:#fff}
+  .pe-nav{display:flex;gap:6px;align-items:center;font-size:13px}.pe-nav button{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:6px;width:30px;height:28px;cursor:pointer}.pe-nav select{height:28px}
+  .pe-count{font-size:12.5px;color:var(--muted)}
+  .pe-full{position:relative;background:#fff;border:1px solid var(--line);border-radius:4px;box-shadow:var(--page-shadow)}
+  .pe-full.sel{outline:2px solid var(--sel);outline-offset:1px}.pe-full img{display:block;max-width:100%;height:auto}
+  .pe-dup{position:absolute;bottom:40px;left:6px;right:6px;background:#e5484d;color:#fff;font-size:11px;padding:2px 6px;border-radius:6px;text-align:center}
+  .pe-pslist{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;margin-top:8px}.pe-psrow{display:flex;gap:6px;align-items:center;font-size:12px}.pe-psrow input{width:64px}
   .pe-thumb{position:relative;width:160px;background:#fff;border:1px solid var(--line);border-radius:4px;box-shadow:var(--page-shadow);cursor:grab}
   .pe-thumb.sel{outline:2px solid var(--sel);outline-offset:1px}
   .pe-thumb.drop{outline:2px dashed var(--accent)}
@@ -675,7 +693,7 @@
       <div id="pdfedit_panel">
         <h1 class="panel-title">PDF tools</h1>
         <div class="sub">Drag pages to reorder; rotate, duplicate, delete or tick them, then pick a tool.</div>
-        <button class="btn primary" id="pe_open">Add PDF(s)</button>
+        <button class="btn primary" id="pe_open">Add PDFs or pictures</button>
         <div id="pe_recent" class="recents"></div>
         <div class="group" id="pe_toolswrap">
           <div class="actions" style="margin:0 0 12px">
@@ -796,8 +814,8 @@ jumps over the lazy dog</textarea>
         <div class="note">Saved styles keep every setting and stay for 60 days after you last use them.</div>
         <div id="saved_hands" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
         <div class="actions" style="margin-top:8px">
-          <button class="btn" id="styles_export" title="Save your handwriting styles (with your own handwriting samples) to a file">⤓ Export styles</button>
-          <button class="btn" id="styles_import" title="Load styles or signatures from an exported file">⤒ Import file</button>
+          <button class="btn" id="styles_export" title="Choose styles and signatures to save to a file">⤓ Export…</button>
+          <button class="btn" id="styles_import" title="Load styles or signatures from exported files (or drop files here)">⤒ Import…</button>
         </div>
       </div>
 
@@ -819,10 +837,10 @@ jumps over the lazy dog</textarea>
         </div>
         <div id="sig_saved" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px"></div>
         <div class="actions" style="margin-top:8px">
-          <button class="btn" id="sigs_export" title="Save all your signatures to a file you can load on another computer or browser">⤓ Export signatures</button>
-          <button class="btn" id="sigs_import" title="Load signatures or styles from an exported file">⤒ Import file</button>
+          <button class="btn" id="sigs_export" title="Choose signatures and styles to save to a file, or as pictures">⤓ Export…</button>
+          <button class="btn" id="sigs_import" title="Load signatures or styles from exported files, SVGs, or a picture of a signature (or drop files here)">⤒ Import…</button>
         </div>
-        <div class="note">Each saved signature also has ⤓ to download it as a picture (PNG) or SVG.</div>
+        <div class="note">Each saved signature has ⤓ to download it as a picture (PNG, Shift+click for SVG) — white background unless you pick None. Drop exported files here to import them.</div>
         <input class="file" id="backup_file" type="file" accept=".json,application/json" />
       </div>
 
@@ -878,7 +896,7 @@ jumps over the lazy dog</textarea>
         <div class="row"><label>Line</label><input id="line_spacing" type="range" min="70" max="200" value="108"><span class="val" id="line_spacing_v"></span></div>
         <div class="row"><label>Align</label><div class="seg" id="align" style="flex:1">
           <button data-a="0" class="sel">Left</button><button data-a="0.5">Center</button><button data-a="1">Right</button></div></div>
-        <div class="switch"><div class="t">Transparent PNG background</div><div class="sw-toggle" data-k="transparent"><i></i></div></div>
+
       </details>
 
       <div class="group">
@@ -897,6 +915,7 @@ jumps over the lazy dog</textarea>
           <button class="btn" id="png">PNG image</button>
           <button class="btn" id="svg" data-show="write">SVG</button>
         </div>
+        <div class="row" data-show="write" style="margin-top:8px"><label>Background</label><div class="seg" style="flex:1"><button data-picbg="white" title="White behind the writing (default)">White</button><button data-picbg="none" title="Transparent PNG / SVG">None</button><button data-picbg="paper" title="The paper colour you picked">Paper</button></div></div>
         <button class="btn" id="share" style="margin-top:8px" data-show="write">Copy shareable link</button>
         <div class="err" id="err"></div>
       </div>
@@ -934,6 +953,19 @@ jumps over the lazy dog</textarea>
   </div>
 </dialog>
 
+<dialog class="dpad" id="sigmgr">
+  <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">Signatures &amp; handwriting styles</h3><button class="btn" id="mg_close" style="width:auto">Close</button></div>
+  <div class="note" style="margin:4px 0 10px">Tick what to export. One .json file carries both, with your own-handwriting samples; it loads on any computer or browser.</div>
+  <div class="mg-cols">
+    <div><div class="mg-h">Signatures <button class="linkbtn" data-mgall="mg_sigs" type="button">all / none</button></div><div class="mg-list" id="mg_sigs"></div></div>
+    <div><div class="mg-h">Handwriting styles <button class="linkbtn" data-mgall="mg_styles" type="button">all / none</button></div><div class="mg-list" id="mg_styles"></div></div>
+  </div>
+  <div class="row" style="margin-top:10px"><label>Picture background</label><div class="seg" style="flex:1"><button data-picbg="white">White</button><button data-picbg="none">None</button></div></div>
+  <div class="mg-btns"><button class="btn" id="mg_pics" type="button">Ticked signatures as pictures (.png / .zip)</button><button class="btn primary" id="mg_export" type="button">⤓ Export ticked (.json)</button></div>
+  <div class="mg-drop" id="mg_drop"><b>Import</b> — drop files here or <button class="linkbtn" id="mg_pick" type="button">choose files</button>. Accepts Ghost Calligrapher exports (old and new), several at once, SVG signatures, and a picture or PDF of a signature (opens the tracer).<input class="file" id="mg_file" type="file" multiple accept=".json,application/json,.svg,image/*,application/pdf"></div>
+  <div id="mg_in" style="display:none"></div>
+  <div id="mg_err" style="color:#e5484d;font-size:12.5px;margin-top:6px"></div>
+</dialog>
 <dialog class="dpad" id="fillweb">
   <h3 style="margin:0 0 6px">Fill-in &amp; sign page</h3>
   <div class="note" style="margin:0 0 10px">Turns this form into one web page (an .html file). Anyone who opens it can fill in the fields, sign, and download the completed, signed PDF to send back. Email the file, or put it online (GitHub Pages, a shared drive, your website) and send the link. Nothing is uploaded by Ghost Calligrapher.</div>
@@ -1002,7 +1034,7 @@ jumps over the lazy dog</textarea>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=31"></script>
-<script type="module" src="./shell.js?v=10"></script>
+<script type="module" src="./app.js?v=48"></script>
+<script type="module" src="./shell.js?v=11"></script>
 </body>
 </html>

@@ -142,8 +142,10 @@ const TOOLS = {
   pdf2img:   { name: "PDF to JPG / PNG", desc: "Save every page of a PDF as a picture.", c: C.conv, i: "image", mode: "pdf", tool: "img", accept: PDF_IN },
   fillweb:   { name: "Fill & Sign Link", desc: "Turn a form into a web page others can fill in and sign online.", c: C.write, i: "sign", mode: "doc", tool: "fillweb", accept: DOC_IN },
   pdf2word:  { name: "PDF to Word", desc: "Turn a PDF into an editable Word document (.docx); scans are read with OCR.", c: C.conv, i: "DOC", mode: "pdf", tool: "pdfword", accept: PDF_IN },
-  enhance:   { name: "Clean Up & Upscale", desc: "Make blurry scans, photos and small pictures into a sharp, high-resolution PDF with AI.", c: C.conv, i: "image", mode: "pdf", tool: "enhance", accept: "application/pdf,.pdf,image/*" },
-  img2pdf:   { name: "JPG / PNG to PDF", desc: "Turn one or more pictures into a single PDF.", c: C.conv, i: "image", mode: "convert", multiple: true, accept: "image/*" },
+  enhance:   { name: "Clean Up & Upscale", desc: "Make blurry scans, photos and small pictures into a sharp, high-resolution PDF with AI.", c: C.conv, i: "image", mode: "pdf", tool: "enhance", multiple: true, images: true, accept: "application/pdf,.pdf,image/*" },
+  img2pdf:   { name: "JPG / PNG to PDF", desc: "Drop pictures in, put them in order, optionally upscale them, and make one PDF.", c: C.conv, i: "image", mode: "pdf", tool: "imgpdf", multiple: true, images: true, accept: "image/*,application/pdf" },
+  dupes:     { name: "Remove Duplicate Pages", desc: "Find pages that appear twice (re-scans, repeated pictures) and remove them.", c: C.org, i: "merge", mode: "pdf", tool: "dupes", multiple: true, images: true, accept: "application/pdf,.pdf,image/*" },
+  pagesort:  { name: "Sort Pages by Number", desc: "Read each page's printed page number (OCR for scans) and put the pages in order.", c: C.org, i: "OCR", mode: "pdf", tool: "pagesort", multiple: true, images: true, accept: "application/pdf,.pdf,image/*" },
   txt2pdf:   { name: "Text to PDF", desc: "Turn a .txt, .md or .csv file into a tidy PDF.", c: C.conv, i: "TXT", mode: "convert", accept: ".txt,.md,.csv,.log,text/plain" },
   ocr:       { name: "PDF OCR", desc: "Make a scanned PDF searchable, right in your browser.", c: C.opt, i: "OCR", mode: "pdf", tool: "ocr", accept: PDF_IN },
   unlock:    { name: "Unlock PDF", desc: "Remove a password you know from a PDF.", c: C.prot, i: "lock", mode: "pdf", tool: "unlock", nofile: true },
@@ -159,7 +161,7 @@ const TOOLS = {
 const MENU = [
   ["Edit", ["edit", "annotate", "edittext", "addtext", "addimage", "draw", "highlight", "whiteout", "notes", "unwatermark", "pdffonts"]],
   ["Fill & Sign", ["sign", "fillsign", "adddate", "forms", "fillform", "fillweb"]],
-  ["Organize", ["merge", "split", "rotate", "delete", "extract", "organize"]],
+  ["Organize", ["merge", "split", "rotate", "delete", "extract", "organize", "dupes", "pagesort"]],
   ["Optimize", ["compress", "number", "crop", "watermark"]],
   ["Convert", ["pdf2img", "img2pdf", "pdf2word", "enhance", "txt2pdf", "ocr"]],
   ["Protect", ["unlock", "redact", "flatten"]],
@@ -335,7 +337,7 @@ async function appReady() {
   await new Promise((res) => window.addEventListener("cal2:ready", res, { once: true }));
 }
 // Tools that work on the open document (everything except the pure converters / unlock).
-const ON_DOC = (id) => TOOLS[id] && id !== "img2pdf" && id !== "txt2pdf" && id !== "unlock" && !(TOOLS[id].mode === "write" && !TOOLS[id].setup && id !== "write");
+const ON_DOC = (id) => TOOLS[id] && !["img2pdf", "dupes", "pagesort"].includes(id) && id !== "txt2pdf" && id !== "unlock" && !(TOOLS[id].mode === "write" && !TOOLS[id].setup && id !== "write");
 async function intakeAny(files) {
   files = [...files];
   const pdfs = files.filter(isPdf), imgs = files.filter(isImage);
@@ -356,16 +358,10 @@ async function intakeTool(id, files) {
       await window.__cal2OpenDocFile(docs[0]);
       if (docs.length > 1) await window.__cal2AddFilesToDoc(docs.slice(1));
       go("#/edit/" + id);
-    } else if (id === "enhance" && !files.some(isPdf)) {
-      const imgs = files.filter(isImage); if (!imgs.length) { toast("Choose a PDF or pictures."); return; }
-      window.__cal2ResetPdf(); go("#/pdf/enhance"); setTimeout(() => window.__cal2EnhanceAdd(imgs), 200);
-    } else if (id === "img2pdf") {
-      const imgs = files.filter(isImage); if (!imgs.length) { toast("Choose JPG or PNG pictures."); return; }
-      toast("Building your PDF…"); await window.__cal2ImagesToPdf(imgs); toast("Saved images.pdf — check your downloads.");
     } else if (id === "txt2pdf") {
       const f = files.find(isText) || files[0]; toast("Building your PDF…"); await window.__cal2TxtToPdf(f); toast("PDF saved — check your downloads.");
     } else {
-      const pdfs = files.filter(isPdf); if (!pdfs.length) { toast("Choose a PDF."); return; }
+      const pdfs = files.filter((x) => isPdf(x) || (t.images && isImage(x))); if (!pdfs.length) { toast(t.images ? "Choose PDFs or pictures." : "Choose a PDF."); return; }
       window.__cal2ResetPdf();
       await window.__cal2AddPdfFiles(t.multiple ? pdfs : pdfs.slice(0, 1));
       go("#/pdf" + (t.tool ? "/" + t.tool : ""));
@@ -479,7 +475,7 @@ stage.addEventListener("drop", async (e) => {
   e.preventDefault();
   const files = [...(e.dataTransfer.files || [])]; if (!files.length) return;
   const mode = document.body.dataset.work;
-  if (mode === "pdf") { const pdfs = files.filter(isPdf); if (pdfs.length) window.__cal2AddPdfFiles(pdfs); return; }
+  if (mode === "pdf") { const add = files.filter((x) => isPdf(x) || isImage(x)); if (add.length) window.__cal2AddPdfFiles(add); return; }
   if (mode === "doc") {
     // a picture dropped on a page goes on that page; PDFs are added to the document
     if (files.length === 1 && isImage(files[0]) && e.target.closest && e.target.closest(".pg") && window.__cal2InsertImageFile) { window.__cal2InsertImageFile(files[0]); return; }

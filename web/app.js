@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=12";
+import { initPdfEditor } from "./pdfedit.js?v=28";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
@@ -2207,7 +2207,8 @@ async function composeCanvas() {
   const W = Math.round(hwW * res), H = Math.round(hwH * res);
   const c = document.createElement("canvas"); c.width = W; c.height = H;
   const ctx = c.getContext("2d");
-  if (!toggles.transparent) { ctx.fillStyle = paper; ctx.fillRect(0, 0, W, H); }
+  const bg = picBg();   // white by default; "paper" keeps the paper colour; "none" is transparent
+  if (bg !== "none") { ctx.fillStyle = bg === "paper" ? paper : "#ffffff"; ctx.fillRect(0, 0, W, H); }
   ctx.drawImage(await svgToImage(rawSVG), 0, 0, W, H);
   return finishCanvas(c);
 }
@@ -2250,7 +2251,11 @@ async function exportPDF() {
     pdf.save("calligraphy.pdf"); toast("Saved PDF.");
   } catch (e) { errEl.textContent = "PDF export failed: " + (e.message || e); }
 }
-function exportSVG() { download("calligraphy.svg", new Blob([mode === "signature" || +$("speed").value ? animateSVG(rawSVG) : rawSVG], { type: "image/svg+xml" })); toast("Saved SVG."); }
+function exportSVG() {
+  let svg = mode === "signature" || +$("speed").value ? animateSVG(rawSVG) : rawSVG;
+  if (picBg() !== "none") svg = svg.replace(/(<svg[^>]*>)/, `$1<rect width="100%" height="100%" fill="${picBg() === "paper" ? paper : "#ffffff"}"/>`);
+  download("calligraphy.svg", new Blob([svg], { type: "image/svg+xml" })); toast("Saved SVG.");
+}
 
 // The document as an editable PDF: original pages stay vector (selectable text), your
 // objects are laid over them, form-builder fields become real fields and notes real
@@ -2525,7 +2530,7 @@ function loadSavedSigs() {
   const f = keepFresh(a); if (f.length !== a.length) storeSavedSigs(f);
   return f;
 }
-function storeSavedSigs(a) { lsSet(SIG_KEY, a.slice(0, 20)); }
+function storeSavedSigs(a) { lsSet(SIG_KEY, a.slice(0, 40)); }
 function cleanSigSVG(svg) { return svg.replace(/\s*style="color:[^"]*"/, ""); }
 function touchSig(id) { const l = loadSavedSigs(); const s = l.find((x) => x.id === id); if (s) { s.usedAt = Date.now(); storeSavedSigs(l); } }
 function renderSavedSigs() {
@@ -2558,14 +2563,129 @@ function renderSavedSigs() {
 // One JSON file format for both, so a backup made on one computer loads on another.
 const BACKUP_APP = "ghost-calligrapher";
 function sigFileName(s, ext) { return ((s.name || "signature").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-") || "signature") + "." + ext; }
+// Picture background for signature and handwriting pictures: white (the default) or none (transparent).
+const PICBG_KEY = "cal2_pic_bg";
+function picBg() { const v = lsGet(PICBG_KEY, "white"); return v === "none" || v === "paper" ? v : "white"; }
+function setPicBg(v) { lsSet(PICBG_KEY, v); toggles.transparent = v === "none"; syncPicBgUI(); }
+function syncPicBgUI() { document.querySelectorAll("[data-picbg]").forEach((b) => b.classList.toggle("sel", b.dataset.picbg === picBg())); }
+async function sigPng(s, bg = picBg(), width = 1200) {
+  const color = s.color || "#111111", svg = s.svg.replace("<svg ", `<svg style="color:${color}" `);
+  const img = await svgToImage(svg), k = Math.max(1, width / Math.max(1, s.w || img.width));
+  const c = document.createElement("canvas"); c.width = Math.round((s.w || img.width) * k); c.height = Math.round((s.h || img.height) * k);
+  const g = c.getContext("2d"); if (bg !== "none") { g.fillStyle = "#ffffff"; g.fillRect(0, 0, c.width, c.height); }
+  g.drawImage(img, 0, 0, c.width, c.height);
+  return new Promise((res) => c.toBlob(res, "image/png"));
+}
 async function downloadSig(s, kind) {
   const color = s.color || "#111111";
-  const svg = s.svg.replace("<svg ", `<svg style="color:${color}" `);
-  if (kind === "svg") { download(sigFileName(s, "svg"), new Blob([svg.replace(/currentColor/g, color)], { type: "image/svg+xml" })); toast("Saved " + sigFileName(s, "svg") + "."); return; }
-  const img = await svgToImage(svg), k = Math.max(1, 1200 / Math.max(1, s.w || img.width));
-  const c = document.createElement("canvas"); c.width = Math.round((s.w || img.width) * k); c.height = Math.round((s.h || img.height) * k);
-  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);   // transparent background
-  c.toBlob((b) => { download(sigFileName(s, "png"), b); toast("Saved " + sigFileName(s, "png") + " (transparent background)."); }, "image/png");
+  if (kind === "svg") {
+    let svg = s.svg.replace("<svg ", `<svg style="color:${color}" `).replace(/currentColor/g, color);
+    if (picBg() !== "none") svg = svg.replace(/(<svg[^>]*>)/, '$1<rect width="100%" height="100%" fill="#ffffff"/>');
+    download(sigFileName(s, "svg"), new Blob([svg], { type: "image/svg+xml" })); toast("Saved " + sigFileName(s, "svg") + "."); return;
+  }
+  download(sigFileName(s, "png"), await sigPng(s)); toast("Saved " + sigFileName(s, "png") + (picBg() === "none" ? " (no background)." : " (white background)."));
+}
+
+// ---- signatures & styles manager: pick what to export, preview what an import will add ----------
+const mgr = { incoming: null };
+function mgrRow(kind, x, checked) {
+  const row = mk("label", { className: "mg-row" }), cb = mk("input", { type: "checkbox", checked: !!checked }); cb.dataset.id = x.id; cb.dataset.kind = kind;
+  const pv = mk("span", { className: "mg-pv" });
+  if (kind.endsWith("sig")) pv.innerHTML = x.svg.replace("<svg ", `<svg style="width:100%;height:100%;color:${x.color || "#111"}" preserveAspectRatio="xMidYMid meet" `);
+  else pv.textContent = x.prime ? "✍" : "Aa";
+  const nm = mk("span", { className: "mg-nm" }, escapeHTML(x.name || (kind === "sig" ? "Signature" : "Style")) + (x._note ? `<small>${escapeHTML(x._note)}</small>` : "") + (x.prime ? "<small>your own handwriting</small>" : ""));
+  row.append(cb, pv, nm); return row;
+}
+function renderMgr() {
+  const sigs = loadSavedSigs(), styles = loadSavedHands();
+  const sl = $("mg_sigs"), hl = $("mg_styles"); sl.innerHTML = ""; hl.innerHTML = "";
+  sigs.forEach((s) => sl.appendChild(mgrRow("sig", s, true))); if (!sigs.length) sl.innerHTML = '<div class="note" style="margin:0">No saved signatures.</div>';
+  styles.forEach((h) => hl.appendChild(mgrRow("style", h, true))); if (!styles.length) hl.innerHTML = '<div class="note" style="margin:0">No saved styles.</div>';
+  renderMgrIncoming();
+}
+function openMgr(tab) {
+  renderMgr(); syncPicBgUI(); $("mg_err").textContent = "";
+  $("sigmgr").showModal();
+  if (tab === "import") $("mg_file").click();
+}
+function mgrChecked(kind) { return [...document.querySelectorAll(`#sigmgr .mg-list input[data-kind="${kind}"]:checked`)].map((c) => c.dataset.id); }
+function exportSelected() {
+  const si = new Set(mgrChecked("sig")), hi = new Set(mgrChecked("style"));
+  const data = { app: BACKUP_APP, version: 1, exportedAt: new Date().toISOString(), signatures: loadSavedSigs().filter((s) => si.has(s.id)), styles: loadSavedHands().filter((h) => hi.has(h.id)) };
+  if (!data.signatures.length && !data.styles.length) { $("mg_err").textContent = "Tick at least one signature or style."; return; }
+  const name = "ghost-calligrapher-" + new Date().toISOString().slice(0, 10) + ".json";
+  download(name, new Blob([JSON.stringify(data, null, 1)], { type: "application/json" }));
+  toast(`Saved ${name} — ${data.signatures.length} signature${data.signatures.length === 1 ? "" : "s"}, ${data.styles.length} style${data.styles.length === 1 ? "" : "s"}.`);
+}
+async function exportSelectedPictures() {
+  const si = new Set(mgrChecked("sig")), list = loadSavedSigs().filter((s) => si.has(s.id));
+  if (!list.length) { $("mg_err").textContent = "Tick at least one signature."; return; }
+  if (list.length === 1) { downloadSig(list[0], "png"); return; }
+  if (!window.JSZip) await new Promise((res, rej) => { const sc = document.createElement("script"); sc.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); });
+  const zip = new window.JSZip(), used = {};
+  for (const s of list) { let n = sigFileName(s, "png"); while (used[n]) n = n.replace(/(\.png)$/, "-2$1"); used[n] = 1; zip.file(n, await sigPng(s)); }
+  download("signatures.zip", await zip.generateAsync({ type: "blob" })); toast(`Saved signatures.zip (${list.length} pictures, ${picBg() === "none" ? "no background" : "white background"}).`);
+}
+// Reads any mix of files: Ghost Calligrapher exports (this and older versions), plain lists, SVG signatures,
+// and pictures of a signature (those open in the signature tracer).
+const okSigSvg = (v) => typeof v === "string" && /^\s*(<\?xml[^>]*>\s*)?<svg[\s>]/i.test(v) && !/<script|<foreignObject|\son\w+\s*=|javascript:|<iframe/i.test(v);
+function normSig(s) { if (!s || !okSigSvg(s.svg)) return null; const svg = s.svg.replace(/^\s*<\?xml[^>]*>\s*/, ""); const w = +s.w || +(svg.match(/width="([\d.]+)/) || [])[1] || 400, h = +s.h || +(svg.match(/height="([\d.]+)/) || [])[1] || 120; return { id: String(s.id || Date.now() + "-" + Math.random().toString(36).slice(2, 7)), name: String(s.name || "Signature").slice(0, 60), svg, w, h, text: s.text || "", seed: s.seed, drawn: !!s.drawn, color: typeof s.color === "string" ? s.color : undefined }; }
+function normStyle(h) { if (!h || typeof h.state !== "object" || !h.state) return null; const prime = h.prime && typeof h.prime.text === "string" && Array.isArray(h.prime.offsets) ? { text: h.prime.text, offsets: h.prime.offsets } : undefined; return { id: String(h.id || Date.now() + "-h" + Math.random().toString(36).slice(2, 7)), name: String(h.name || "Style").slice(0, 60), state: h.state, prime }; }
+async function readImportFiles(files) {
+  const inc = { sigs: [], styles: [], skipped: [] }; let picture = null;
+  for (const f of files) {
+    try {
+      if (/^image\/(png|jpe?g|webp|gif|bmp)$/i.test(f.type) || /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name) || /\.pdf$/i.test(f.name)) { picture = picture || f; continue; }
+      const text = await f.text();
+      if (/\.svg$/i.test(f.name) || /^\s*(<\?xml[^>]*>\s*)?<svg/i.test(text)) { const s = normSig({ svg: text, name: f.name.replace(/\.svg$/i, "") }); if (s) inc.sigs.push(s); else inc.skipped.push(f.name + " (not a usable SVG)"); continue; }
+      let d = JSON.parse(text);
+      if (typeof d.cal2_sigs === "string" || typeof d.cal2_styles === "string") d = { signatures: JSON.parse(d.cal2_sigs || "[]"), styles: JSON.parse(d.cal2_styles || "[]") };   // a raw browser-storage copy
+      if (Array.isArray(d)) d = { signatures: d.filter((x) => x && x.svg), styles: d.filter((x) => x && x.state) };
+      const s0 = inc.sigs.length + inc.styles.length;
+      (d.signatures || []).forEach((x) => { const s = normSig(x); if (s) inc.sigs.push(s); });
+      (d.styles || d.hands || []).forEach((x) => { const h = normStyle(x); if (h) inc.styles.push(h); });
+      if (inc.sigs.length + inc.styles.length === s0) inc.skipped.push(f.name + " (no signatures or styles in it)");
+    } catch (_) { inc.skipped.push(f.name + " (couldn't be read)"); }
+  }
+  // mark what's already here, and name clashes
+  const haveS = loadSavedSigs(), haveH = loadSavedHands();
+  inc.sigs.forEach((s) => { const same = haveS.find((x) => x.id === s.id || x.svg === s.svg); if (same) { s._dup = true; s._note = "already saved"; } else if (haveS.some((x) => x.name === s.name)) s._note = "a signature with this name exists — both are kept"; });
+  inc.styles.forEach((h) => { const same = haveH.find((x) => x.id === h.id || JSON.stringify(x.state) === JSON.stringify(h.state)); if (same) { h._dup = true; h._note = "already saved"; } else if (haveH.some((x) => x.name === h.name)) h._note = "a style with this name exists — both are kept"; });
+  return { inc, picture };
+}
+async function mgrImportFiles(files) {
+  $("mg_err").textContent = "";
+  const { inc, picture } = await readImportFiles([...files]);
+  if (picture && !inc.sigs.length && !inc.styles.length) { $("sigmgr").close(); openSigStudio(picture); toast("Trace the signature from your picture, then Save."); return; }
+  mgr.incoming = inc; renderMgrIncoming();
+  if (picture) toast("Pictures are imported one at a time through the signature tracer — drop just the picture to trace it.");
+}
+function renderMgrIncoming() {
+  const box = $("mg_in"), inc = mgr.incoming; box.innerHTML = "";
+  if (!inc) { box.style.display = "none"; return; }
+  box.style.display = "";
+  const total = inc.sigs.length + inc.styles.length;
+  box.appendChild(mk("div", { className: "mg-h" }, `Ready to import: ${inc.sigs.length} signature${inc.sigs.length === 1 ? "" : "s"}, ${inc.styles.length} style${inc.styles.length === 1 ? "" : "s"}`));
+  const list = mk("div", { className: "mg-list" });
+  inc.sigs.forEach((s) => list.appendChild(mgrRow("in-sig", s, !s._dup)));
+  inc.styles.forEach((h) => list.appendChild(mgrRow("in-style", h, !h._dup)));
+  if (!total) list.innerHTML = '<div class="note" style="margin:0">Nothing to import in those files.</div>';
+  box.appendChild(list);
+  if (inc.skipped.length) box.appendChild(mk("div", { className: "note", style: "margin:6px 0 0" }, "Skipped: " + escapeHTML(inc.skipped.join(", "))));
+  const row = mk("div", { className: "mg-btns" });
+  const go = mk("button", { className: "btn primary", type: "button" }, "Import ticked"); go.onclick = mgrApplyImport;
+  const cancel = mk("button", { className: "btn", type: "button" }, "Cancel"); cancel.onclick = () => { mgr.incoming = null; renderMgrIncoming(); };
+  row.append(cancel, go); box.appendChild(row);
+}
+function mgrApplyImport() {
+  const inc = mgr.incoming; if (!inc) return;
+  const si = new Set(mgrChecked("in-sig")), hi = new Set(mgrChecked("in-style")), now = Date.now();
+  const sigs = loadSavedSigs(), styles = loadSavedHands(); let ns = 0, nh = 0;
+  inc.sigs.filter((s) => si.has(s.id)).forEach((s) => { const { _dup, _note, ...x } = s; if (sigs.some((y) => y.id === x.id)) x.id = now + "-" + Math.random().toString(36).slice(2, 7); sigs.unshift({ ...x, savedAt: now, usedAt: now }); ns++; });
+  inc.styles.filter((h) => hi.has(h.id)).forEach((h) => { const { _dup, _note, ...x } = h; if (styles.some((y) => y.id === x.id)) x.id = now + "-h" + Math.random().toString(36).slice(2, 7); styles.unshift({ ...x, savedAt: now, usedAt: now }); nh++; });
+  storeSavedSigs(sigs); storeSavedHands(styles); renderSavedSigs(); renderSavedHands();
+  mgr.incoming = null; renderMgr();
+  toast(ns || nh ? `Imported ${[ns ? ns + " signature" + (ns > 1 ? "s" : "") : "", nh ? nh + " style" + (nh > 1 ? "s" : "") : ""].filter(Boolean).join(" and ")}.` : "Nothing imported.");
 }
 function exportBackup(kind) {
   const data = { app: BACKUP_APP, version: 1, exportedAt: new Date().toISOString() };
@@ -2637,7 +2757,7 @@ function loadSavedHands() {
   const f = keepFresh(list); if (f.length !== list.length) storeSavedHands(f);
   return f;
 }
-function storeSavedHands(a) { lsSet(STYLE_KEY, a.slice(0, 24)); }
+function storeSavedHands(a) { lsSet(STYLE_KEY, a.slice(0, 40)); }
 function applySavedStyle(s) {
   const text = $("text").value;
   applyState({ ...s.state, t: text });
@@ -3886,10 +4006,20 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("fw_go").onclick = makeFillWeb; $("fw_cancel").onclick = () => $("fillweb").close(); $("fw_pub").onclick = publishFillWeb;
   $("fw_forget").onclick = () => { const st = lsGet(GH_KEY, {}); delete st.token; lsSet(GH_KEY, st); $("fw_token").value = ""; $("fw_token").placeholder = "github_pat_…"; $("fw_remember").checked = false; toast("Token removed from this browser."); };
   $("formcol_btn").onclick = () => setFormCol(!formColOn); $("formcol_x").onclick = () => setFormCol(false);
-  $("styles_export").onclick = () => exportBackup("styles");
-  $("sigs_export").onclick = () => exportBackup("signatures");
-  $("styles_import").onclick = $("sigs_import").onclick = () => $("backup_file").click();
-  $("backup_file").onchange = () => { const f = $("backup_file").files[0]; if (f) importBackup(f); $("backup_file").value = ""; };
+  $("styles_export").onclick = $("sigs_export").onclick = () => openMgr();
+  $("styles_import").onclick = $("sigs_import").onclick = () => openMgr("import");
+  $("mg_file").onchange = () => { const f = $("mg_file").files; if (f && f.length) mgrImportFiles(f); $("mg_file").value = ""; };
+  $("mg_pick").onclick = () => $("mg_file").click();
+  $("mg_close").onclick = () => $("sigmgr").close();
+  $("mg_export").onclick = exportSelected; $("mg_pics").onclick = exportSelectedPictures;
+  document.querySelectorAll("[data-mgall]").forEach((b) => b.onclick = () => { const box = $(b.dataset.mgall), cbs = [...box.querySelectorAll("input[type=checkbox]")], on = !cbs.every((c) => c.checked); cbs.forEach((c) => c.checked = on); });
+  document.querySelectorAll("[data-picbg]").forEach((b) => b.onclick = () => { setPicBg(b.dataset.picbg); render(); });
+  syncPicBgUI(); toggles.transparent = picBg() === "none";
+  // files dropped on the saved lists or the manager are imported (pictures of a signature are traced)
+  ["sig_saved", "saved_hands", "mg_drop"].forEach((id) => { const z = $(id); if (!z) return;
+    z.addEventListener("dragover", (e) => { if ([...(e.dataTransfer.types || [])].includes("Files")) { e.preventDefault(); z.classList.add("mg-over"); } });
+    z.addEventListener("dragleave", () => z.classList.remove("mg-over"));
+    z.addEventListener("drop", (e) => { e.preventDefault(); e.stopPropagation(); z.classList.remove("mg-over"); const f = [...(e.dataTransfer.files || [])]; if (!f.length) return; if (!$("sigmgr").open) openMgr(); mgrImportFiles(f); }); });
   renderSavedHands();
   // draw pad, your handwriting, watermark removal
   $("sig_draw").onclick = () => openDrawPad("sig");
