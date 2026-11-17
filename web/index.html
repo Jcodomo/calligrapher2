@@ -269,6 +269,21 @@
   .cpop .lbl{grid-column:1/-1;font-size:12px;color:var(--muted)}
 
   /* left rail: page thumbnails + recent files + Add PDF */
+  .formcol{display:none;flex-direction:column;width:330px;flex:none;background:var(--surface);border-left:1px solid var(--line);padding:12px 14px;overflow:auto;min-height:0}
+  body.formcol-open[data-work=doc] .formcol{display:flex}
+  .fc-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}.fc-x{border:0;background:none;color:var(--muted);cursor:pointer;font-size:15px}
+  .fc-page{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:12px 0 4px}
+  .fc-row{padding:6px 8px;margin:0 -8px;border-radius:7px;transition:background .3s}
+  .fc-row.fc-on{background:rgba(255,196,0,.28)}
+  .fc-row .fc-l{display:block;font-size:12.5px;font-weight:600;margin-bottom:3px;cursor:pointer}
+  .fc-row input[type=text],.fc-row select{width:100%;height:32px;border:1px solid var(--line2,var(--line));border-radius:6px;padding:0 8px;background:var(--canvas);color:var(--text);font:inherit;font-size:13.5px}
+  .fc-row.fc-check{display:flex;gap:8px;align-items:flex-start}.fc-row.fc-check .fc-l{font-weight:500;margin:0}
+  .fc-radios label{display:block;font-size:13px}
+  .fc-hl{box-shadow:0 0 0 4px rgba(255,196,0,.6)!important;transition:box-shadow .3s}
+  #formcol_btn.on{background:var(--accent-soft,rgba(43,108,255,.12))}
+  .fw-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px}.fw-grid label{font-size:12px;display:flex;flex-direction:column;gap:2px}.fw-grid .wide{grid-column:1/-1}.fw-grid input{width:100%}
+  .fw-pub{display:flex;gap:8px;align-items:center;font-size:12.5px;padding:3px 0}.fw-pub a{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fw-pub small{color:var(--muted)}
+  @media (max-width:900px){ .formcol{width:auto;border-left:0;border-top:1px solid var(--line);max-height:50vh} }
   .rail{flex-direction:column;width:168px;flex:none;background:var(--surface);border-right:1px solid var(--line);min-height:0}
   .thumbs{flex:1;min-height:0;overflow-y:auto;padding:12px 18px}
   .thumb{display:block;width:100%;margin:0 0 14px;padding:0;border:0;background:none;cursor:pointer;text-align:center;color:var(--muted);font-size:12px}
@@ -599,6 +614,7 @@
       <button class="tb" data-tool="handwrite" title="Write anything in real-looking handwriting"><svg class="i" viewBox="0 0 20 20"><path d="M4 15.5l1-3.5 8-8 2.5 2.5-8 8z"/><path d="M3 18c2-1 3-1 4 0s2 1 3 0"/></svg><span class="tl">Handwrite</span></button>
       <button class="tb" data-tool="text" title="Add a text box"><svg class="i" viewBox="0 0 20 20"><path d="M4 5h12M10 5v11M7.5 16h5"/></svg><span class="tl">Add text</span></button>
       <button class="tb" data-tool="date" title="Add the date"><svg class="i" viewBox="0 0 20 20"><rect x="3.5" y="4.5" width="13" height="12" rx="1.5"/><path d="M3.5 8.5h13M7 3v3M13 3v3"/></svg><span class="tl">Date</span></button>
+      <button class="tb" id="formcol_btn" title="Fill in the form as a list, side by side with the document"><svg class="i" viewBox="0 0 20 20"><rect x="2.5" y="3.5" width="8" height="13" rx="1"/><path d="M13 5.5h5M13 9h5M13 12.5h5M13 16h3"/></svg><span class="tl">Form view</span></button>
       <button class="tb" data-tool="check" title="Tick or cross boxes"><svg class="i" viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9"/></svg><span class="tl">Tick</span></button>
       <div class="dd" data-dd="field">
         <button class="tb" data-ddbtn="field"><svg class="i" viewBox="0 0 20 20"><rect x="2.5" y="6" width="15" height="8" rx="1.5"/><path d="M5.5 10h5"/></svg><span class="tl" data-ddlabel>Form fields</span><svg class="i car" viewBox="0 0 10 10"><path d="M2 4l3 3 3-3"/></svg></button>
@@ -650,6 +666,11 @@
       <div id="pdfedit_stage"></div>
     </main>
 
+    <aside class="formcol" id="formcol" aria-label="Form fields">
+      <div class="fc-head"><b>Fill in the form</b><button class="fc-x" id="formcol_x" title="Close form view">✕</button></div>
+      <div class="note" style="margin:0 0 6px">Every field in the document, as a list. Typing here fills the box on the page; clicking a field shows where it is.</div>
+      <div id="formcol_list"></div>
+    </aside>
     <aside class="panel" id="panel">
       <div id="pdfedit_panel">
         <h1 class="panel-title">PDF tools</h1>
@@ -920,8 +941,24 @@ jumps over the lazy dog</textarea>
   <label class="row" style="display:block"><span style="display:block;font-size:12.5px;margin-bottom:3px">Title shown on the page</span><input id="fw_title" type="text" style="width:100%"></label>
   <label class="row" style="display:block;margin-top:8px"><span style="display:block;font-size:12.5px;margin-bottom:3px">Instructions (optional)</span><textarea id="fw_note" rows="2" style="width:100%" placeholder="e.g. Please fill in your details and sign on page 2."></textarea></label>
   <label class="row" style="display:block;margin-top:8px"><span style="display:block;font-size:12.5px;margin-bottom:3px">Your email for the return (optional)</span><input id="fw_email" type="email" style="width:100%" placeholder="Shown as a ready-made email to send the signed PDF back"></label>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button class="btn" id="fw_cancel" style="width:auto">Close</button><button class="btn" id="fw_go" style="width:auto">⤓ Download page (.html)</button></div>
+  <details style="margin-top:12px" open><summary style="cursor:pointer;font-weight:600">Publish as a link (GitHub Pages)</summary>
+    <div class="note" style="margin:6px 0">The page is added to your GitHub Pages site and gets its own link (live in about a minute). <b>Anyone with the link can open the form and see what's already on it</b> — don't publish forms that already contain personal details.</div>
+    <div class="fw-grid">
+      <label>Repository<input id="fw_repo" type="text" placeholder="owner/repo"></label>
+      <label>Folder<input id="fw_folder" type="text" placeholder="web/f"></label>
+      <label class="wide">Site address for the folder<input id="fw_base" type="text" placeholder="https://owner.github.io/repo/f/"></label>
+      <label class="wide">GitHub token<input id="fw_token" type="password" autocomplete="off" placeholder="github_pat_…"></label>
+    </div>
+    <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;margin-top:6px"><input type="checkbox" id="fw_remember"> Remember the token in this browser</label>
+    <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;margin-top:4px"><input type="checkbox" id="fw_public_ok"> I understand the page will be public to anyone with the link</label>
+    <details style="margin-top:6px"><summary style="cursor:pointer;font-size:12.5px">How to get a token</summary><div class="note" style="margin:4px 0">On GitHub: Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token. Repository access: only the repository above. Permissions: <b>Contents: Read and write</b>. Copy the token and paste it here — you type it yourself; Ghost Calligrapher only sends it to api.github.com. <button class="linkbtn" id="fw_forget" type="button">Forget saved token</button></div></details>
+    <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" id="fw_pub" style="width:auto">🔗 Publish link</button></div>
+    <div id="fw_link" style="margin-top:8px;word-break:break-all"></div>
+    <div style="font-weight:600;font-size:12.5px;margin-top:10px">Published pages</div>
+    <div id="fw_pub_list"></div>
+  </details>
   <div id="fw_err" style="color:#e5484d;font-size:12.5px;margin-top:6px"></div>
-  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button class="btn" id="fw_cancel" style="width:auto">Cancel</button><button class="btn primary" id="fw_go" style="width:auto">Create page</button></div>
 </dialog>
 <dialog class="dpad" id="fscan">
   <div class="dp-head"><b>Fonts in this PDF</b><button class="iconbtn" id="fs_x" title="Close">✕</button></div>
@@ -965,7 +1002,7 @@ jumps over the lazy dog</textarea>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=29"></script>
+<script type="module" src="./app.js?v=31"></script>
 <script type="module" src="./shell.js?v=10"></script>
 </body>
 </html>

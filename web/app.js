@@ -432,7 +432,7 @@ function render(animate = false) {
   refreshLabels();
   try {
     if (workMode === "pdf") return;
-    if (workMode === "doc" && doc) return renderDoc();
+    if (workMode === "doc" && doc) { const r = renderDoc(); if (formColOn) setTimeout(renderFormCol, 0); return r; }
     sheet.className = "sheet";
     const stage = sheet.parentElement.getBoundingClientRect();
     const width = Math.max(480, Math.min(1600, stage.width - 48));
@@ -1451,12 +1451,15 @@ function startResize(it, el, corner, e, dispW, dispH) {
 // ---- the PDF's own fillable form fields ----------------------------------------
 function renderFields(ov, dispW, dispH, fields) {
   (fields || []).forEach((f) => {
+    // each box knows its field, so the form column can find it, and typing here shows up there
+    const tagF = (el) => { el.dataset.fname = f.name; if (f.type === "radio") el.dataset.fval = String(f.value);
+      el.addEventListener("focus", () => highlightFormRow(f.name)); el.addEventListener("input", syncFormColValues); el.addEventListener("change", syncFormColValues); };
     const x = f.nx * dispW, y = f.ny * dispH, w = f.nw * dispW, h = f.nh * dispH;
     if (f.type === "radio") {
       const rb = document.createElement("input"); rb.type = "radio"; rb.className = "dfield"; rb.name = "rf_" + f.name;
       rb.checked = fieldValues[f.name] === f.value; rb.style.cssText = `left:${x}px;top:${y}px;width:${Math.max(14, h)}px;height:${Math.max(14, h)}px;margin:0`;
       rb.onchange = () => { if (rb.checked) { fieldValues[f.name] = f.value; scheduleSnapshot(); } };
-      ov.appendChild(rb);
+      tagF(rb); ov.appendChild(rb);
     } else if (f.type === "choice") {
       const sl = document.createElement("select"); sl.className = "dfield";
       sl.appendChild(new Option("", ""));
@@ -1465,12 +1468,12 @@ function renderFields(ov, dispW, dispH, fields) {
       sl.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;font-size:${Math.min(h * 0.7, 16)}px`;
       sl.onchange = () => { fieldValues[f.name] = sl.value; scheduleSnapshot(); };
       sl.onkeydown = (ev) => ev.stopPropagation();
-      ov.appendChild(sl);
+      tagF(sl); ov.appendChild(sl);
     } else if (f.type === "check") {
       const cb = document.createElement("input"); cb.type = "checkbox"; cb.className = "dfield";
       cb.checked = !!fieldValues[f.name]; cb.style.cssText = `left:${x}px;top:${y}px;width:${Math.max(14, h)}px;height:${Math.max(14, h)}px`;
       cb.onchange = () => { fieldValues[f.name] = cb.checked; scheduleSnapshot(); };
-      ov.appendChild(cb);
+      tagF(cb); ov.appendChild(cb);
     } else {
       const inp = document.createElement("input"); inp.type = "text"; inp.className = "dfield";
       inp.value = fieldValues[f.name] || ""; inp.placeholder = f.name || "";
@@ -1478,7 +1481,7 @@ function renderFields(ov, dispW, dispH, fields) {
       inp.oninput = () => { fieldValues[f.name] = inp.value; };
       inp.onchange = () => scheduleSnapshot();
       inp.onkeydown = (ev) => ev.stopPropagation();
-      ov.appendChild(inp);
+      tagF(inp); ov.appendChild(inp);
     }
   });
 }
@@ -1646,6 +1649,7 @@ function setEdTool(t) {
   if (t === "drawsig") { openDrawPad("sig"); return; }
   if (t === "fonts") { setEdTool("select"); openFontScan(); return; }
   if (t === "fillweb") { setEdTool("select"); openFillWebDialog(); return; }
+  if (t === "formview") { setEdTool("select"); setFormCol(true); return; }
   if (t === "detect" || t === "detectall") { setEdTool("select"); detectFormFields(t === "detectall"); return; }
   edTool = t;
   if (edTool !== "select") { selId = null; selDraw = null; }
@@ -1663,7 +1667,7 @@ const TOOL_MAP = {
   edit: ["edit", "select"], annotate: ["edit", "highlight"], highlight: ["edit", "highlight"], draw: ["edit", "pen"], addtext: ["edit", "text"],
   addimage: ["edit", "image"], whiteout: ["edit", "whiteout"], notes: ["edit", "note"], edittext: ["edit", "edittext"], redact: ["edit", "redact"],
   watermark: ["edit", "panel:watermark"], crop: ["edit", "panel:crop"], scanlook: ["edit", "select", "scan"],
-  sign: ["sign", "sig"], fillsign: ["sign", "text"], adddate: ["sign", "date"], forms: ["sign", "field:text"], fillform: ["sign", "select"],
+  sign: ["sign", "sig"], fillsign: ["sign", "text"], adddate: ["sign", "date"], forms: ["sign", "field:text"], fillform: ["sign", "formview"],
   write: ["sign", "handwrite"], handwrite: ["sign", "handwrite"], signature: ["sign", "sig", "signature"], sigimport: ["sign", "sig", "sigimport"],
   merge: ["organize"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "panel:split"], extract: ["organize", "panel:extract"], number: ["organize", "panel:number"],
   unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"], pdffonts: ["edit", "fonts"],
@@ -3394,20 +3398,44 @@ function sxWire() {
 
 // ---- fill-in web page: a form becomes one HTML file anyone can open, fill in, sign and turn into a PDF ----
 // The page carries the form's pages as pictures plus its fields (the PDF's own fillable fields and the ones
-// added with Form fields). Nothing is uploaded: the person filling it in gets the completed, signed PDF in
-// their browser and sends it back. Hosted anywhere (GitHub Pages, a shared drive, email), it is the link.
+// added with Form fields). Nothing is uploaded by the page: the person filling it in gets the completed,
+// signed PDF in their browser and sends it back. Optionally published to GitHub Pages for a link.
 function collectFillFields() {
   const out = [];
   docPages.forEach((p, pi) => {
-    (p.fields || []).forEach((f, k) => out.push({ id: "p" + pi + "_" + k, page: pi, type: f.type === "check" ? "check" : f.type === "radio" ? "radio" : f.type === "choice" ? "choice" : "text",
-      name: f.name, label: f.name, value: f.type === "radio" ? f.value : undefined, options: f.options, pre: fieldValues[f.name] ?? "", x: f.nx, y: f.ny, w: f.nw, h: f.nh }));
+    (p.fields || []).forEach((f, k) => out.push({ id: "p" + pi + "_" + k, page: pi, src: "pdf", type: f.type === "check" ? "check" : f.type === "radio" ? "radio" : f.type === "choice" ? "choice" : "text",
+      name: f.name, label: "", value: f.type === "radio" ? f.value : undefined, options: f.options, pre: fieldValues[f.name] ?? "", x: f.nx, y: f.ny, w: f.nw, h: f.nh }));
     docItems.filter((it) => it.isField && (it.page || 0) === pi).forEach((it) => {
       const h = it.nw * it.ar * p.w / p.h;
-      out.push({ id: it.id, page: pi, type: it.fieldKind === "check" ? "check" : it.fieldKind === "sig" ? "sig" : it.fieldKind === "date" ? "date" : "text",
-        name: it.label || it.fieldKind, label: it.label || "", pre: it.fieldKind === "check" ? !!it.checked : it.fieldKind === "date" ? "" : (it.text || ""), x: it.nx, y: it.ny, w: it.nw, h });
+      out.push({ id: it.id, page: pi, src: "item", type: it.fieldKind === "check" ? "check" : it.fieldKind === "sig" ? "sig" : it.fieldKind === "date" ? "date" : "text",
+        name: it.label || it.fieldKind, label: /^(Text|Date|Signature|)$/.test(it.label || "") ? "" : it.label, pre: it.fieldKind === "check" ? !!it.checked : it.fieldKind === "date" ? "" : (it.text || ""), x: it.nx, y: it.ny, w: it.nw, h });
     });
   });
+  out.sort((a, b) => a.page - b.page || (Math.abs(a.y - b.y) < 0.008 ? a.x - b.x : a.y - b.y));
   return out;
+}
+// A field's label is read from the page: the words to its left on the same line, or just above it
+// (checkboxes and radio buttons: the words to their right). Falls back to the PDF field name.
+const prettyName = (n) => String(n || "").replace(/[_.]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\s+\d+$/, "").trim();
+async function labelFields(fields) {
+  const blocksOf = {};
+  for (const f of fields) {
+    if (f.label) continue;
+    const blocks = blocksOf[f.page] || (blocksOf[f.page] = await getTextBlocks(f.page).catch(() => []));
+    const cy = f.y + f.h / 2, tick = f.type === "check" || f.type === "radio";
+    let best = null, bd = 1e9;
+    for (const b of blocks || []) {
+      const s = (b.str || "").trim(); if (!s || s.length > 70 || /^[_.\s-]+$/.test(s)) continue;
+      const by = b.ny + b.nh / 2, bx2 = b.nx + b.nw, same = Math.abs(by - cy) < Math.max(f.h, b.nh) * 0.75;
+      let d = 1e9;
+      if (same && tick && b.nx >= f.x + f.w - 0.004 && b.nx - (f.x + f.w) < 0.25) d = b.nx - (f.x + f.w);
+      else if (same && bx2 <= f.x + 0.012 && f.x - bx2 < 0.35) d = (f.x - bx2) + (tick ? 0.05 : 0);
+      else if (!tick && b.ny + b.nh <= f.y + 0.004 && f.y - (b.ny + b.nh) < 0.035 && b.nx < f.x + f.w && bx2 > f.x) d = (f.y - (b.ny + b.nh)) * 3 + 0.2;   // a label beside the box beats one above it
+      if (d < bd) { bd = d; best = s; }
+    }
+    f.label = (best ? best.replace(/[:\s_.]+$/, "").replace(/^[\s_.]+/, "") : "") || prettyName(f.name) || (f.type === "sig" ? "Signature" : f.type === "date" ? "Date" : "Field");
+  }
+  return fields;
 }
 async function buildFillPage(opts) {
   const pages = [];
@@ -3418,49 +3446,234 @@ async function buildFillPage(opts) {
     const g = s.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, s.width, s.height); g.drawImage(c, 0, 0, s.width, s.height);
     pages.push({ img: s.toDataURL("image/jpeg", 0.85), w: docPages[i].w / 2, h: docPages[i].h / 2 });
   }
-  const data = { v: 1, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), title: opts.title, note: opts.note, email: opts.email, file: baseName(), pages, fields: collectFillFields() };
+  const fields = await labelFields(collectFillFields());
+  const data = { v: 2, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), title: opts.title, note: opts.note, email: opts.email, file: baseName(), pages,
+    fields: fields.map(({ src, ...f }) => f) };
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
-  return FILL_PAGE_HTML.replace("__TITLE__", escapeHTML(opts.title)).replace("__DATA__", () => json);
+  return { id: data.id, html: FILL_PAGE_HTML.replace("__TITLE__", escapeHTML(opts.title)).replace("__DATA__", () => json) };
+}
+
+// ---- publishing to a link (GitHub Pages) -----------------------------------------------
+// The page is committed to the site's repository with the GitHub API, using a token the user creates and
+// enters here (kept in this browser only if they ask). The site redeploys and the page is live in ~1 minute.
+const GH_KEY = "cal2_gh_publish", PUB_KEY = "cal2_published";
+function ghDefaults() {
+  const m = location.hostname.match(/^([\w-]+)\.github\.io$/i), seg = location.pathname.split("/").filter(Boolean)[0] || "";
+  const owner = m ? m[1] : "Jcodomo", repo = m && seg ? seg : "calligrapher2";
+  return { repo: owner + "/" + repo, folder: "web/f", base: "https://" + owner.toLowerCase() + ".github.io/" + repo + "/f/" };
+}
+function ghSettings() { return { ...ghDefaults(), ...lsGet(GH_KEY, {}) }; }
+function b64utf8(str) { const u = new TextEncoder().encode(str); let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
+async function ghPublish(id, html, title, token) {
+  const st = ghSettings(), path = st.folder.replace(/^\/+|\/+$/g, "") + "/" + id + ".html";
+  const r = await fetch(`https://api.github.com/repos/${st.repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}`, {
+    method: "PUT", headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "Fill-in page: " + title, content: b64utf8(html) }) });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(r.status === 401 ? "GitHub did not accept the token." : r.status === 404 ? "Repository or folder not found, or the token can't write to " + st.repo + "." : (e.message || "GitHub error " + r.status));
+  }
+  const j = await r.json(), url = st.base.replace(/\/?$/, "/") + id + ".html";
+  const list = lsGet(PUB_KEY, []); list.unshift({ id, title, url, path, sha: j.content && j.content.sha, repo: st.repo, at: Date.now() }); lsSet(PUB_KEY, list.slice(0, 50));
+  return url;
+}
+async function ghUnpublish(entry, token) {
+  const r = await fetch(`https://api.github.com/repos/${entry.repo}/contents/${entry.path}`, { method: "DELETE",
+    headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "Remove fill-in page: " + entry.title, sha: entry.sha }) });
+  if (!r.ok && r.status !== 404) throw new Error("GitHub error " + r.status);
+  lsSet(PUB_KEY, lsGet(PUB_KEY, []).filter((x) => x.id !== entry.id));
+}
+function fwToken() { return $("fw_token").value.trim() || (lsGet(GH_KEY, {}).token || ""); }
+function renderPublished() {
+  const host = $("fw_pub_list"); if (!host) return;
+  const list = lsGet(PUB_KEY, []); host.innerHTML = "";
+  if (!list.length) { host.innerHTML = '<div class="note" style="margin:0">No published pages yet.</div>'; return; }
+  list.forEach((e) => {
+    const row = mk("div", { className: "fw-pub" });
+    row.innerHTML = `<a href="${escapeHTML(e.url)}" target="_blank" rel="noopener">${escapeHTML(e.title)}</a><small>${new Date(e.at).toLocaleDateString()}</small>`;
+    const cp = mk("button", { className: "linkbtn", type: "button", title: "Copy link" }, "Copy"); cp.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(e.url); toast("Link copied."); };
+    const rm = mk("button", { className: "linkbtn", type: "button", title: "Take this page offline" }, "Remove");
+    rm.onclick = async () => {
+      const t = fwToken(); if (!t) { $("fw_err").textContent = "Enter your GitHub token to remove a page."; return; }
+      if (!confirm("Take “" + e.title + "” offline? The link will stop working (copies people already downloaded are not affected).")) return;
+      try { await ghUnpublish(e, t); renderPublished(); toast("Removed. The link stops working after the site redeploys (about a minute)."); } catch (err) { $("fw_err").textContent = err.message; }
+    };
+    row.append(cp, rm); host.appendChild(row);
+  });
 }
 function openFillWebDialog() {
   if (!doc) return;
-  const n = collectFillFields().length;
+  const all = collectFillFields(), n = all.length;
   if (!n) { toast("This document has no fields yet — add them with Form fields (or Find fields on this page) first."); return; }
   $("fw_title").value = $("fw_title").value || baseName();
-  $("fw_count").textContent = `${n} field${n === 1 ? "" : "s"} (${collectFillFields().filter((f) => f.type === "sig").length} to sign) on ${docPages.length} page${docPages.length === 1 ? "" : "s"}.`;
+  $("fw_count").textContent = `${n} field${n === 1 ? "" : "s"} (${all.filter((f) => f.type === "sig").length} to sign) on ${docPages.length} page${docPages.length === 1 ? "" : "s"}.`;
+  const st = ghSettings(); $("fw_repo").value = st.repo; $("fw_folder").value = st.folder; $("fw_base").value = st.base;
+  $("fw_token").value = ""; $("fw_token").placeholder = st.token ? "Saved in this browser" : "github_pat_…"; $("fw_remember").checked = !!st.token;
+  $("fw_link").innerHTML = ""; $("fw_err").textContent = "";
+  renderPublished();
   $("fillweb").showModal();
 }
-async function makeFillWeb() {
+function fwOpts() {
   const opts = { title: $("fw_title").value.trim() || baseName(), note: $("fw_note").value.trim(), email: $("fw_email").value.trim() };
-  if (opts.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(opts.email)) { $("fw_err").textContent = "That email address doesn't look right."; return; }
+  if (opts.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(opts.email)) { $("fw_err").textContent = "That email address doesn't look right."; return null; }
+  return opts;
+}
+async function makeFillWeb() {
+  const opts = fwOpts(); if (!opts) return;
   $("fw_err").textContent = ""; $("fw_go").disabled = true; toast("Building the fill-in page…");
   try {
     snapshotNow();
-    const html = await buildFillPage(opts);
+    const { html } = await buildFillPage(opts);
     download(baseName() + "-fill-and-sign.html", new Blob([html], { type: "text/html" }));
     $("fillweb").close();
-    toast("Saved " + baseName() + "-fill-and-sign.html — send it, or put it online for a link.");
+    toast("Saved " + baseName() + "-fill-and-sign.html — send it, or publish it as a link.");
   } catch (e) { $("fw_err").textContent = "Could not build the page: " + (e.message || e); }
   finally { $("fw_go").disabled = false; }
 }
+async function publishFillWeb() {
+  const opts = fwOpts(); if (!opts) return;
+  const token = fwToken();
+  if (!token) { $("fw_err").textContent = "Enter a GitHub token (see “How to get a token”)."; return; }
+  if (!$("fw_public_ok").checked) { $("fw_err").textContent = "Tick the box to confirm the page may be public."; return; }
+  const set = { repo: $("fw_repo").value.trim(), folder: $("fw_folder").value.trim() || "web/f", base: $("fw_base").value.trim() };
+  if (!/^[\w.-]+\/[\w.-]+$/.test(set.repo) || !/^https:\/\//.test(set.base)) { $("fw_err").textContent = "Check the repository (owner/name) and the site address."; return; }
+  lsSet(GH_KEY, { ...set, ...($("fw_remember").checked ? { token } : {}) });
+  $("fw_err").textContent = ""; $("fw_pub").disabled = true; $("fw_link").textContent = "Building and publishing…";
+  try {
+    snapshotNow();
+    const { id, html } = await buildFillPage(opts);
+    const url = await ghPublish(id, html, opts.title, token);
+    renderPublished();
+    $("fw_link").innerHTML = "";
+    const a = mk("a", { href: url, target: "_blank", rel: "noopener" }, escapeHTML(url));
+    const cp = mk("button", { className: "btn", type: "button", style: "width:auto;margin-left:8px" }, "Copy link"); cp.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(url); toast("Link copied."); };
+    const status = mk("div", { className: "note", style: "margin:4px 0 0" }, "Publishing… the link goes live when the site finishes redeploying (usually about a minute).");
+    $("fw_link").append(a, cp, status);
+    for (let i = 0; i < 24; i++) {             // watch for it to go live (up to 4 minutes)
+      await new Promise((r) => setTimeout(r, 10000));
+      try { const h = await fetch(url, { method: "HEAD", cache: "no-store" }); if (h.ok) { status.textContent = "Live — send this link to the person who should fill it in."; break; } } catch (_) {}
+      if (i === 23) status.textContent = "Not live yet — check the repository's Actions tab if it doesn't appear in a few minutes.";
+    }
+  } catch (e) { $("fw_link").textContent = ""; $("fw_err").textContent = "Could not publish: " + (e.message || e); }
+  finally { $("fw_pub").disabled = false; }
+}
+
+// ---- form view in the editor: every field as a plain list on the right, kept in step with the page ----
+let formColOn = false, formColSig = "", formColTimer = 0;
+function setFormCol(on) {
+  formColOn = !!on; document.body.classList.toggle("formcol-open", formColOn);
+  $("formcol_btn") && $("formcol_btn").classList.toggle("on", formColOn);
+  if (formColOn) { formColSig = ""; renderFormCol(); }
+}
+function fieldPageEl(f) {
+  if (f.src === "item") return document.querySelector(`#ed_pages .ditem[data-id="${f.id}"]`);
+  const sel = `#ed_pages .pg[data-page="${f.page}"] .dfield[data-fname="${CSS.escape(f.name)}"]` + (f.type === "radio" ? `[data-fval="${CSS.escape(String(f.value))}"]` : "");
+  return document.querySelector(sel);
+}
+function flashField(f) {
+  const el = fieldPageEl(f); if (!el) { setCurPage && setCurPage(f.page, true); return; }
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("fc-hl"); setTimeout(() => el.classList.remove("fc-hl"), 1400);
+}
+function fieldValue(f) {
+  if (f.src === "pdf") return fieldValues[f.name];
+  const it = docItems.find((x) => x.id === f.id); if (!it) return "";
+  return f.type === "check" ? !!it.checked : (it.text || "");
+}
+function setFieldValue(f, v) {
+  if (f.src === "pdf") fieldValues[f.name] = v;
+  else { const it = docItems.find((x) => x.id === f.id); if (!it) return; if (f.type === "check") it.checked = !!v; else { it.text = v; if (it.isDate) it.date = v; } }
+  clearTimeout(formColTimer); formColTimer = setTimeout(() => { render(); scheduleSnapshot(); }, 180);
+}
+async function renderFormCol() {
+  const host = $("formcol_list"); if (!host || !formColOn) return;
+  if (!doc) { host.innerHTML = '<div class="note">Open a form to fill it in here.</div>'; formColSig = ""; return; }
+  const fields = collectFillFields(), sig = fields.map((f) => f.id + f.type).join("|") + "|" + docPages.length;
+  if (sig === formColSig) { syncFormColValues(); return; }
+  formColSig = sig;
+  await labelFields(fields);
+  host.innerHTML = "";
+  if (!fields.length) { host.innerHTML = '<div class="note">No fillable fields in this document. Add them with <b>Form fields</b>, or <b>Find fields on all pages</b>.</div>'; return; }
+  let lastPage = -1; const radios = new Set();
+  for (const f of fields) {
+    if (f.page !== lastPage) { lastPage = f.page; host.appendChild(mk("div", { className: "fc-page" }, "Page " + (f.page + 1))); }
+    if (f.type === "radio") {
+      if (radios.has(f.page + ":" + f.name)) continue; radios.add(f.page + ":" + f.name);
+      const opts = fields.filter((g) => g.type === "radio" && g.name === f.name);
+      const row = mk("div", { className: "fc-row" }); row.dataset.fid = f.id; if (f.src === "pdf") row.dataset.fname = f.name;
+      row.appendChild(mk("div", { className: "fc-l" }, escapeHTML(prettyName(f.name) || f.label)));
+      const box = mk("div", { className: "fc-radios" });
+      opts.forEach((o) => {
+        const lab = mk("label"), r = mk("input", { type: "radio", name: "fc_" + f.name }); r.dataset.fid = o.id; r.checked = fieldValue(o) === o.value;
+        r.onchange = () => { if (r.checked) setFieldValue(o, o.value); }; r.onfocus = () => flashField(o);
+        lab.append(r, document.createTextNode(" " + (o.label || o.value))); box.appendChild(lab);
+      });
+      row.appendChild(box); host.appendChild(row); continue;
+    }
+    const row = mk("div", { className: "fc-row" + (f.type === "check" ? " fc-check" : "") }); row.dataset.fid = f.id; if (f.src === "pdf") row.dataset.fname = f.name;
+    let ctl;
+    if (f.type === "check") { ctl = mk("input", { type: "checkbox" }); ctl.checked = !!fieldValue(f); ctl.onchange = () => setFieldValue(f, ctl.checked); }
+    else if (f.type === "choice") { ctl = mk("select"); ctl.appendChild(new Option("", "")); (f.options || []).forEach(([v, l]) => ctl.appendChild(new Option(l, v))); ctl.value = fieldValue(f) || ""; ctl.onchange = () => setFieldValue(f, ctl.value); }
+    else if (f.type === "sig") {
+      ctl = mk("button", { className: "btn", type: "button" }, "✒ Sign here");
+      ctl.onclick = () => { flashField(f); setEdMode("sign"); setEdTool("sig"); toast("Click inside the highlighted signature box to sign."); };
+    } else { ctl = mk("input", { type: "text", placeholder: f.type === "date" ? "Date" : "" }); ctl.value = fieldValue(f) || ""; ctl.oninput = () => setFieldValue(f, ctl.value); }
+    ctl.dataset.fid = f.id; ctl.onfocus = () => flashField(f);
+    if (ctl.tagName === "INPUT" || ctl.tagName === "SELECT") ctl.onkeydown = (e) => e.stopPropagation();
+    const lab = mk("label", { className: "fc-l" }, escapeHTML(f.label));
+    if (f.type === "check") row.append(ctl, lab); else row.append(lab, ctl);
+    lab.onclick = () => { if (f.type !== "check") ctl.focus(); };
+    host.appendChild(row);
+  }
+}
+// values typed on the page show up in the column (the field being typed in is left alone)
+function syncFormColValues() {
+  if (!formColOn) return;
+  const fields = collectFillFields(), byId = new Map(fields.map((f) => [f.id, f]));
+  document.querySelectorAll("#formcol_list [data-fid]").forEach((el) => {
+    if (el === document.activeElement || el.classList.contains("fc-row")) return;
+    const f = byId.get(el.dataset.fid); if (!f) return;
+    const v = fieldValue(f);
+    if (el.type === "checkbox") el.checked = !!v; else if (el.type === "radio") el.checked = v === f.value; else if (el.tagName !== "BUTTON") el.value = v || "";
+  });
+}
+function highlightFormRow(key) {
+  if (!formColOn) return;
+  const k = CSS.escape(String(key)), row = document.querySelector(`#formcol_list .fc-row[data-fname="${k}"], #formcol_list .fc-row[data-fid="${k}"]`); if (!row) return;
+  const r = row.closest(".fc-row") || row; r.scrollIntoView({ block: "nearest" }); r.classList.add("fc-on"); setTimeout(() => r.classList.remove("fc-on"), 1200);
+}
+
 const FILL_PAGE_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>__TITLE__</title>
 <style>
-:root{--bg:#eef1f6;--card:#fff;--text:#1a2133;--muted:#5d677d;--line:#d5dbe6;--acc:#2b6cff;--req:#e5484d}
+:root{--bg:#eef1f6;--card:#fff;--text:#1a2133;--muted:#5d677d;--line:#d5dbe6;--acc:#2b6cff;--req:#e5484d;--hl:rgba(255,196,0,.35)}
 @media (prefers-color-scheme:dark){:root{--bg:#10131b;--card:#1a1f2b;--text:#e8ecf4;--muted:#9aa4b8;--line:#2e3647}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
-header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-header h1{font-size:17px;margin:0;flex:1;min-width:180px}header .prog{color:var(--muted);font-size:13px}
+*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;display:flex;flex-direction:column}
+header{flex:none;background:var(--card);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;flex:1;min-width:160px}header .prog{color:var(--muted);font-size:13px}
 button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);padding:8px 14px}
 button.p{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
-main{max-width:980px;margin:0 auto;padding:16px}
-.intro{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px}
-.intro label{display:block;font-weight:600;margin-top:8px}.intro input{width:100%;max-width:420px;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)}
+.wrap{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,400px)}
+.doc{overflow:auto;padding:16px}
+.side{overflow:auto;background:var(--card);border-left:1px solid var(--line);padding:14px 16px 40px}
+.side h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 6px}
+.side .note{color:var(--muted);font-size:13px;margin:0 0 8px}
+.row{padding:8px 10px;border-radius:8px;margin:0 -10px;transition:background .3s}
+.row.on{background:var(--hl)}
+.row label.l{display:block;font-weight:600;font-size:13.5px;margin-bottom:3px}
+.row input[type=text],.row select,#who{width:100%;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)}
+.row.ck{display:flex;gap:8px;align-items:flex-start}.row.ck label.l{font-weight:500;margin:0}
+.row.ck input{width:18px;height:18px;margin-top:2px;flex:none}
+.radios label{display:block;font-size:14px}
+.sigbtn{display:flex;align-items:center;gap:10px}.sigbtn img{max-height:44px;max-width:180px;background:#fff;border-radius:4px}
+.row.req.empty .sigbtn button{border-color:var(--req);color:var(--req)}
 .pg{position:relative;margin:0 auto 16px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.18);width:100%}
-.pg img{display:block;width:100%;height:auto;user-select:none;pointer-events:none}
-.f{position:absolute;border:1.5px solid rgba(43,108,255,.6);background:rgba(43,108,255,.08);border-radius:3px;color:#10182b}
+.pg img.bg{display:block;width:100%;height:auto;user-select:none;pointer-events:none}
+.f{position:absolute;border:1.5px solid rgba(43,108,255,.6);background:rgba(43,108,255,.08);border-radius:3px;color:#10182b;transition:box-shadow .3s}
 .f.req.empty{border-color:var(--req);background:rgba(229,72,77,.08)}
+.f.on{box-shadow:0 0 0 4px var(--hl)}
 .f input[type=text],.f select{width:100%;height:100%;border:0;background:transparent;font:inherit;color:#10182b;padding:0 3px;outline:none}
 .f input[type=checkbox],.f input[type=radio]{width:100%;height:100%;margin:0;accent-color:#10182b}
 .f.sig{cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:12px;color:#2b6cff;font-weight:600}
@@ -3470,57 +3683,91 @@ dialog{border:0;border-radius:12px;padding:16px;width:min(620px,94vw);background
 dialog::backdrop{background:rgba(5,8,15,.55)}
 .tabs{display:flex;gap:6px;margin-bottom:10px}.tabs button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 canvas{width:100%;height:190px;border:1px dashed var(--line);border-radius:8px;background:#fff;touch-action:none;display:block}
-.row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap}
+.btns{display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap}
 #typed{width:100%;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px}
-.done{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:6px;display:none}
-small.m{color:var(--muted)}
+.done{border-top:1px solid var(--line);padding-top:10px;margin-top:14px;display:none}
+.vt{display:none}
+@media (max-width:820px){.wrap{display:block;overflow:auto}.side{border-left:0;border-bottom:1px solid var(--line)}.doc{overflow:visible}.wrap{order:0}.side{order:-1}.vt{display:inline-block}body.hidedoc .doc{display:none}}
 </style></head><body>
-<header><h1 id="t"></h1><span class="prog" id="prog"></span><button class="p" id="finish">Finish &amp; download signed PDF</button></header>
-<main>
-<div class="intro"><div id="note"></div>
-<label for="who">Your full name</label><input id="who" autocomplete="name" placeholder="Name as you sign">
-<small class="m">Fill in the boxes on the pages below, click a signature box to sign, then press Finish. Everything stays in your browser until you send the PDF back.</small></div>
-<div id="pages"></div>
+<header><h1 id="t"></h1><span class="prog" id="prog"></span><button class="vt" id="vt">Hide document</button><button class="p" id="finish">Finish &amp; download signed PDF</button></header>
+<div class="wrap">
+<section class="doc" id="pages" aria-label="Document"></section>
+<aside class="side" aria-label="Form">
+<p class="note" id="note"></p>
+<div class="row"><label class="l" for="who">Your full name</label><input id="who" autocomplete="name" placeholder="Name as you sign"></div>
+<p class="note">Fill in the form here or on the document — both stay in step. Click a signature to sign, then press Finish. Everything stays in your browser until you send the PDF back.</p>
+<div id="form"></div>
 <div class="done" id="done"></div>
-</main>
+</aside></div>
 <dialog id="pad"><div class="tabs"><button class="on" data-m="draw">Draw</button><button data-m="type">Type</button></div>
 <input id="typed" placeholder="Type your name" style="display:none"><canvas id="cv"></canvas>
-<div class="row"><button id="clr">Clear</button><button id="cancel">Cancel</button><button class="p" id="use">Use this signature</button></div></dialog>
+<div class="btns"><button id="clr">Clear</button><button id="cancel">Cancel</button><button class="p" id="use">Use this signature</button></div></dialog>
 <script type="application/json" id="data">__DATA__</script>
 <script>
 (function(){
 var D=JSON.parse(document.getElementById('data').textContent), V={}, KEY='ghostfill_'+D.id;
 try{V=JSON.parse(localStorage.getItem(KEY)||'{}')||{}}catch(e){}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(V))}catch(e){}prog()}
+function store(){try{localStorage.setItem(KEY,JSON.stringify(V))}catch(e){}prog()}
 var $=function(i){return document.getElementById(i)};
 $('t').textContent=D.title;document.title=D.title;
-if(D.note){$('note').textContent=D.note;$('note').style.marginBottom='6px'}
-$('who').value=V.__who||'';$('who').oninput=function(){V.__who=$('who').value;save()};
-var today=new Date().toLocaleDateString();
-var host=$('pages'),els={};
+if(D.note)$('note').textContent=D.note;else $('note').style.display='none';
+$('who').value=V.__who||'';$('who').oninput=function(){V.__who=$('who').value;store()};
+var today=new Date().toLocaleDateString(),byId={},onPage={},inSide={};
+D.fields.forEach(function(f){byId[f.id]=f;if(V[f.id]==null){if(f.type==='date')V[f.id]=today;else if(f.type==='check')V[f.id]=!!f.pre;else if(f.type==='radio')V[f.id]=f.pre===f.value?f.value:'';else V[f.id]=f.pre||''}});
+/* one value per field, shown in two places */
+function set(id,v,from){var f=byId[id];if(f.type==='radio'){D.fields.forEach(function(g){if(g.type==='radio'&&g.name===f.name&&g.page===f.page)V[g.id]=g.id===id&&v?f.value:''})}else V[id]=v;
+ store();D.fields.forEach(function(g){if(g.id===id||(f.type==='radio'&&g.type==='radio'&&g.name===f.name))paint(g.id,from)})}
+function paint(id,skip){var f=byId[id],v=V[id];[onPage[id],inSide[id]].forEach(function(el){if(!el||el===skip)return;
+ if(f.type==='check')el.checked=!!v;else if(f.type==='radio')el.checked=v===f.value;else if(f.type==='sig'){showSig(el,v)}else el.value=v||''})}
+function showSig(el,v){if(el.classList.contains('f')){el.textContent=v?'':'Click to sign';if(v){var i=new Image();i.src=v;el.appendChild(i)}}else{var b=el.querySelector('span');b.innerHTML='';if(v){var i2=new Image();i2.src=v;b.appendChild(i2)}el.querySelector('button').textContent=v?'Sign again':'✒ Sign'}}
+function hl(id){var f=byId[id],a=onPage[id],r=inSide[id]&&inSide[id].closest('.row');
+ if(a){a.scrollIntoView({behavior:'smooth',block:'center'});a.classList.add('on');setTimeout(function(){a.classList.remove('on')},1300)}
+ if(r){r.classList.add('on');setTimeout(function(){r.classList.remove('on')},1300)}}
+function hlSide(id){var r=inSide[id]&&inSide[id].closest('.row');if(!r)return;r.scrollIntoView({behavior:'smooth',block:'nearest'});r.classList.add('on');setTimeout(function(){r.classList.remove('on')},1300)}
+/* the document */
 D.pages.forEach(function(p,pi){var d=document.createElement('div');d.className='pg';d.style.maxWidth=Math.round(p.w*1.6)+'px';
- var im=document.createElement('img');im.src=p.img;im.alt='Page '+(pi+1);d.appendChild(im);
+ var im=document.createElement('img');im.className='bg';im.src=p.img;im.alt='Page '+(pi+1);d.appendChild(im);
  D.fields.filter(function(f){return f.page===pi}).forEach(function(f){
   var b=document.createElement('div');b.className='f'+(f.type==='sig'?' sig req':'');b.title=f.label||'';
-  b.style.left=f.x*100+'%';b.style.top=f.y*100+'%';b.style.width=f.w*100+'%';b.style.height=f.h*100+'%';b.dataset.h=f.h;b.dataset.ph=p.h;
-  var v=V[f.id];
-  if(f.type==='check'){var c=document.createElement('input');c.type='checkbox';c.checked=v!=null?!!v:!!f.pre;c.onchange=function(){V[f.id]=c.checked;save()};b.appendChild(c);b.style.background='transparent'}
-  else if(f.type==='radio'){var r=document.createElement('input');r.type='radio';r.name='r_'+f.name;r.checked=(v!=null?v:f.pre)===f.value;r.onchange=function(){D.fields.forEach(function(g){if(g.type==='radio'&&g.name===f.name)V[g.id]=g.id===f.id?f.value:''});save()};b.appendChild(r);b.style.background='transparent'}
-  else if(f.type==='choice'){var s=document.createElement('select');s.appendChild(new Option('',''));(f.options||[]).forEach(function(o){s.appendChild(new Option(o[1],o[0]))});s.value=v!=null?v:(f.pre||'');s.onchange=function(){V[f.id]=s.value;save()};b.appendChild(s)}
-  else if(f.type==='sig'){b.textContent='Click to sign';if(v){b.textContent='';var i2=new Image();i2.src=v;b.appendChild(i2)}b.onclick=function(){openPad(f,b)}}
-  else{var t=document.createElement('input');t.type='text';t.placeholder=f.type==='date'?'Date':(f.label&&f.label!=='Text'?f.label:'');t.value=v!=null?v:(f.type==='date'?today:(f.pre||''));if(v==null&&f.type==='date')V[f.id]=t.value;t.oninput=function(){V[f.id]=t.value;save()};b.appendChild(t)}
-  els[f.id]=b;d.appendChild(b)});
- host.appendChild(d)});
-function sizeText(){document.querySelectorAll('.pg').forEach(function(pg){var W=pg.clientWidth;pg.querySelectorAll('.f').forEach(function(b){var h=b.clientHeight;b.style.fontSize=Math.max(9,Math.min(h*0.62,22))+'px'})})}
+  b.style.left=f.x*100+'%';b.style.top=f.y*100+'%';b.style.width=f.w*100+'%';b.style.height=f.h*100+'%';
+  var el;
+  if(f.type==='check'){el=document.createElement('input');el.type='checkbox';el.onchange=function(){set(f.id,el.checked,el)};b.style.background='transparent'}
+  else if(f.type==='radio'){el=document.createElement('input');el.type='radio';el.name='r'+pi+'_'+f.name;el.onchange=function(){if(el.checked)set(f.id,true,el)};b.style.background='transparent'}
+  else if(f.type==='choice'){el=document.createElement('select');el.appendChild(new Option('',''));(f.options||[]).forEach(function(o){el.appendChild(new Option(o[1],o[0]))});el.onchange=function(){set(f.id,el.value,el)}}
+  else if(f.type==='sig'){el=b;b.onclick=function(){openPad(f)}}
+  else{el=document.createElement('input');el.type='text';el.oninput=function(){set(f.id,el.value,el)}}
+  if(el!==b)b.appendChild(el);onPage[f.id]=el;
+  (el===b?b:el).addEventListener('focus',function(){hlSide(f.id)});b.addEventListener('click',function(){hlSide(f.id)});
+  d.appendChild(b)});
+ $('pages').appendChild(d)});
+/* the form column */
+var form=$('form'),lastPage=-1,seenRadio={};
+D.fields.forEach(function(f){
+ if(D.pages.length>1&&f.page!==lastPage){lastPage=f.page;var h=document.createElement('h2');h.textContent='Page '+(f.page+1);form.appendChild(h)}
+ var row=document.createElement('div');row.className='row';var lab=document.createElement('label');lab.className='l';lab.textContent=f.label||'Field';
+ if(f.type==='radio'){var k=f.page+':'+f.name;if(seenRadio[k])return;seenRadio[k]=1;lab.textContent=(f.name||'').replace(/[_.]+/g,' ');row.appendChild(lab);var box=document.createElement('div');box.className='radios';
+  D.fields.filter(function(g){return g.type==='radio'&&g.name===f.name&&g.page===f.page}).forEach(function(g){var l=document.createElement('label'),r=document.createElement('input');r.type='radio';r.name='s'+k;r.onchange=function(){if(r.checked)set(g.id,true,r)};r.onfocus=function(){hl(g.id)};l.appendChild(r);l.appendChild(document.createTextNode(' '+(g.label||g.value)));box.appendChild(l);inSide[g.id]=r});
+  row.appendChild(box);form.appendChild(row);return}
+ var el;
+ if(f.type==='check'){row.className='row ck';el=document.createElement('input');el.type='checkbox';el.id='s_'+f.id;lab.htmlFor=el.id;el.onchange=function(){set(f.id,el.checked,el)};row.appendChild(el);row.appendChild(lab)}
+ else if(f.type==='sig'){row.className='row req';row.appendChild(lab);el=document.createElement('div');el.className='sigbtn';var bt=document.createElement('button');bt.type='button';bt.textContent='✒ Sign';bt.onclick=function(){openPad(f)};el.appendChild(bt);el.appendChild(document.createElement('span'));row.appendChild(el);bt.onfocus=function(){hl(f.id)}}
+ else{if(f.type==='choice'){el=document.createElement('select');el.appendChild(new Option('',''));(f.options||[]).forEach(function(o){el.appendChild(new Option(o[1],o[0]))});el.onchange=function(){set(f.id,el.value,el)}}
+  else{el=document.createElement('input');el.type='text';el.oninput=function(){set(f.id,el.value,el)}}
+  el.id='s_'+f.id;lab.htmlFor=el.id;row.appendChild(lab);row.appendChild(el)}
+ if(f.type!=='sig')el.addEventListener('focus',function(){hl(f.id)});
+ inSide[f.id]=el;form.appendChild(row)});
+D.fields.forEach(function(f){paint(f.id)});
+function sizeText(){document.querySelectorAll('.pg .f').forEach(function(b){b.style.fontSize=Math.max(9,Math.min(b.clientHeight*0.62,22))+'px'})}
 addEventListener('resize',sizeText);addEventListener('load',sizeText);setTimeout(sizeText,50);
 function prog(){var sig=D.fields.filter(function(f){return f.type==='sig'}),left=sig.filter(function(f){return !V[f.id]}).length;
- sig.forEach(function(f){els[f.id]&&els[f.id].classList.toggle('empty',!V[f.id])});
+ sig.forEach(function(f){onPage[f.id]&&onPage[f.id].classList.toggle('empty',!V[f.id]);var r=inSide[f.id]&&inSide[f.id].closest('.row');r&&r.classList.toggle('empty',!V[f.id])});
  $('prog').textContent=sig.length?(left?left+' signature'+(left>1?'s':'')+' left':'All signed'):''}
 prog();
+$('vt').onclick=function(){document.body.classList.toggle('hidedoc');$('vt').textContent=document.body.classList.contains('hidedoc')?'Show document':'Hide document'};
 /* signature pad */
 var cv=$('cv'),g=cv.getContext('2d'),mode='draw',strokes=[],cur=null,target=null;
 function fit(){var r=cv.getBoundingClientRect(),k=devicePixelRatio||1;cv.width=r.width*k;cv.height=r.height*k;g.setTransform(k,0,0,k,0,0);draw()}
-function draw(){var r=cv.getBoundingClientRect();g.clearRect(0,0,r.width,r.height);g.strokeStyle='#c9d0dc';g.beginPath();g.moveTo(20,r.height-40);g.lineTo(r.width-20,r.height-40);g.stroke();
+function draw(){var r=cv.getBoundingClientRect();g.clearRect(0,0,r.width,r.height);g.strokeStyle='#c9d0dc';g.lineWidth=1;g.beginPath();g.moveTo(20,r.height-40);g.lineTo(r.width-20,r.height-40);g.stroke();
  g.strokeStyle=g.fillStyle='#1b2a6b';g.lineCap=g.lineJoin='round';
  if(mode==='type'){var t=$('typed').value.trim(),h=58;g.font='italic '+h+'px "Segoe Script","Brush Script MT","Snell Roundhand",cursive';while(t&&g.measureText(t).width>r.width-40&&h>16){h-=2;g.font='italic '+h+'px "Segoe Script","Brush Script MT","Snell Roundhand",cursive'}if(t)g.fillText(t,20,r.height-48);return}
  strokes.forEach(function(s){for(var i=1;i<s.length;i++){g.lineWidth=s[i].w;g.beginPath();g.moveTo(s[i-1].x,s[i-1].y);g.lineTo(s[i].x,s[i].y);g.stroke()}})}
@@ -3530,28 +3777,26 @@ cv.onpointermove=function(e){if(!cur)return;var p=pt(e),l=cur[cur.length-1],d=Ma
 cv.onpointerup=cv.onpointercancel=function(){cur=null};
 document.querySelectorAll('.tabs button').forEach(function(b){b.onclick=function(){mode=b.dataset.m;document.querySelectorAll('.tabs button').forEach(function(x){x.classList.toggle('on',x===b)});$('typed').style.display=mode==='type'?'':'none';if(mode==='type'&&!$('typed').value)$('typed').value=$('who').value;draw()}});
 $('typed').oninput=draw;$('clr').onclick=function(){strokes=[];$('typed').value='';draw()};$('cancel').onclick=function(){$('pad').close()};
-function openPad(f,b){target={f:f,b:b};strokes=[];$('pad').showModal();requestAnimationFrame(fit)}
+function openPad(f){target=f;strokes=[];hl(f.id);$('pad').showModal();requestAnimationFrame(fit)}
 $('use').onclick=function(){
  if(mode==='draw'&&!strokes.length||mode==='type'&&!$('typed').value.trim()){alert('Sign in the box first.');return}
  var r=cv.getBoundingClientRect(),x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
  if(mode==='draw')strokes.forEach(function(s){s.forEach(function(p){x0=Math.min(x0,p.x);y0=Math.min(y0,p.y);x1=Math.max(x1,p.x);y1=Math.max(y1,p.y)})});else{x0=10;y0=10;x1=r.width-10;y1=r.height-30}
  var pad=8,k=devicePixelRatio||1,c=document.createElement('canvas');c.width=(x1-x0+pad*2)*k;c.height=(y1-y0+pad*2)*k;c.getContext('2d').drawImage(cv,(x0-pad)*k,(y0-pad)*k,c.width,c.height,0,0,c.width,c.height);
- /* white to transparent */
- var cx=c.getContext('2d'),id=cx.getImageData(0,0,c.width,c.height),q=id.data;for(var i=0;i<q.length;i+=4){var L=(q[i]+q[i+1]+q[i+2])/3;if(L>235)q[i+3]=0;else if(mode==='type'||L>200){}}cx.putImageData(id,0,0);
- var url=c.toDataURL('image/png');V[target.f.id]=url;save();target.b.textContent='';var im=new Image();im.src=url;target.b.appendChild(im);$('pad').close()};
+ var cx=c.getContext('2d'),id=cx.getImageData(0,0,c.width,c.height),q=id.data;for(var i=0;i<q.length;i+=4){if((q[i]+q[i+1]+q[i+2])/3>235)q[i+3]=0}cx.putImageData(id,0,0);
+ set(target.id,c.toDataURL('image/png'));$('pad').close()};
 /* finish: build the signed PDF in the browser */
 function loadLib(){return window.PDFLib?Promise.resolve():new Promise(function(res,rej){var s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';s.onload=res;s.onerror=function(){rej(new Error('Could not load the PDF maker - check the internet connection.'))};document.head.appendChild(s)})}
 function u8(url){var b=atob(url.split(',')[1]),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
 $('finish').onclick=function(){
  var who=$('who').value.trim(),miss=D.fields.filter(function(f){return f.type==='sig'&&!V[f.id]});
- if(!who){$('who').focus();alert('Please type your full name at the top first.');return}
- if(miss.length){els[miss[0].id].scrollIntoView({behavior:'smooth',block:'center'});alert(miss.length+' signature box'+(miss.length>1?'es are':' is')+' still empty.');return}
+ if(!who){$('who').focus();alert('Please type your full name first.');return}
+ if(miss.length){hl(miss[0].id);hlSide(miss[0].id);alert(miss.length+' signature'+(miss.length>1?'s are':' is')+' still missing.');return}
  $('finish').disabled=true;$('finish').textContent='Building the PDF…';
  loadLib().then(async function(){
   var L=PDFLib,pdf=await L.PDFDocument.create(),font=await pdf.embedFont(L.StandardFonts.Helvetica),when=new Date();
   for(var pi=0;pi<D.pages.length;pi++){var P=D.pages[pi],pg=pdf.addPage([P.w,P.h]);pg.drawImage(await pdf.embedJpg(u8(P.img)),{x:0,y:0,width:P.w,height:P.h});
-   for(var f of D.fields.filter(function(f){return f.page===pi})){var x=f.x*P.w,w=f.w*P.w,h=f.h*P.h,y=P.h-f.y*P.h-h,v=V[f.id];if(v==null)v=f.type==='check'?!!f.pre:(f.type==='date'?'':f.pre);
-    var ink=L.rgb(.06,.09,.17);
+   for(var f of D.fields.filter(function(f){return f.page===pi})){var x=f.x*P.w,w=f.w*P.w,h=f.h*P.h,y=P.h-f.y*P.h-h,v=V[f.id],ink=L.rgb(.06,.09,.17);
     if(f.type==='check'){if(v){var s=Math.min(w,h);pg.drawText('X',{x:x+s*.18,y:y+s*.15,size:s*.85,font:font,color:ink})}}
     else if(f.type==='radio'){if(v&&v===f.value)pg.drawCircle({x:x+w/2,y:y+h/2,size:Math.min(w,h)*.28,color:ink})}
     else if(f.type==='sig'){if(v){var im=await pdf.embedPng(u8(v)),k=Math.min(w/im.width,h/im.height);pg.drawImage(im,{x:x+(w-im.width*k)/2,y:y+(h-im.height*k)/2,width:im.width*k,height:im.height*k})}}
@@ -3638,7 +3883,9 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("reroll").addEventListener("click", newHand);
   $("last_hand").addEventListener("click", lastHand);
   $("save_hand").addEventListener("click", saveHand);
-  $("fw_go").onclick = makeFillWeb; $("fw_cancel").onclick = () => $("fillweb").close();
+  $("fw_go").onclick = makeFillWeb; $("fw_cancel").onclick = () => $("fillweb").close(); $("fw_pub").onclick = publishFillWeb;
+  $("fw_forget").onclick = () => { const st = lsGet(GH_KEY, {}); delete st.token; lsSet(GH_KEY, st); $("fw_token").value = ""; $("fw_token").placeholder = "github_pat_…"; $("fw_remember").checked = false; toast("Token removed from this browser."); };
+  $("formcol_btn").onclick = () => setFormCol(!formColOn); $("formcol_x").onclick = () => setFormCol(false);
   $("styles_export").onclick = () => exportBackup("styles");
   $("sigs_export").onclick = () => exportBackup("signatures");
   $("styles_import").onclick = $("sigs_import").onclick = () => $("backup_file").click();
