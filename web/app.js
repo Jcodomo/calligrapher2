@@ -2311,6 +2311,19 @@ async function exportPDF() {
     if (workMode === "doc" && doc) {
       snapshotNow();
       try { await document.fonts.ready; } catch (_) {}
+      const sp = scanParams();
+      if (!sp.on && !(sp.blur > 0) && !(sp.sharp > 0)) {
+        // Default: the original pages stay as they are (sharp text, small file, no compression marks); your
+        // edits are laid on top and form fields are filled in and fixed in place. Only pages that must be
+        // pictures (redactions, rotated pages, pictures) are drawn as pictures.
+        toast("Building PDF…");
+        const { pdf } = await buildOutputPdf();
+        try { pdf.getForm().updateFieldAppearances(); pdf.getForm().flatten(); } catch (_) {}
+        download(baseName() + "-edited.pdf", new Blob([await pdf.save()], { type: "application/pdf" }));
+        toast("Saved " + baseName() + "-edited.pdf.");
+        return;
+      }
+      // "Make it look scanned" (or blur / sharpen) is on: every page is a picture, with that look
       const res = Math.max(1, +$("resolution").value) / 2 + 0.5;
       let pdf = null;
       for (let i = 0; i < docPages.length; i++) {
@@ -2367,14 +2380,14 @@ async function buildOutputPdf() {
     const base = page.getRotation().angle % 360;
     const flat = docSources[p.src].kind !== "pdf" || p.rot || base || docItems.some((it) => (it.page || 0) === i && it.type === "redact");
     if (flat) {
-      const c = await composePage(i, 1.25, "nofields");
-      const img = await pdf.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.92)));
+      const c = await composePage(i, 2, "nofields");   // pages that must be pictures: sharp, light compression
+      const img = await pdf.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.95)));
       const pw = p.w / 2, ph = p.h / 2;
       const np = pdf.insertPage(i, [pw, ph]); np.drawImage(img, { x: 0, y: 0, width: pw, height: ph });
       pdf.removePage(i + 1); page = np;
     } else if (docItems.some((it) => (it.page || 0) === i && !it.isField && it.type !== "note") || docDraws.some((d) => (d.page || 0) === i)) {
       const crisp = docItems.some((it) => (it.page || 0) === i && it.tbox);
-      const ann = await composePage(i, crisp ? 1.5 : 1, "overlay");
+      const ann = await composePage(i, crisp ? 2 : 1.5, "overlay");
       const { width: pw, height: ph } = page.getSize();
       page.drawImage(await pdf.embedPng(ann.toDataURL("image/png")), { x: 0, y: 0, width: pw, height: ph });
     }
