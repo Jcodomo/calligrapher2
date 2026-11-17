@@ -1645,6 +1645,7 @@ function setEdTool(t) {
   if (t === "wm") { openWmPanel(); return; }
   if (t === "drawsig") { openDrawPad("sig"); return; }
   if (t === "fonts") { setEdTool("select"); openFontScan(); return; }
+  if (t === "fillweb") { setEdTool("select"); openFillWebDialog(); return; }
   if (t === "detect" || t === "detectall") { setEdTool("select"); detectFormFields(t === "detectall"); return; }
   edTool = t;
   if (edTool !== "select") { selId = null; selDraw = null; }
@@ -1666,7 +1667,7 @@ const TOOL_MAP = {
   write: ["sign", "handwrite"], handwrite: ["sign", "handwrite"], signature: ["sign", "sig", "signature"], sigimport: ["sign", "sig", "sigimport"],
   merge: ["organize"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "panel:split"], extract: ["organize", "panel:extract"], number: ["organize", "panel:number"],
   unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"], pdffonts: ["edit", "fonts"],
-  compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], pdf2word: ["convert", "panel:pdfword"], enhance: ["convert", "panel:enhance"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"],
+  compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], pdf2word: ["convert", "panel:pdfword"], fillweb: ["sign", "fillweb"], enhance: ["convert", "panel:enhance"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"],
 };
 function applyTool(id) {
   const m = TOOL_MAP[id]; if (!m || !doc) return false;
@@ -3390,6 +3391,182 @@ function sxWire() {
   window.addEventListener("resize", () => { if ($("sigx").open) sxDraw(); });
 }
 
+
+// ---- fill-in web page: a form becomes one HTML file anyone can open, fill in, sign and turn into a PDF ----
+// The page carries the form's pages as pictures plus its fields (the PDF's own fillable fields and the ones
+// added with Form fields). Nothing is uploaded: the person filling it in gets the completed, signed PDF in
+// their browser and sends it back. Hosted anywhere (GitHub Pages, a shared drive, email), it is the link.
+function collectFillFields() {
+  const out = [];
+  docPages.forEach((p, pi) => {
+    (p.fields || []).forEach((f, k) => out.push({ id: "p" + pi + "_" + k, page: pi, type: f.type === "check" ? "check" : f.type === "radio" ? "radio" : f.type === "choice" ? "choice" : "text",
+      name: f.name, label: f.name, value: f.type === "radio" ? f.value : undefined, options: f.options, pre: fieldValues[f.name] ?? "", x: f.nx, y: f.ny, w: f.nw, h: f.nh }));
+    docItems.filter((it) => it.isField && (it.page || 0) === pi).forEach((it) => {
+      const h = it.nw * it.ar * p.w / p.h;
+      out.push({ id: it.id, page: pi, type: it.fieldKind === "check" ? "check" : it.fieldKind === "sig" ? "sig" : it.fieldKind === "date" ? "date" : "text",
+        name: it.label || it.fieldKind, label: it.label || "", pre: it.fieldKind === "check" ? !!it.checked : it.fieldKind === "date" ? "" : (it.text || ""), x: it.nx, y: it.ny, w: it.nw, h });
+    });
+  });
+  return out;
+}
+async function buildFillPage(opts) {
+  const pages = [];
+  for (let i = 0; i < docPages.length; i++) {
+    const c = await composePage(i, 1, "nofields");                  // the page with your edits, without the fields
+    const k = Math.min(1, 1300 / c.width), s = document.createElement("canvas");
+    s.width = Math.round(c.width * k); s.height = Math.round(c.height * k);
+    const g = s.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, s.width, s.height); g.drawImage(c, 0, 0, s.width, s.height);
+    pages.push({ img: s.toDataURL("image/jpeg", 0.85), w: docPages[i].w / 2, h: docPages[i].h / 2 });
+  }
+  const data = { v: 1, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), title: opts.title, note: opts.note, email: opts.email, file: baseName(), pages, fields: collectFillFields() };
+  const json = JSON.stringify(data).replace(/</g, "\\u003c");
+  return FILL_PAGE_HTML.replace("__TITLE__", escapeHTML(opts.title)).replace("__DATA__", () => json);
+}
+function openFillWebDialog() {
+  if (!doc) return;
+  const n = collectFillFields().length;
+  if (!n) { toast("This document has no fields yet — add them with Form fields (or Find fields on this page) first."); return; }
+  $("fw_title").value = $("fw_title").value || baseName();
+  $("fw_count").textContent = `${n} field${n === 1 ? "" : "s"} (${collectFillFields().filter((f) => f.type === "sig").length} to sign) on ${docPages.length} page${docPages.length === 1 ? "" : "s"}.`;
+  $("fillweb").showModal();
+}
+async function makeFillWeb() {
+  const opts = { title: $("fw_title").value.trim() || baseName(), note: $("fw_note").value.trim(), email: $("fw_email").value.trim() };
+  if (opts.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(opts.email)) { $("fw_err").textContent = "That email address doesn't look right."; return; }
+  $("fw_err").textContent = ""; $("fw_go").disabled = true; toast("Building the fill-in page…");
+  try {
+    snapshotNow();
+    const html = await buildFillPage(opts);
+    download(baseName() + "-fill-and-sign.html", new Blob([html], { type: "text/html" }));
+    $("fillweb").close();
+    toast("Saved " + baseName() + "-fill-and-sign.html — send it, or put it online for a link.");
+  } catch (e) { $("fw_err").textContent = "Could not build the page: " + (e.message || e); }
+  finally { $("fw_go").disabled = false; }
+}
+const FILL_PAGE_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{--bg:#eef1f6;--card:#fff;--text:#1a2133;--muted:#5d677d;--line:#d5dbe6;--acc:#2b6cff;--req:#e5484d}
+@media (prefers-color-scheme:dark){:root{--bg:#10131b;--card:#1a1f2b;--text:#e8ecf4;--muted:#9aa4b8;--line:#2e3647}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;flex:1;min-width:180px}header .prog{color:var(--muted);font-size:13px}
+button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);padding:8px 14px}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+main{max-width:980px;margin:0 auto;padding:16px}
+.intro{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px}
+.intro label{display:block;font-weight:600;margin-top:8px}.intro input{width:100%;max-width:420px;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)}
+.pg{position:relative;margin:0 auto 16px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.18);width:100%}
+.pg img{display:block;width:100%;height:auto;user-select:none;pointer-events:none}
+.f{position:absolute;border:1.5px solid rgba(43,108,255,.6);background:rgba(43,108,255,.08);border-radius:3px;color:#10182b}
+.f.req.empty{border-color:var(--req);background:rgba(229,72,77,.08)}
+.f input[type=text],.f select{width:100%;height:100%;border:0;background:transparent;font:inherit;color:#10182b;padding:0 3px;outline:none}
+.f input[type=checkbox],.f input[type=radio]{width:100%;height:100%;margin:0;accent-color:#10182b}
+.f.sig{cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:12px;color:#2b6cff;font-weight:600}
+.f.sig img{max-width:100%;max-height:100%}
+.f:focus-within{box-shadow:0 0 0 3px rgba(43,108,255,.35)}
+dialog{border:0;border-radius:12px;padding:16px;width:min(620px,94vw);background:var(--card);color:var(--text)}
+dialog::backdrop{background:rgba(5,8,15,.55)}
+.tabs{display:flex;gap:6px;margin-bottom:10px}.tabs button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+canvas{width:100%;height:190px;border:1px dashed var(--line);border-radius:8px;background:#fff;touch-action:none;display:block}
+.row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap}
+#typed{width:100%;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px}
+.done{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:6px;display:none}
+small.m{color:var(--muted)}
+</style></head><body>
+<header><h1 id="t"></h1><span class="prog" id="prog"></span><button class="p" id="finish">Finish &amp; download signed PDF</button></header>
+<main>
+<div class="intro"><div id="note"></div>
+<label for="who">Your full name</label><input id="who" autocomplete="name" placeholder="Name as you sign">
+<small class="m">Fill in the boxes on the pages below, click a signature box to sign, then press Finish. Everything stays in your browser until you send the PDF back.</small></div>
+<div id="pages"></div>
+<div class="done" id="done"></div>
+</main>
+<dialog id="pad"><div class="tabs"><button class="on" data-m="draw">Draw</button><button data-m="type">Type</button></div>
+<input id="typed" placeholder="Type your name" style="display:none"><canvas id="cv"></canvas>
+<div class="row"><button id="clr">Clear</button><button id="cancel">Cancel</button><button class="p" id="use">Use this signature</button></div></dialog>
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(function(){
+var D=JSON.parse(document.getElementById('data').textContent), V={}, KEY='ghostfill_'+D.id;
+try{V=JSON.parse(localStorage.getItem(KEY)||'{}')||{}}catch(e){}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(V))}catch(e){}prog()}
+var $=function(i){return document.getElementById(i)};
+$('t').textContent=D.title;document.title=D.title;
+if(D.note){$('note').textContent=D.note;$('note').style.marginBottom='6px'}
+$('who').value=V.__who||'';$('who').oninput=function(){V.__who=$('who').value;save()};
+var today=new Date().toLocaleDateString();
+var host=$('pages'),els={};
+D.pages.forEach(function(p,pi){var d=document.createElement('div');d.className='pg';d.style.maxWidth=Math.round(p.w*1.6)+'px';
+ var im=document.createElement('img');im.src=p.img;im.alt='Page '+(pi+1);d.appendChild(im);
+ D.fields.filter(function(f){return f.page===pi}).forEach(function(f){
+  var b=document.createElement('div');b.className='f'+(f.type==='sig'?' sig req':'');b.title=f.label||'';
+  b.style.left=f.x*100+'%';b.style.top=f.y*100+'%';b.style.width=f.w*100+'%';b.style.height=f.h*100+'%';b.dataset.h=f.h;b.dataset.ph=p.h;
+  var v=V[f.id];
+  if(f.type==='check'){var c=document.createElement('input');c.type='checkbox';c.checked=v!=null?!!v:!!f.pre;c.onchange=function(){V[f.id]=c.checked;save()};b.appendChild(c);b.style.background='transparent'}
+  else if(f.type==='radio'){var r=document.createElement('input');r.type='radio';r.name='r_'+f.name;r.checked=(v!=null?v:f.pre)===f.value;r.onchange=function(){D.fields.forEach(function(g){if(g.type==='radio'&&g.name===f.name)V[g.id]=g.id===f.id?f.value:''});save()};b.appendChild(r);b.style.background='transparent'}
+  else if(f.type==='choice'){var s=document.createElement('select');s.appendChild(new Option('',''));(f.options||[]).forEach(function(o){s.appendChild(new Option(o[1],o[0]))});s.value=v!=null?v:(f.pre||'');s.onchange=function(){V[f.id]=s.value;save()};b.appendChild(s)}
+  else if(f.type==='sig'){b.textContent='Click to sign';if(v){b.textContent='';var i2=new Image();i2.src=v;b.appendChild(i2)}b.onclick=function(){openPad(f,b)}}
+  else{var t=document.createElement('input');t.type='text';t.placeholder=f.type==='date'?'Date':(f.label&&f.label!=='Text'?f.label:'');t.value=v!=null?v:(f.type==='date'?today:(f.pre||''));if(v==null&&f.type==='date')V[f.id]=t.value;t.oninput=function(){V[f.id]=t.value;save()};b.appendChild(t)}
+  els[f.id]=b;d.appendChild(b)});
+ host.appendChild(d)});
+function sizeText(){document.querySelectorAll('.pg').forEach(function(pg){var W=pg.clientWidth;pg.querySelectorAll('.f').forEach(function(b){var h=b.clientHeight;b.style.fontSize=Math.max(9,Math.min(h*0.62,22))+'px'})})}
+addEventListener('resize',sizeText);addEventListener('load',sizeText);setTimeout(sizeText,50);
+function prog(){var sig=D.fields.filter(function(f){return f.type==='sig'}),left=sig.filter(function(f){return !V[f.id]}).length;
+ sig.forEach(function(f){els[f.id]&&els[f.id].classList.toggle('empty',!V[f.id])});
+ $('prog').textContent=sig.length?(left?left+' signature'+(left>1?'s':'')+' left':'All signed'):''}
+prog();
+/* signature pad */
+var cv=$('cv'),g=cv.getContext('2d'),mode='draw',strokes=[],cur=null,target=null;
+function fit(){var r=cv.getBoundingClientRect(),k=devicePixelRatio||1;cv.width=r.width*k;cv.height=r.height*k;g.setTransform(k,0,0,k,0,0);draw()}
+function draw(){var r=cv.getBoundingClientRect();g.clearRect(0,0,r.width,r.height);g.strokeStyle='#c9d0dc';g.beginPath();g.moveTo(20,r.height-40);g.lineTo(r.width-20,r.height-40);g.stroke();
+ g.strokeStyle=g.fillStyle='#1b2a6b';g.lineCap=g.lineJoin='round';
+ if(mode==='type'){var t=$('typed').value.trim(),h=58;g.font='italic '+h+'px "Segoe Script","Brush Script MT","Snell Roundhand",cursive';while(t&&g.measureText(t).width>r.width-40&&h>16){h-=2;g.font='italic '+h+'px "Segoe Script","Brush Script MT","Snell Roundhand",cursive'}if(t)g.fillText(t,20,r.height-48);return}
+ strokes.forEach(function(s){for(var i=1;i<s.length;i++){g.lineWidth=s[i].w;g.beginPath();g.moveTo(s[i-1].x,s[i-1].y);g.lineTo(s[i].x,s[i].y);g.stroke()}})}
+function pt(e){var r=cv.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top,t:e.timeStamp}}
+cv.onpointerdown=function(e){if(mode!=='draw')return;cv.setPointerCapture(e.pointerId);var p=pt(e);p.w=2.6;cur=[p];strokes.push(cur);draw()};
+cv.onpointermove=function(e){if(!cur)return;var p=pt(e),l=cur[cur.length-1],d=Math.hypot(p.x-l.x,p.y-l.y);if(d<1.2)return;var v=d/Math.max(1,p.t-l.t);p.w=l.w*.6+Math.max(1.1,Math.min(3.4,3.6-v*1.4))*.4;cur.push(p);draw()};
+cv.onpointerup=cv.onpointercancel=function(){cur=null};
+document.querySelectorAll('.tabs button').forEach(function(b){b.onclick=function(){mode=b.dataset.m;document.querySelectorAll('.tabs button').forEach(function(x){x.classList.toggle('on',x===b)});$('typed').style.display=mode==='type'?'':'none';if(mode==='type'&&!$('typed').value)$('typed').value=$('who').value;draw()}});
+$('typed').oninput=draw;$('clr').onclick=function(){strokes=[];$('typed').value='';draw()};$('cancel').onclick=function(){$('pad').close()};
+function openPad(f,b){target={f:f,b:b};strokes=[];$('pad').showModal();requestAnimationFrame(fit)}
+$('use').onclick=function(){
+ if(mode==='draw'&&!strokes.length||mode==='type'&&!$('typed').value.trim()){alert('Sign in the box first.');return}
+ var r=cv.getBoundingClientRect(),x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+ if(mode==='draw')strokes.forEach(function(s){s.forEach(function(p){x0=Math.min(x0,p.x);y0=Math.min(y0,p.y);x1=Math.max(x1,p.x);y1=Math.max(y1,p.y)})});else{x0=10;y0=10;x1=r.width-10;y1=r.height-30}
+ var pad=8,k=devicePixelRatio||1,c=document.createElement('canvas');c.width=(x1-x0+pad*2)*k;c.height=(y1-y0+pad*2)*k;c.getContext('2d').drawImage(cv,(x0-pad)*k,(y0-pad)*k,c.width,c.height,0,0,c.width,c.height);
+ /* white to transparent */
+ var cx=c.getContext('2d'),id=cx.getImageData(0,0,c.width,c.height),q=id.data;for(var i=0;i<q.length;i+=4){var L=(q[i]+q[i+1]+q[i+2])/3;if(L>235)q[i+3]=0;else if(mode==='type'||L>200){}}cx.putImageData(id,0,0);
+ var url=c.toDataURL('image/png');V[target.f.id]=url;save();target.b.textContent='';var im=new Image();im.src=url;target.b.appendChild(im);$('pad').close()};
+/* finish: build the signed PDF in the browser */
+function loadLib(){return window.PDFLib?Promise.resolve():new Promise(function(res,rej){var s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';s.onload=res;s.onerror=function(){rej(new Error('Could not load the PDF maker - check the internet connection.'))};document.head.appendChild(s)})}
+function u8(url){var b=atob(url.split(',')[1]),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
+$('finish').onclick=function(){
+ var who=$('who').value.trim(),miss=D.fields.filter(function(f){return f.type==='sig'&&!V[f.id]});
+ if(!who){$('who').focus();alert('Please type your full name at the top first.');return}
+ if(miss.length){els[miss[0].id].scrollIntoView({behavior:'smooth',block:'center'});alert(miss.length+' signature box'+(miss.length>1?'es are':' is')+' still empty.');return}
+ $('finish').disabled=true;$('finish').textContent='Building the PDF…';
+ loadLib().then(async function(){
+  var L=PDFLib,pdf=await L.PDFDocument.create(),font=await pdf.embedFont(L.StandardFonts.Helvetica),when=new Date();
+  for(var pi=0;pi<D.pages.length;pi++){var P=D.pages[pi],pg=pdf.addPage([P.w,P.h]);pg.drawImage(await pdf.embedJpg(u8(P.img)),{x:0,y:0,width:P.w,height:P.h});
+   for(var f of D.fields.filter(function(f){return f.page===pi})){var x=f.x*P.w,w=f.w*P.w,h=f.h*P.h,y=P.h-f.y*P.h-h,v=V[f.id];if(v==null)v=f.type==='check'?!!f.pre:(f.type==='date'?'':f.pre);
+    var ink=L.rgb(.06,.09,.17);
+    if(f.type==='check'){if(v){var s=Math.min(w,h);pg.drawText('X',{x:x+s*.18,y:y+s*.15,size:s*.85,font:font,color:ink})}}
+    else if(f.type==='radio'){if(v&&v===f.value)pg.drawCircle({x:x+w/2,y:y+h/2,size:Math.min(w,h)*.28,color:ink})}
+    else if(f.type==='sig'){if(v){var im=await pdf.embedPng(u8(v)),k=Math.min(w/im.width,h/im.height);pg.drawImage(im,{x:x+(w-im.width*k)/2,y:y+(h-im.height*k)/2,width:im.width*k,height:im.height*k})}}
+    else{var t=String(v||'');if(f.type==='choice'){var o=(f.options||[]).find(function(o){return o[0]===t});if(o)t=o[1]}
+     if(t){var sz=Math.min(h*.68,12);while(sz>5&&font.widthOfTextAtSize(t,sz)>w-4)sz-=.5;pg.drawText(t,{x:x+2,y:y+(h-sz)/2+sz*.18,size:sz,font:font,color:ink})}}}}
+  var last=pdf.getPage(pdf.getPageCount()-1);last.drawText('Completed and signed electronically by '+who+' on '+when.toLocaleString()+' (Ghost Calligrapher fill-in page).',{x:18,y:8,size:6.5,font:font,color:L.rgb(.35,.38,.45)});
+  pdf.setTitle(D.title);pdf.setAuthor(who);
+  var bytes=await pdf.save(),name=D.file+'-signed-'+who.replace(/[^\\w]+/g,'-')+'.pdf',a=document.createElement('a');a.href=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));a.download=name;document.body.appendChild(a);a.click();
+  var done=$('done');done.style.display='block';done.innerHTML='';var p1=document.createElement('p');p1.textContent='Saved '+name+' to your downloads.';done.appendChild(p1);
+  if(D.email){var p2=document.createElement('p');p2.textContent='Send it back to '+D.email+': ';var m=document.createElement('a');m.href='mailto:'+encodeURIComponent(D.email)+'?subject='+encodeURIComponent('Signed: '+D.title)+'&body='+encodeURIComponent('Hi,\\n\\nThe signed form is attached ('+name+').\\n\\n'+who);m.textContent='open an email';p2.appendChild(m);p2.appendChild(document.createTextNode(' and attach the PDF.'));done.appendChild(p2)}
+  done.scrollIntoView({behavior:'smooth'});
+ }).catch(function(e){alert(e.message||e)}).then(function(){$('finish').disabled=false;$('finish').textContent='Finish & download signed PDF'})};
+})();
+</script></body></html>`;
+
 // ---- boot ----------------------------------------------------------------
 
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
@@ -3461,6 +3638,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("reroll").addEventListener("click", newHand);
   $("last_hand").addEventListener("click", lastHand);
   $("save_hand").addEventListener("click", saveHand);
+  $("fw_go").onclick = makeFillWeb; $("fw_cancel").onclick = () => $("fillweb").close();
   $("styles_export").onclick = () => exportBackup("styles");
   $("sigs_export").onclick = () => exportBackup("signatures");
   $("styles_import").onclick = $("sigs_import").onclick = () => $("backup_file").click();

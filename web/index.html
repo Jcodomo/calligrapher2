@@ -602,7 +602,7 @@
       <button class="tb" data-tool="check" title="Tick or cross boxes"><svg class="i" viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9"/></svg><span class="tl">Tick</span></button>
       <div class="dd" data-dd="field">
         <button class="tb" data-ddbtn="field"><svg class="i" viewBox="0 0 20 20"><rect x="2.5" y="6" width="15" height="8" rx="1.5"/><path d="M5.5 10h5"/></svg><span class="tl" data-ddlabel>Form fields</span><svg class="i car" viewBox="0 0 10 10"><path d="M2 4l3 3 3-3"/></svg></button>
-        <div class="ddm"><button data-tool="field:text">▭ Text field</button><button data-tool="field:date">▭ Date field</button><button data-tool="field:check">☐ Checkbox field</button><button data-tool="field:sig">✒ Signature field</button><hr style="border:0;border-top:1px solid var(--line,#ddd);margin:4px 0"><button data-tool="detect">⌕ Find fields on this page</button><button data-tool="detectall">⌕ Find fields on all pages</button></div>
+        <div class="ddm"><button data-tool="field:text">▭ Text field</button><button data-tool="field:date">▭ Date field</button><button data-tool="field:check">☐ Checkbox field</button><button data-tool="field:sig">✒ Signature field</button><hr style="border:0;border-top:1px solid var(--line,#ddd);margin:4px 0"><button data-tool="detect">⌕ Find fields on this page</button><button data-tool="detectall">⌕ Find fields on all pages</button><hr style="border:0;border-top:1px solid var(--line,#ddd);margin:4px 0"><button data-tool="fillweb">🔗 Make a fill-in &amp; sign page</button></div>
       </div>
     </div>
     <div class="toolrow" data-mode="organize">
@@ -913,6 +913,16 @@ jumps over the lazy dog</textarea>
   </div>
 </dialog>
 
+<dialog class="dpad" id="fillweb">
+  <h3 style="margin:0 0 6px">Fill-in &amp; sign page</h3>
+  <div class="note" style="margin:0 0 10px">Turns this form into one web page (an .html file). Anyone who opens it can fill in the fields, sign, and download the completed, signed PDF to send back. Email the file, or put it online (GitHub Pages, a shared drive, your website) and send the link. Nothing is uploaded by Ghost Calligrapher.</div>
+  <div id="fw_count" class="note" style="margin:0 0 8px;font-weight:600"></div>
+  <label class="row" style="display:block"><span style="display:block;font-size:12.5px;margin-bottom:3px">Title shown on the page</span><input id="fw_title" type="text" style="width:100%"></label>
+  <label class="row" style="display:block;margin-top:8px"><span style="display:block;font-size:12.5px;margin-bottom:3px">Instructions (optional)</span><textarea id="fw_note" rows="2" style="width:100%" placeholder="e.g. Please fill in your details and sign on page 2."></textarea></label>
+  <label class="row" style="display:block;margin-top:8px"><span style="display:block;font-size:12.5px;margin-bottom:3px">Your email for the return (optional)</span><input id="fw_email" type="email" style="width:100%" placeholder="Shown as a ready-made email to send the signed PDF back"></label>
+  <div id="fw_err" style="color:#e5484d;font-size:12.5px;margin-top:6px"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button class="btn" id="fw_cancel" style="width:auto">Cancel</button><button class="btn primary" id="fw_go" style="width:auto">Create page</button></div>
+</dialog>
 <dialog class="dpad" id="fscan">
   <div class="dp-head"><b>Fonts in this PDF</b><button class="iconbtn" id="fs_x" title="Close">✕</button></div>
   <div class="dp-body">
@@ -955,7 +965,7 @@ jumps over the lazy dog</textarea>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=28"></script>
-<script type="module" src="./shell.js?v=9"></script>
+<script type="module" src="./app.js?v=29"></script>
+<script type="module" src="./shell.js?v=10"></script>
 </body>
 </html>

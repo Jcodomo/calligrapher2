@@ -140,6 +140,7 @@ const TOOLS = {
   crop:      { name: "Crop PDF", desc: "Trim the margins off every page.", c: C.edit, i: "crop", mode: "pdf", tool: "crop", accept: PDF_IN },
   watermark: { name: "Watermark PDF", desc: "Stamp DRAFT, CONFIDENTIAL or your own words.", c: C.edit, i: "stamp", mode: "pdf", tool: "watermark", accept: PDF_IN },
   pdf2img:   { name: "PDF to JPG / PNG", desc: "Save every page of a PDF as a picture.", c: C.conv, i: "image", mode: "pdf", tool: "img", accept: PDF_IN },
+  fillweb:   { name: "Fill & Sign Link", desc: "Turn a form into a web page others can fill in and sign online.", c: C.write, i: "sign", mode: "doc", tool: "fillweb", accept: DOC_IN },
   pdf2word:  { name: "PDF to Word", desc: "Turn a PDF into an editable Word document (.docx); scans are read with OCR.", c: C.conv, i: "DOC", mode: "pdf", tool: "pdfword", accept: PDF_IN },
   enhance:   { name: "Clean Up & Upscale", desc: "Make blurry scans, photos and small pictures into a sharp, high-resolution PDF with AI.", c: C.conv, i: "image", mode: "pdf", tool: "enhance", accept: "application/pdf,.pdf,image/*" },
   img2pdf:   { name: "JPG / PNG to PDF", desc: "Turn one or more pictures into a single PDF.", c: C.conv, i: "image", mode: "convert", multiple: true, accept: "image/*" },
@@ -157,7 +158,7 @@ const TOOLS = {
 };
 const MENU = [
   ["Edit", ["edit", "annotate", "edittext", "addtext", "addimage", "draw", "highlight", "whiteout", "notes", "unwatermark", "pdffonts"]],
-  ["Fill & Sign", ["sign", "fillsign", "adddate", "forms", "fillform"]],
+  ["Fill & Sign", ["sign", "fillsign", "adddate", "forms", "fillform", "fillweb"]],
   ["Organize", ["merge", "split", "rotate", "delete", "extract", "organize"]],
   ["Optimize", ["compress", "number", "crop", "watermark"]],
   ["Convert", ["pdf2img", "img2pdf", "pdf2word", "enhance", "txt2pdf", "ocr"]],
