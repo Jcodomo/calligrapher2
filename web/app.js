@@ -2294,7 +2294,12 @@ function pageHasContent(pi) { return docItems.some((it) => (it.page || 0) === pi
 async function composeCanvas() {
   const res = +$("resolution").value;
   try { await document.fonts.ready; } catch (_) {}
-  if (workMode === "doc" && doc) return finishCanvas(await composePage(curPage, res / 2));
+  if (workMode === "doc" && doc) {
+    const c = finishCanvas(await composePage(curPage, res / 2)), W0 = Math.round(docPages[curPage].w * res / 2), H0 = Math.round(docPages[curPage].h * res / 2);
+    if (c.width === W0 && c.height === H0) return c;
+    const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d");   // trim the scanned look's tilt back to the page size
+    g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); return t;
+  }
   const W = Math.round(hwW * res), H = Math.round(hwH * res);
   const c = document.createElement("canvas"); c.width = W; c.height = H;
   const ctx = c.getContext("2d");
@@ -2347,7 +2352,13 @@ async function exportPDF() {
       let pdf = null;
       for (let i = 0; i < docPages.length; i++) {
         toast(`Building PDF… page ${i + 1} of ${docPages.length}`);
-        const c = finishCanvas(await composePage(i, res));
+        let c = finishCanvas(await composePage(i, res));
+        // the scanned look tilts the page, which grows the picture a little: trim back to the page's own size
+        const W0 = Math.round(docPages[i].w * res), H0 = Math.round(docPages[i].h * res);
+        if (c.width !== W0 || c.height !== H0) {
+          const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d");
+          g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); c = t;
+        }
         const pw = c.width / (2 * res), ph = c.height / (2 * res), o = pw > ph ? "l" : "p";
         if (!pdf) pdf = new jsPDF({ orientation: o, unit: "pt", format: [pw, ph], compress: true });
         else pdf.addPage([pw, ph], o);
