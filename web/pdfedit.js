@@ -26,6 +26,7 @@ const PDFLib = () => window.PDFLib;
 
 // ---- small utilities -------------------------------------------------------
 function dl(name, blob) {
+  if (!blob || !blob.size) { note("Nothing to save — the result came out empty. Try again.", true); return; }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 3000);
@@ -370,10 +371,10 @@ function panelShell(title, html) {
 }
 async function withBusy(msg, fn) { note(msg); try { await fn(); } catch (e) { note("Failed: " + (e.message || e), true); } }
 
-const NO_DOC_TOOLS = new Set(["merge", "txt2pdf", "img", "unlock"]);
+const NO_DOC_TOOLS = new Set(["merge", "txt2pdf", "img", "unlock", "imgpdf", "enhance"]);   // these open empty: they have their own Add buttons
 function openTool(t) {
   activeTool = t.id;
-  if (t.kind !== "server" && !NO_DOC_TOOLS.has(t.id) && !pages.length) { note("Open a PDF first — use “Open PDF(s)”.", true); return; }
+  if (t.kind !== "server" && !NO_DOC_TOOLS.has(t.id) && !pages.length) { note("Open a PDF or pictures first — use “Add PDFs or pictures”, or drop files on the page area.", true); return; }
   if (t.kind === "action") { t.run(); return; }
   if (t.kind === "server") { openServerNote(t); return; }
   if (t.id === "split") openSplit();
