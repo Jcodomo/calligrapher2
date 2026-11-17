@@ -285,6 +285,9 @@
   .org-tools .ot-dup .tl{color:#e5484d;font-weight:600}.org-tools .ot-del{border:1px solid #e5484d;color:#e5484d}.org-tools .ot-del:hover{background:#e5484d;color:#fff}.org-tools .ot-del:hover .tl{color:#fff}
   .org-tools .ot-busy{font-size:12.5px;color:var(--muted);padding:0 6px}.org-tools .ot-ok{font-size:12.5px;color:#2e9d5b;padding:0 6px}
   .og .ogdup{position:absolute;left:6px;right:6px;bottom:36px;background:#e5484d;color:#fff;font-size:11px;padding:2px 6px;border-radius:6px;text-align:center;pointer-events:none}
+  .dl-panel{padding:12px!important;min-width:280px}
+  .dl-panel .dlr{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px}.dl-panel .dlr span{width:58px;color:var(--muted)}.dl-panel select{flex:1;height:32px}
+  .dl-panel .dl-hint{font-size:12px;color:var(--muted);margin:2px 0 10px;line-height:1.4}.dl-panel #dl_go{width:100%}
   .formcol{display:none;flex-direction:column;width:330px;flex:none;background:var(--surface);border-left:1px solid var(--line);padding:12px 14px;overflow:auto;min-height:0}
   body.formcol-open[data-work=doc] .formcol{display:flex}
   .fc-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}.fc-x{border:0;background:none;color:var(--muted);cursor:pointer;font-size:15px}
@@ -600,10 +603,12 @@
       <span class="pagectr" id="ed_pagectr">1 / 1</span>
       <div class="dd" data-dd="dl">
         <button class="btn-blue" data-ddbtn="dl"><svg class="i" viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M4 17h12"/></svg><span class="tl">Download</span></button>
-        <div class="ddm right">
-          <button data-dl="pdf"><span><b>PDF</b><small>Everything baked in, all pages</small></span></button>
-          <button data-dl="fill"><span><b>PDF — keep it editable</b><small>Real text kept, form fields stay fillable</small></span></button>
-          <button data-dl="png"><span><b>PNG image</b><small>The current page</small></span></button>
+        <div class="ddm right dl-panel" id="dl_panel">
+          <label class="dlr"><span>Format</span><select id="dl_format"><option value="pdf">PDF</option><option value="fill">PDF — keep it editable</option><option value="docx">Word (.docx)</option><option value="png">PNG image (this page)</option><option value="jpg">JPG image (this page)</option></select></label>
+          <label class="dlr" id="dl_look_row"><span>Look</span><select id="dl_look"><option value="clean">Clean (as is)</option><option value="light">Slightly scanned</option><option value="scanned">Scanned</option><option value="photocopy">Photocopy (black &amp; white)</option><option value="custom">My scan settings (side panel)</option></select></label>
+          <label class="dlr" id="dl_quality_row"><span>Quality</span><select id="dl_quality"><option value="best">Best (largest)</option><option value="balanced">Balanced</option><option value="small">Smallest file</option></select></label>
+          <div class="dl-hint" id="dl_hint"></div>
+          <button class="btn primary" id="dl_go" type="button">⤓ Download</button>
         </div>
       </div>
       <button class="ibtn" id="ed_side_btn" title="Show or hide the side panel"><svg class="i" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.5"/><path d="M12 4v12"/></svg></button>
@@ -1048,7 +1053,7 @@ jumps over the lazy dog</textarea>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=61"></script>
+<script type="module" src="./app.js?v=64"></script>
 <script type="module" src="./shell.js?v=11"></script>
 </body>
 </html>

@@ -1616,6 +1616,14 @@ export function initPdfEditor() {
     openTool(t);
   };
   window.__cal2AddPdfFiles = (files) => addFiles(files);
+  // the editor's Download → Word: a temporary source, converted, then removed (the PDF tools' pages are untouched)
+  window.__cal2DocxFromBytes = async (bytes, name, onProg) => {
+    const src = { id: "docx" + Date.now(), name: (name || "document") + ".pdf", bytes: new Uint8Array(bytes) };
+    sources.push(src);
+    try { const d = await jsDoc(src); const list = []; for (let i = 0; i < d.numPages; i++) list.push({ srcId: src.id, srcIndex: i, rot: 0, red: [] });
+      return await pdfToDocx(list, { mode: "text", scans: "ocr" }, onProg || (() => {})); }
+    finally { sources = sources.filter((q) => q !== src); jsDocs.delete(src.id); }
+  };
   // the editor's Organize view uses the same duplicate check and page-number reader
   window.__cal2PageTools = { duplicates: (list, maxDist, onProg) => findDupPairs(list, maxDist, onProg), pageNumber: (ad, ocr) => pageNumberOf(ad, ocr), numbersLookReal };
   window.__cal2ResetPdf = () => { resetAll(); backToGrid(); };

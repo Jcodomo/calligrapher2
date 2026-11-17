@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=39";
+import { initPdfEditor } from "./pdfedit.js?v=40";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
@@ -368,7 +368,20 @@ function addFlourish(svg) {
 }
 
 // Read the Scan & finish controls into one object (shared by preview + export).
+// ---- download options: format, look (clean by default) and quality ----------------------------
+const DL_KEY = "cal2_dl_opts";
+const dlOpts = Object.assign({ format: "pdf", look: "clean", quality: "balanced" }, (() => { try { return JSON.parse(localStorage.getItem(DL_KEY) || "{}") || {}; } catch (_) { return {}; } })());
+const LOOKS = {
+  clean:     { on: false, blur: 0, sharp: 0 },
+  light:     { on: true, cspace: "color", border: false, rotate: 0.2, rotvar: 0.35, bright: 1.02, contrast: 1.05, noise: 5, yellow: 0.02, blem: 0.08, blur: 0.25, sharp: 0 },
+  scanned:   { on: true, cspace: "color", border: false, rotate: 0.6, rotvar: 0.9, bright: 1.03, contrast: 1.12, noise: 12, yellow: 0.07, blem: 0.22, blur: 0.45, sharp: 0 },
+  photocopy: { on: true, cspace: "bw", border: false, rotate: 0.4, rotvar: 0.8, bright: 1.04, contrast: 1.1, noise: 16, yellow: 0, blem: 0.3, blur: 0.35, sharp: 0 },
+};
+const QUALITY = { best: { scale: 2, q: 0.95, keepPages: true }, balanced: { scale: 1.5, q: 0.85, keepPages: true }, small: { scale: 1, q: 0.6, keepPages: false } };
+let exportLook = null;          // set while a download is being built ("custom" = the side panel's scan settings)
+const dlQuality = () => QUALITY[dlOpts.quality] || QUALITY.balanced;
 function scanParams() {
+  if (exportLook && LOOKS[exportLook]) return { cspace: "color", border: false, rotate: 0, rotvar: 0, bright: 1, contrast: 1, noise: 0, yellow: 0, blem: 0, blur: 0, sharp: 0, ...LOOKS[exportLook] };
   return {
     on: toggles.scanned,
     cspace: $("cspace") ? $("cspace").value : "color",
@@ -2297,11 +2310,17 @@ function download(name, blob) {
 let toastTimer = 0;
 function toast(m) { const t = $("toast"); if (!t) return; t.textContent = m; t.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("on"), 2800); }
 function flash(m) { toast(m); }
-async function exportPNG() {
+async function exportPNG(fmt = "png") {
   try {
-    const c = await composeCanvas();
-    const name = workMode === "doc" && doc ? `${baseName()}-page${curPage + 1}.png` : "calligraphy.png";
-    c.toBlob((b) => { download(name, b); toast("Saved PNG."); }, "image/png");
+    const c = await composeCanvas(), jpg = fmt === "jpg";
+    let out = c;
+    if (jpg) {   // JPG has no transparency: put the page on white
+      out = document.createElement("canvas"); out.width = c.width; out.height = c.height;
+      const g = out.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, out.width, out.height); g.drawImage(c, 0, 0);
+    }
+    const ext = jpg ? "jpg" : "png";
+    const name = workMode === "doc" && doc ? `${baseName()}-page${curPage + 1}.${ext}` : "calligraphy." + ext;
+    out.toBlob((b) => { download(name, b); toast("Saved " + ext.toUpperCase() + "."); }, jpg ? "image/jpeg" : "image/png", dlQuality().q);
   } catch (e) { errEl.textContent = "PNG export failed: " + (e.message || e); }
 }
 // Flattened PDF: every page as a picture with everything baked in.
@@ -2311,8 +2330,8 @@ async function exportPDF() {
     if (workMode === "doc" && doc) {
       snapshotNow();
       try { await document.fonts.ready; } catch (_) {}
-      const sp = scanParams();
-      if (!sp.on && !(sp.blur > 0) && !(sp.sharp > 0)) {
+      const sp = scanParams(), Q = dlQuality();
+      if (!sp.on && !(sp.blur > 0) && !(sp.sharp > 0) && Q.keepPages) {
         // Default: the original pages stay as they are (sharp text, small file, no compression marks); your
         // edits are laid on top and form fields are filled in and fixed in place. Only pages that must be
         // pictures (redactions, rotated pages, pictures) are drawn as pictures.
@@ -2324,7 +2343,7 @@ async function exportPDF() {
         return;
       }
       // "Make it look scanned" (or blur / sharpen) is on: every page is a picture, with that look
-      const res = Math.max(1, +$("resolution").value) / 2 + 0.5;
+      const res = exportLook === "custom" ? Math.max(1, +$("resolution").value) / 2 + 0.5 : Q.scale;
       let pdf = null;
       for (let i = 0; i < docPages.length; i++) {
         toast(`Building PDF… page ${i + 1} of ${docPages.length}`);
@@ -2332,7 +2351,15 @@ async function exportPDF() {
         const pw = c.width / (2 * res), ph = c.height / (2 * res), o = pw > ph ? "l" : "p";
         if (!pdf) pdf = new jsPDF({ orientation: o, unit: "pt", format: [pw, ph], compress: true });
         else pdf.addPage([pw, ph], o);
-        pdf.addImage(c.toDataURL("image/jpeg", 0.92), "JPEG", 0, 0, pw, ph);
+        pdf.addImage(c.toDataURL("image/jpeg", Q.q), "JPEG", 0, 0, pw, ph);
+      }
+      // "Smallest file" with the clean look: pictures of a text PDF can be bigger than the PDF itself - keep the smaller
+      if (!Q.keepPages && !sp.on && !(sp.blur > 0) && !(sp.sharp > 0)) {
+        const pics = pdf.output("blob"), kept = await buildOutputPdf();
+        try { kept.pdf.getForm().updateFieldAppearances(); kept.pdf.getForm().flatten(); } catch (_) {}
+        const keptBytes = await kept.pdf.save();
+        if (keptBytes.length <= pics.size) { download(baseName() + "-edited.pdf", new Blob([keptBytes], { type: "application/pdf" })); toast(`Saved ${baseName()}-edited.pdf — already smallest as it is (${Math.round(keptBytes.length / 1024)} KB, text kept).`); return; }
+        download(baseName() + "-edited.pdf", pics); toast(`Saved ${baseName()}-edited.pdf (${Math.round(pics.size / 1024)} KB, pages as pictures).`); return;
       }
       pdf.save(baseName() + "-edited.pdf"); toast("Saved " + baseName() + "-edited.pdf.");
       return;
@@ -2380,8 +2407,8 @@ async function buildOutputPdf() {
     const base = page.getRotation().angle % 360;
     const flat = docSources[p.src].kind !== "pdf" || p.rot || base || docItems.some((it) => (it.page || 0) === i && it.type === "redact");
     if (flat) {
-      const c = await composePage(i, 2, "nofields");   // pages that must be pictures: sharp, light compression
-      const img = await pdf.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.95)));
+      const Q = dlQuality(), c = await composePage(i, Q.scale, "nofields");   // pages that must be pictures, at the chosen quality
+      const img = await pdf.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", Q.q)));
       const pw = p.w / 2, ph = p.h / 2;
       const np = pdf.insertPage(i, [pw, ph]); np.drawImage(img, { x: 0, y: 0, width: pw, height: ph });
       pdf.removePage(i + 1); page = np;
@@ -2430,6 +2457,14 @@ async function buildOutputPdf() {
   return { pdf, nf, nn };
 }
 async function buildDocumentBytes() { const { pdf } = await buildOutputPdf(); return pdf.save(); }
+async function exportWord() {
+  if (!doc || !window.__cal2DocxFromBytes) return;
+  try {
+    snapshotNow(); toast("Building the Word document…");
+    const blob = await window.__cal2DocxFromBytes(await buildDocumentBytes(), baseName(), (m) => toast(m));
+    download(baseName() + ".docx", blob); toast("Saved " + baseName() + ".docx.");
+  } catch (e) { toast("Word export failed: " + (e.message || e)); }
+}
 async function exportFillablePDF() {
   if (!doc) { errEl.textContent = "Open a document first."; return; }
   try {
@@ -4151,10 +4186,33 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
     closeDropdowns(); if (open) dd.classList.add("open");
   }));
   document.addEventListener("click", (e) => { if (!e.target.closest(".dd")) closeDropdowns(); if (!e.target.closest(".cpop,.cbtn,.fpop,.fbtn")) closePops(); });
-  document.querySelectorAll("#modebar [data-dl]").forEach((b) => b.addEventListener("click", () => {
-    closeDropdowns(); const k = b.dataset.dl;
-    if (k === "pdf") exportPDF(); else if (k === "fill") exportFillablePDF(); else exportPNG();
-  }));
+  // download panel: format, look, quality (remembered)
+  const dlSync = () => {
+    ["dl_format", "dl_look", "dl_quality"].forEach((id) => { $(id).value = dlOpts[id.slice(3)]; });
+    const f = dlOpts.format, pictureish = f === "pdf" || f === "png" || f === "jpg";
+    $("dl_look_row").style.display = pictureish ? "" : "none";
+    $("dl_quality_row").style.display = f === "fill" || f === "docx" || f === "png" ? "none" : "";
+    $("dl_hint").textContent = {
+      pdf: dlOpts.look === "clean" ? (dlOpts.quality === "small" ? "Smallest file: pages saved as compressed pictures (text no longer selectable)." : "Your pages stay as they are (sharp, selectable text); edits and form fields are fixed in place.") : "Pages are saved as pictures with this look.",
+      fill: "Real text kept; form fields and comments stay editable.",
+      docx: "An editable Word document; scanned pages are read with OCR.",
+      png: "The current page as a picture (lossless).",
+      jpg: "The current page as a picture (smaller than PNG).",
+    }[f];
+  };
+  ["dl_format", "dl_look", "dl_quality"].forEach((id) => { $(id).onchange = () => { dlOpts[id.slice(3)] = $(id).value; lsSet(DL_KEY, dlOpts); dlSync(); }; });
+  $("dl_panel").addEventListener("click", (e) => e.stopPropagation());
+  $("dl_go").onclick = async () => {
+    closeDropdowns(); const f = dlOpts.format;
+    exportLook = (f === "pdf" || f === "png" || f === "jpg") ? dlOpts.look : null;
+    try {
+      if (f === "pdf") await exportPDF();
+      else if (f === "fill") await exportFillablePDF();
+      else if (f === "docx") await exportWord();
+      else await exportPNG(f);
+    } finally { exportLook = null; }
+  };
+  dlSync();
   document.querySelectorAll("#ed_tools [data-org]").forEach((b) => b.onclick = () => {
     const sel = [...orgSel].sort((a, c) => a - c), a = b.dataset.org;
     if (a === "selall") { if (orgSel.size === docPages.length) orgSel.clear(); else docPages.forEach((_, i) => orgSel.add(i)); renderOrganize(); }
