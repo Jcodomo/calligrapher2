@@ -604,9 +604,9 @@
       <div class="dd" data-dd="dl">
         <button class="btn-blue" data-ddbtn="dl"><svg class="i" viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M4 17h12"/></svg><span class="tl">Download</span></button>
         <div class="ddm right dl-panel" id="dl_panel">
-          <label class="dlr"><span>Format</span><select id="dl_format"><option value="pdf">PDF</option><option value="fill">PDF — keep it editable</option><option value="docx">Word (.docx)</option><option value="png">PNG image (this page)</option><option value="jpg">JPG image (this page)</option></select></label>
+          <label class="dlr"><span>Format</span><select id="dl_format"><option value="pdf">PDF</option><option value="fill">PDF — keep it editable</option><option value="docx">Word (.docx)</option><option value="png">PNG image (this page)</option><option value="jpg">JPG image (this page)</option><option value="zip">All pages as pictures (.zip)</option><option value="txt">Text only (.txt)</option></select></label>
           <label class="dlr" id="dl_look_row"><span>Look</span><select id="dl_look"><option value="clean">Clean (as is)</option><option value="light">Slightly scanned</option><option value="scanned">Scanned</option><option value="photocopy">Photocopy (black &amp; white)</option><option value="custom">My scan settings (side panel)</option></select></label>
-          <label class="dlr" id="dl_quality_row"><span>Quality</span><select id="dl_quality"><option value="best">Best (largest)</option><option value="balanced">Balanced</option><option value="small">Smallest file</option></select></label>
+          <label class="dlr" id="dl_quality_row"><span>Quality</span><select id="dl_quality"><option value="exact">Exact (no quality loss)</option><option value="balanced">Balanced</option><option value="small">Smallest file</option></select></label>
           <div class="dl-hint" id="dl_hint"></div>
           <button class="btn primary" id="dl_go" type="button">⤓ Download</button>
         </div>
@@ -1053,7 +1053,7 @@ jumps over the lazy dog</textarea>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=66"></script>
+<script type="module" src="./app.js?v=68"></script>
 <script type="module" src="./shell.js?v=11"></script>
 </body>
 </html>

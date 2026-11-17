@@ -370,16 +370,18 @@ function addFlourish(svg) {
 // Read the Scan & finish controls into one object (shared by preview + export).
 // ---- download options: format, look (clean by default) and quality ----------------------------
 const DL_KEY = "cal2_dl_opts";
-const dlOpts = Object.assign({ format: "pdf", look: "clean", quality: "balanced" }, (() => { try { return JSON.parse(localStorage.getItem(DL_KEY) || "{}") || {}; } catch (_) { return {}; } })());
+const dlOpts = Object.assign({ format: "pdf", look: "clean", quality: "exact" }, (() => { try { const v = JSON.parse(localStorage.getItem(DL_KEY) || "{}") || {}; if (!v.v2) delete v.quality; return v; } catch (_) { return {}; } })(), { v2: 1 });
 const LOOKS = {
   clean:     { on: false, blur: 0, sharp: 0 },
   light:     { on: true, cspace: "color", border: false, rotate: 0.2, rotvar: 0.35, bright: 1.02, contrast: 1.05, noise: 5, yellow: 0.02, blem: 0.08, blur: 0.25, sharp: 0 },
   scanned:   { on: true, cspace: "color", border: false, rotate: 0.6, rotvar: 0.9, bright: 1.03, contrast: 1.12, noise: 12, yellow: 0.07, blem: 0.22, blur: 0.45, sharp: 0 },
   photocopy: { on: true, cspace: "bw", border: false, rotate: 0.4, rotvar: 0.8, bright: 1.04, contrast: 1.1, noise: 16, yellow: 0, blem: 0.3, blur: 0.35, sharp: 0 },
 };
-const QUALITY = { best: { scale: 2, q: 0.95, keepPages: true }, balanced: { scale: 1.5, q: 0.85, keepPages: true }, small: { scale: 1, q: 0.6, keepPages: false } };
+// scale: pixels per page unit (a page unit is half a point, so 2 = 288 dpi); overlay: the same for your edits laid on top
+const QUALITY = { exact: { scale: 2.1, overlay: 2.5, q: 0.95, keepPages: true }, best: { scale: 2.1, overlay: 2.5, q: 0.95, keepPages: true },
+  balanced: { scale: 1.4, overlay: 2, q: 0.85, keepPages: true }, small: { scale: 1, overlay: 1.5, q: 0.6, keepPages: false } };
 let exportLook = null;          // set while a download is being built ("custom" = the side panel's scan settings)
-const dlQuality = () => QUALITY[dlOpts.quality] || QUALITY.balanced;
+const dlQuality = () => QUALITY[dlOpts.quality] || QUALITY.exact;
 function scanParams() {
   if (exportLook && LOOKS[exportLook]) return { cspace: "color", border: false, rotate: 0, rotvar: 0, bright: 1, contrast: 1, noise: 0, yellow: 0, blem: 0, blur: 0, sharp: 0, ...LOOKS[exportLook] };
   return {
@@ -2262,14 +2264,29 @@ async function drawDocItemToCtx(ctx, it, W, H, res) {
 // Compose a page. mode: "all" (picture + everything), "overlay" (objects only, no
 // picture / interactive fields / notes — laid over a vector page), "nofields"
 // (picture + everything except interactive fields and notes).
-async function composePage(pi, res, mode = "all") {
+// The page drawn fresh from its source at any resolution (the on-screen preview is only 144 dpi):
+// PDF pages rendered by pdf.js, picture pages from the full-size picture.
+async function sourceCanvas(pi, res) {
+  const p = await ensurePageImage(pi), src = docSources[p.src];
+  const W = Math.round(p.w * res), H = Math.round(p.h * res);
+  const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
+  if (src.kind === "pdf" && src.pdf) {
+    const page = await src.pdf.getPage(p.idx + 1);
+    const vp = page.getViewport({ scale: 2 * res, rotation: ((page.rotate || 0) + p.rot) % 360 });
+    await page.render({ canvasContext: g, viewport: vp, annotationMode: window.pdfjsLib.AnnotationMode ? window.pdfjsLib.AnnotationMode.ENABLE_FORMS : 1 }).promise;
+  } else if (p.img) { g.imageSmoothingQuality = "high"; g.drawImage(p.img, 0, 0, W, H); }
+  return c;
+}
+async function composePage(pi, res, mode = "all", opts = {}) {
   const p = await ensurePageImage(pi);
   const W = Math.round(p.w * res), H = Math.round(p.h * res);
   const c = document.createElement("canvas"); c.width = W; c.height = H;
   const ctx = c.getContext("2d");
   if (mode !== "overlay") {
     ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
-    if (p.img) ctx.drawImage(p.img, 0, 0, W, H);
+    if (opts.sharp) ctx.drawImage(await sourceCanvas(pi, res), 0, 0);
+    else if (p.img) ctx.drawImage(p.img, 0, 0, W, H);
     for (const f of (p.fields || [])) {
       const v = fieldValues[f.name]; if (v == null || v === "" || v === false) continue;
       const x = f.nx * W, y = f.ny * H, w = f.nw * W, h = f.nh * H;
@@ -2289,13 +2306,22 @@ async function composePage(pi, res, mode = "all") {
   drawAnnToCanvas(ctx, W, H, ["pen", "line", "arrow", "underline", "strike"], pi);
   return c;
 }
+// the area of a see-through canvas that has anything drawn on it (with a small margin), or null
+function inkBox(c) {
+  const W = c.width, H = c.height, d = c.getContext("2d").getImageData(0, 0, W, H).data;
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) { const row = y * W * 4; for (let x = 0; x < W; x++) if (d[row + x * 4 + 3]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; y1 = y; } }
+  if (x1 < 0) return null;
+  const m = 4; x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(W - 1, x1 + m); y1 = Math.min(H - 1, y1 + m);
+  return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
 function pageHasContent(pi) { return docItems.some((it) => (it.page || 0) === pi) || docDraws.some((d) => (d.page || 0) === pi); }
 
 async function composeCanvas() {
   const res = +$("resolution").value;
   try { await document.fonts.ready; } catch (_) {}
   if (workMode === "doc" && doc) {
-    const c = finishCanvas(await composePage(curPage, res / 2)), W0 = Math.round(docPages[curPage].w * res / 2), H0 = Math.round(docPages[curPage].h * res / 2);
+    const r2 = Math.max(res / 2, dlQuality().scale), c = finishCanvas(await composePage(curPage, r2, "all", { sharp: true })), W0 = Math.round(docPages[curPage].w * r2), H0 = Math.round(docPages[curPage].h * r2);
     if (c.width === W0 && c.height === H0) return c;
     const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d");   // trim the scanned look's tilt back to the page size
     g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); return t;
@@ -2352,7 +2378,7 @@ async function exportPDF() {
       let pdf = null;
       for (let i = 0; i < docPages.length; i++) {
         toast(`Building PDF… page ${i + 1} of ${docPages.length}`);
-        let c = finishCanvas(await composePage(i, res));
+        let c = finishCanvas(await composePage(i, res, "all", { sharp: true }));
         // the scanned look tilts the page, which grows the picture a little: trim back to the page's own size
         const W0 = Math.round(docPages[i].w * res), H0 = Math.round(docPages[i].h * res);
         if (c.width !== W0 || c.height !== H0) {
@@ -2416,18 +2442,38 @@ async function buildOutputPdf() {
     const p = docPages[i];
     let page = pdf.getPage(i);
     const base = page.getRotation().angle % 360;
-    const flat = docSources[p.src].kind !== "pdf" || p.rot || base || docItems.some((it) => (it.page || 0) === i && it.type === "redact");
-    if (flat) {
-      const Q = dlQuality(), c = await composePage(i, Q.scale, "nofields");   // pages that must be pictures, at the chosen quality
+    const Q = dlQuality(), src = docSources[p.src], pw0 = p.w / 2, ph0 = p.h / 2;
+    const redact = docItems.some((it) => (it.page || 0) === i && it.type === "redact");
+    const replace = (np) => { pdf.removePage(i + 1); page = np; };
+    let laidOver = false;
+    if (redact) {
+      // a redaction must remove what's under it: the page becomes a picture, drawn fresh from the source (300 dpi)
+      const c = await composePage(i, Q.scale, "nofields", { sharp: true });
       const img = await pdf.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", Q.q)));
-      const pw = p.w / 2, ph = p.h / 2;
-      const np = pdf.insertPage(i, [pw, ph]); np.drawImage(img, { x: 0, y: 0, width: pw, height: ph });
-      pdf.removePage(i + 1); page = np;
-    } else if (docItems.some((it) => (it.page || 0) === i && !it.isField && it.type !== "note") || docDraws.some((d) => (d.page || 0) === i)) {
-      const crisp = docItems.some((it) => (it.page || 0) === i && it.tbox);
-      const ann = await composePage(i, crisp ? 2 : 1.5, "overlay");
-      const { width: pw, height: ph } = page.getSize();
-      page.drawImage(await pdf.embedPng(ann.toDataURL("image/png")), { x: 0, y: 0, width: pw, height: ph });
+      const np = pdf.insertPage(i, [pw0, ph0]); np.drawImage(img, { x: 0, y: 0, width: pw0, height: ph0 }); replace(np); laidOver = true;
+    } else if (src.kind !== "pdf") {
+      // a page that is a picture: your original picture file goes in untouched (only re-saved if it was turned)
+      const b = src.bytes, isJpg = b && b[0] === 0xFF && b[1] === 0xD8, isPng = b && b[0] === 0x89 && b[1] === 0x50;
+      let img;
+      if (!p.rot && isJpg) img = await pdf.embedJpg(b);
+      else if (!p.rot && isPng) img = await pdf.embedPng(b);
+      else { const c = document.createElement("canvas"); c.width = p.img.naturalWidth || p.w; c.height = p.img.naturalHeight || p.h; c.getContext("2d").drawImage(p.img, 0, 0, c.width, c.height); img = isJpg ? await pdf.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.97))) : await pdf.embedPng(dataURLtoU8(c.toDataURL("image/png"))); }
+      const np = pdf.insertPage(i, [pw0, ph0]); np.drawImage(img, { x: 0, y: 0, width: pw0, height: ph0 }); replace(np);
+    } else if ((base + (p.rot || 0)) % 360) {
+      // a turned PDF page stays vector: the original page is placed turned on a page of the new shape
+      const r = (base + (p.rot || 0)) % 360, emb = await pdf.embedPage(page), w0 = emb.width, h0 = emb.height;
+      const np = pdf.insertPage(i, [pw0, ph0]);
+      const at = r === 90 ? { x: 0, y: w0, rotate: L.degrees(-90) } : r === 180 ? { x: w0, y: h0, rotate: L.degrees(180) } : { x: h0, y: 0, rotate: L.degrees(90) };
+      np.drawPage(emb, { ...at, width: w0, height: h0 }); replace(np);
+    }
+    if (!laidOver && (docItems.some((it) => (it.page || 0) === i && !it.isField && it.type !== "note") || docDraws.some((d) => (d.page || 0) === i))) {
+      // your edits, drawn sharp (360 dpi) on a see-through layer, cropped to the area they cover
+      const ann = await composePage(i, Q.overlay, "overlay"), box = inkBox(ann);
+      if (box) {
+        const crop = document.createElement("canvas"); crop.width = box.w; crop.height = box.h; crop.getContext("2d").drawImage(ann, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+        const { width: PW, height: PH } = page.getSize(), kx = PW / ann.width, ky = PH / ann.height;
+        page.drawImage(await pdf.embedPng(dataURLtoU8(crop.toDataURL("image/png"))), { x: box.x * kx, y: PH - (box.y + box.h) * ky, width: box.w * kx, height: box.h * ky });
+      }
     }
     const { width: pw, height: ph } = page.getSize();
     for (const it of docItems) {
@@ -2468,6 +2514,34 @@ async function buildOutputPdf() {
   return { pdf, nf, nn };
 }
 async function buildDocumentBytes() { const { pdf } = await buildOutputPdf(); return pdf.save(); }
+// every page as a picture, zipped (PNG for Exact, JPG otherwise), with the chosen look
+async function exportAllImages() {
+  if (!doc) return;
+  if (!window.JSZip) await new Promise((res, rej) => { const sc = document.createElement("script"); sc.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); });
+  snapshotNow();
+  const Q = dlQuality(), png = dlOpts.quality === "exact", zip = new window.JSZip(), keep = curPage;
+  for (let i = 0; i < docPages.length; i++) {
+    toast(`Saving page ${i + 1} of ${docPages.length}…`);
+    let c = finishCanvas(await composePage(i, Q.scale, "all", { sharp: true }));
+    const W0 = Math.round(docPages[i].w * Q.scale), H0 = Math.round(docPages[i].h * Q.scale);
+    if (c.width !== W0 || c.height !== H0 || !png) { const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); c = t; }
+    zip.file(`${baseName()}-page${String(i + 1).padStart(2, "0")}.${png ? "png" : "jpg"}`, await new Promise((r) => c.toBlob(r, png ? "image/png" : "image/jpeg", Q.q)));
+  }
+  curPage = keep;
+  download(baseName() + "-pages.zip", await zip.generateAsync({ type: "blob" })); toast(`Saved ${baseName()}-pages.zip (${docPages.length} pictures).`);
+}
+// the document's text, page by page (the PDF's own text; OCR for scanned pages)
+async function exportText() {
+  if (!doc || !window.__cal2DocxFromBytes) return;
+  try {
+    snapshotNow(); toast("Reading the text…");
+    const blob = await window.__cal2DocxFromBytes(await buildDocumentBytes(), baseName(), (m) => toast(m));
+    const xml = await (await window.JSZip.loadAsync(blob)).file("word/document.xml").async("string");
+    const txt = xml.replace(/<w:br w:type="page"\/>/g, "\n\n\f").replace(/<w:tab\/>/g, "\t").replace(/<\/w:p>/g, "\n").replace(/<[^>]+>/g, "")
+      .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+    download(baseName() + ".txt", new Blob([txt], { type: "text/plain;charset=utf-8" })); toast("Saved " + baseName() + ".txt.");
+  } catch (e) { toast("Text export failed: " + (e.message || e)); }
+}
 async function exportWord() {
   if (!doc || !window.__cal2DocxFromBytes) return;
   try {
@@ -4200,14 +4274,16 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   // download panel: format, look, quality (remembered)
   const dlSync = () => {
     ["dl_format", "dl_look", "dl_quality"].forEach((id) => { $(id).value = dlOpts[id.slice(3)]; });
-    const f = dlOpts.format, pictureish = f === "pdf" || f === "png" || f === "jpg";
+    const f = dlOpts.format, pictureish = f === "pdf" || f === "png" || f === "jpg" || f === "zip";
     $("dl_look_row").style.display = pictureish ? "" : "none";
-    $("dl_quality_row").style.display = f === "fill" || f === "docx" || f === "png" ? "none" : "";
+    $("dl_quality_row").style.display = f === "fill" || f === "docx" || f === "txt" ? "none" : "";
     $("dl_hint").textContent = {
-      pdf: dlOpts.look === "clean" ? (dlOpts.quality === "small" ? "Smallest file: pages saved as compressed pictures (text no longer selectable)." : "Your pages stay as they are (sharp, selectable text); edits and form fields are fixed in place.") : "Pages are saved as pictures with this look.",
+      pdf: dlOpts.look === "clean" ? (dlOpts.quality === "small" ? "Smallest file: whichever is smaller — your pages as they are, or compressed pictures of them." : "Your pages stay exactly as they are (sharp, selectable text); edits and filled fields are added on top in high resolution.") : "Pages are saved as pictures with this look.",
+      zip: "Every page as a picture in one .zip — PNG for Exact, JPG otherwise.",
+      txt: "The document's text, page by page (scanned pages are read with OCR).",
       fill: "Real text kept; form fields and comments stay editable.",
       docx: "An editable Word document; scanned pages are read with OCR.",
-      png: "The current page as a picture (lossless).",
+      png: "The current page as a picture, sharp (300 dpi, lossless).",
       jpg: "The current page as a picture (smaller than PNG).",
     }[f];
   };
@@ -4215,11 +4291,13 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("dl_panel").addEventListener("click", (e) => e.stopPropagation());
   $("dl_go").onclick = async () => {
     closeDropdowns(); const f = dlOpts.format;
-    exportLook = (f === "pdf" || f === "png" || f === "jpg") ? dlOpts.look : null;
+    exportLook = (f === "pdf" || f === "png" || f === "jpg" || f === "zip") ? dlOpts.look : null;
     try {
       if (f === "pdf") await exportPDF();
       else if (f === "fill") await exportFillablePDF();
       else if (f === "docx") await exportWord();
+      else if (f === "zip") await exportAllImages();
+      else if (f === "txt") await exportText();
       else await exportPNG(f);
     } finally { exportLook = null; }
   };
