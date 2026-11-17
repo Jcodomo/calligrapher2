@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=34";
+import { initPdfEditor } from "./pdfedit.js?v=35";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
@@ -687,13 +687,89 @@ async function addBlankPage() {
   pagesSig = ""; render(); toast("Added a blank page.");
 }
 function dataURLtoU8(u) { const b = atob(u.split(",")[1]); const a = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; }
+// ---- Organize: duplicates found automatically, and sort by printed page number (OCR for scans) ----------
+// Same checks as the PDF tools page (pdfedit.js), run on the editor's pages through small adapters.
+const org = { marks: new Map(), scanning: "", sorting: "", scanned: false, tok: 0, sig: "" };
+function pageAdapter(p) {
+  return {
+    key: "ed|" + p.key + "|" + p.rot, wPt: p.w / 2,
+    render: async (scale) => {
+      const i = docPages.indexOf(p); if (i >= 0) await ensurePageImage(i);
+      const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(p.w / 2 * scale)); c.height = Math.max(1, Math.round(p.h / 2 * scale));
+      const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); if (p.img) g.drawImage(p.img, 0, 0, c.width, c.height);
+      return c;
+    },
+    items: async () => { const i = docPages.indexOf(p); if (i < 0) return []; const b = await getTextBlocks(i).catch(() => []); return (b || []).map((x) => ({ str: x.str, x: x.nx, y: x.ny + x.nh })); },
+  };
+}
+function liveOrgDups() { const set = new Set(docPages), out = new Map(); org.marks.forEach((o, p) => { if (set.has(p) && set.has(o)) out.set(p, o); }); return out; }
+async function scanOrgDuplicates() {
+  const T = window.__cal2PageTools; if (!T || !doc) return;
+  const sig = docPages.map((p) => p.key + ":" + p.rot).join(",");
+  if (sig === org.sig && (org.scanned || org.scanning)) return;
+  org.sig = sig; const tok = ++org.tok;
+  if (docPages.length < 2) { org.marks = new Map(); org.scanned = true; renderOrgTools(); return; }
+  const list = docPages.slice(), ads = list.map(pageAdapter);
+  org.scanning = "Checking for duplicates…"; renderOrgTools();
+  try {
+    const m = await T.duplicates(ads, 32, (i, n) => { if (tok === org.tok && n > 6) { org.scanning = `Checking for duplicates… ${i}/${n}`; renderOrgTools(); } });
+    if (tok !== org.tok) return;
+    org.marks = new Map(); m.forEach((o, d) => org.marks.set(list[ads.indexOf(d)], list[ads.indexOf(o)]));
+  } catch (_) { if (tok !== org.tok) return; }
+  org.scanning = ""; org.scanned = true;
+  if (edMode === "organize") renderOrganize(); else renderOrgTools();
+}
+function renderOrgTools() {
+  const host = $("org_tools"); if (!host) return;
+  const d = liveOrgDups(), n = d.size, parts = [];
+  if (docPages.length > 1) {
+    if (org.scanning) parts.push(`<span class="ot-busy">${org.scanning}</span>`);
+    else if (n) parts.push(`<button class="tb ot-dup" data-ot="show" title="Pages that look the same as an earlier page (marked in red) — click to tick them"><svg class="i" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.2"/><path d="M4 13V4.2A1.2 1.2 0 015.2 3H13"/></svg><span class="tl">${n} duplicate${n === 1 ? "" : "s"}</span></button><button class="tb ot-del" data-ot="del" title="Remove the duplicate pages (Ctrl+Z undoes)"><svg class="i" viewBox="0 0 20 20"><path d="M4 6h12M8 6V4h4v2M5.5 6l1 11h7l1-11"/></svg><span class="tl">Remove duplicates</span></button>`);
+    else if (org.scanned) parts.push(`<span class="ot-ok">✓ No duplicates</span>`);
+    parts.push(org.sorting ? `<span class="ot-busy">${org.sorting}</span>` : `<button class="tb" data-ot="sort" title="Read each page's printed page number (OCR for screenshots and scans) and put the pages in that order (Ctrl+Z undoes)"><svg class="i" viewBox="0 0 20 20"><path d="M5 4v12M2.5 13.5L5 16l2.5-2.5"/><path d="M10 5h7M10 9h5M10 13h3"/></svg><span class="tl">Sort by page number</span></button>`);
+  }
+  host.innerHTML = parts.join("");
+  host.querySelectorAll("[data-ot]").forEach((b) => b.onclick = () => {
+    const a = b.dataset.ot;
+    if (a === "show") { orgSel.clear(); docPages.forEach((p, i) => { if (liveOrgDups().has(p)) orgSel.add(i); }); renderOrganize(); }
+    else if (a === "del") removeOrgDuplicates();
+    else if (a === "sort") sortOrgByNumber();
+  });
+}
+function removeOrgDuplicates() {
+  const d = liveOrgDups(); if (!d.size) return;
+  snapshotNow();
+  const keep = docPages.map((p, i) => d.has(p) ? -1 : i).filter((i) => i >= 0);
+  if (applyPageOrder(keep)) { org.marks = new Map(); org.sig = docPages.map((p) => p.key + ":" + p.rot).join(","); render(); toast(`Removed ${d.size} duplicate page${d.size === 1 ? "" : "s"} — ${docPages.length} left. Ctrl+Z undoes.`); }
+}
+async function sortOrgByNumber() {
+  const T = window.__cal2PageTools; if (!T || org.sorting) return;
+  const list = docPages.slice(), found = [];
+  for (let i = 0; i < list.length; i++) {
+    org.sorting = `Reading page numbers… ${i + 1}/${list.length}`; renderOrgTools();
+    let n = null; try { n = await T.pageNumber(pageAdapter(list[i]), true); } catch (_) {}
+    found.push(n);
+  }
+  org.sorting = "";
+  if (docPages.length !== list.length || docPages.some((p, i) => p !== list[i])) { renderOrgTools(); toast("The pages changed while reading — press Sort again."); return; }
+  const k = found.filter((n) => n != null).length;
+  if (!k) { renderOrgTools(); toast("No page numbers found on these pages — nothing was moved."); return; }
+  // numbered pages in number order; a page without a number stays right after the page it followed
+  let last = -1e9, seq = 0;
+  const keyed = list.map((p, i) => found[i] != null ? (last = found[i], seq = 0, { i, k: found[i], s: 0 }) : { i, k: last, s: ++seq });
+  keyed.sort((a, b) => a.k - b.k || a.s - b.s || a.i - b.i);
+  snapshotNow();
+  if (applyPageOrder(keyed.map((x) => x.i))) { render(); toast(`Sorted by page number — found a number on ${k} of ${found.length} pages${k < found.length ? " (pages without one stay after the page they followed)" : ""}. Ctrl+Z undoes.`); }
+}
 function renderOrganize() {
   const g = $("org_grid"); if (!g) return;
   g.innerHTML = "";
   docPages.forEach((p, i) => {
     const d = document.createElement("div");
     d.className = "og" + (orgSel.has(i) ? " sel" : ""); d.draggable = true; d.dataset.i = i;
+    const dupOf = liveOrgDups().get(p);
     d.innerHTML = `<input type="checkbox" ${orgSel.has(i) ? "checked" : ""} title="Select page"><img src="${p.url}" alt="Page ${i + 1}" style="aspect-ratio:${p.w}/${p.h}" draggable="false"><div class="ogn">${i + 1}</div>` +
+      (dupOf ? `<div class="ogdup">Same as page ${docPages.indexOf(dupOf) + 1}</div>` : "") +
       `<div class="ogb"><button data-a="l" title="Rotate left">⟲</button><button data-a="r" title="Rotate right">⟳</button><button data-a="d" title="Duplicate">⧉</button><button data-a="x" title="Delete">🗑</button></div>`;
     d.querySelector("input").onclick = (e) => { e.stopPropagation(); if (e.target.checked) orgSel.add(i); else orgSel.delete(i); d.classList.toggle("sel", e.target.checked); };
     d.onclick = (e) => { if (e.target.closest("button,input")) return; if (!(e.ctrlKey || e.metaKey || e.shiftKey)) orgSel.clear(); if (orgSel.has(i)) orgSel.delete(i); else orgSel.add(i); renderOrganize(); };
@@ -717,6 +793,7 @@ function renderOrganize() {
   const add = document.createElement("div");
   add.className = "og add"; add.innerHTML = '<svg class="i" viewBox="0 0 20 20" style="width:34px;height:34px"><path d="M10 4v12M4 10h12"/></svg>Add PDF<small style="font-weight:400;color:var(--muted)">or drop files here</small>';
   add.onclick = pickFilesForDoc;
+  renderOrgTools(); setTimeout(scanOrgDuplicates, 50);
   add.addEventListener("dragover", (e) => { e.preventDefault(); add.classList.add("over"); });
   add.addEventListener("dragleave", () => add.classList.remove("over"));
   add.addEventListener("drop", (e) => { e.preventDefault(); e.stopPropagation(); add.classList.remove("over"); if (e.dataTransfer.files.length) addFilesToDoc([...e.dataTransfer.files]); });

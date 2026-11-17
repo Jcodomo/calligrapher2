@@ -1324,6 +1324,25 @@ function openPicPdf() {
   });
 }
 
+// ---- page access shared with the editor ------------------------------------------------------
+// A page is either an entry of this workspace or an adapter from the editor's Organize view:
+// { key, wPt, render(scale) -> canvas, items() -> [{str, x, y}] (0..1 of the page, y from the top) }.
+const isAd = (e) => !!(e && e.render);
+const entKey = (e) => isAd(e) ? e.key : e.srcId + "|" + e.srcIndex + "|" + e.rot;
+const entRaster = (e, scale) => isAd(e) ? e.render(scale) : rasterize(e, scale);
+async function entWidth(e) {
+  if (isAd(e)) return e.wPt;
+  const src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1);
+  return pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + e.rot) % 360 }).width;
+}
+async function entItems(e) {
+  if (isAd(e)) return e.items ? await e.items() : [];
+  const src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1);
+  const vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + e.rot) % 360 }), out = [];
+  for (const it of (await pg.getTextContent()).items) { if (!it.str || !it.str.trim()) continue; const [x, y] = vp.convertToViewportPoint(it.transform[4], it.transform[5]); out.push({ str: it.str, x: x / vp.width, y: y / vp.height }); }
+  return out;
+}
+
 // ---- duplicate pages ----------------------------------------------------------------------
 // Each page becomes a small greyscale copy (paper = 1, darkest ink = 0). A pair is compared at the same stroke
 // thickness (the second page's ink cut-off is chosen so both have the same amount of ink, which cancels out a
@@ -1332,9 +1351,9 @@ function openPicPdf() {
 // that differs anywhere (another word, a filled-in value) is not a duplicate. Pages whose text layers differ never are.
 const FP_W = 180, FP_H = 240, FP_T = 12;
 async function pageFingerprint(e) {
-  const key = "fp4|" + e.srcId + "|" + e.srcIndex + "|" + e.rot;
+  const key = "fp4|" + entKey(e);
   if (thumbCache.has(key)) return thumbCache.get(key);
-  const c = await rasterize(e, 1), t = document.createElement("canvas"); t.width = FP_W; t.height = FP_H;
+  const c = await entRaster(e, 1), t = document.createElement("canvas"); t.width = FP_W; t.height = FP_H;
   const g = t.getContext("2d", { willReadFrequently: true }); g.fillStyle = "#fff"; g.fillRect(0, 0, FP_W, FP_H); g.imageSmoothingQuality = "high"; g.drawImage(c, 0, 0, FP_W, FP_H);
   const d = g.getImageData(0, 0, FP_W, FP_H).data, lum = new Float32Array(FP_W * FP_H);
   let lo = 255, hi = 0;
@@ -1342,7 +1361,7 @@ async function pageFingerprint(e) {
   const span = Math.max(40, hi - lo); for (let i = 0; i < lum.length; i++) lum[i] = Math.max(0, Math.min(1, (lum[i] - (hi - span)) / span));
   const sorted = Float32Array.from(lum).sort();
   let text = "";
-  try { const src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1); text = (await pg.getTextContent()).items.map((i) => i.str).join(" ").replace(/\s+/g, " ").trim().toLowerCase(); } catch (_) {}
+  try { text = (await entItems(e)).map((i) => i.str).join(" ").replace(/\s+/g, " ").trim().toLowerCase(); } catch (_) {}
   const ink = new Uint8Array(lum.length); let n = 0; for (let i = 0; i < lum.length; i++) { ink[i] = lum[i] < 0.5 ? 1 : 0; n += ink[i]; }
   const fp = { lum, sorted, ink, n, text, ar: Math.round(c.width / c.height * 20) };
   thumbCache.set(key, fp); return fp;
@@ -1371,11 +1390,9 @@ function inkDistance(a, b) {
 // count), lined up, then the most different 20 px square. A changed digit, word or tick stands out there.
 const VW = 600, VT = 20;
 async function closeLook(e) {
-  const key = "cl|" + e.srcId + "|" + e.srcIndex + "|" + e.rot;
+  const key = "cl|" + entKey(e);
   if (thumbCache.has(key)) return thumbCache.get(key);
-  const src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1);
-  const vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + e.rot) % 360 });
-  const c = await rasterize(e, VW / vp.width), H = Math.round(VW * c.height / c.width), t = document.createElement("canvas"); t.width = VW; t.height = H;
+  const c = await entRaster(e, VW / await entWidth(e)), H = Math.round(VW * c.height / c.width), t = document.createElement("canvas"); t.width = VW; t.height = H;
   const g = t.getContext("2d", { willReadFrequently: true }); g.fillStyle = "#fff"; g.fillRect(0, 0, VW, H); g.filter = "blur(1.2px)"; g.drawImage(c, 0, 0, VW, H);
   const d = g.getImageData(0, 0, VW, H).data, L = new Float32Array(VW * H); let lo = 255, hi = 0;
   for (let i = 0; i < L.length; i++) { const v = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3; L[i] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
@@ -1402,14 +1419,12 @@ async function closeDiff(ea, eb, shift) {
 // are only duplicates when every number on them matches (amounts, dates, page numbers, account digits) and
 // nearly all their words do - a renumbered or re-dated page looks the same but is not a copy.
 async function pageWords(e) {
-  const key = "ow|" + e.srcId + "|" + e.srcIndex + "|" + e.rot;
+  const key = "ow|" + entKey(e);
   if (thumbCache.has(key)) return thumbCache.get(key);
   const fp = await pageFingerprint(e);
   let text = fp.text;
   if (!text || text.length < 20) {
-    const src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1);
-    const vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + e.rot) % 360 });
-    const c = await rasterize(e, Math.max(1, Math.min(3, 1400 / vp.width)));
+    const c = await entRaster(e, Math.max(1, Math.min(3, 1400 / await entWidth(e))));
     const r = await (await ocrScheduler("eng", ocrPoolSize())).addJob("recognize", c);
     text = (r.data.text || "").toLowerCase();
   }
@@ -1423,24 +1438,28 @@ function sameWords(a, b) {
   const all = a.words.size + b.words.size - both;
   return !all || both / all >= 0.85;
 }
-async function findDuplicates(maxDist, tick = true, onProg) {
-  const fps = [];
-  for (let i = 0; i < pages.length; i++) { fps.push(await pageFingerprint(pages[i])); if (onProg) onProg(i + 1, pages.length); }
-  dupMarks = new Map();
-  for (let i = 0; i < pages.length; i++) {
-    if (dupMarks.has(pages[i])) continue;
-    for (let j = i + 1; j < pages.length; j++) {
-      if (dupMarks.has(pages[j])) continue;
+// list: pages or adapters; returns Map(later copy -> the page it copies)
+async function findDupPairs(list, maxDist, onProg) {
+  const fps = [], marks = new Map();
+  for (let i = 0; i < list.length; i++) { fps.push(await pageFingerprint(list[i])); if (onProg) onProg(i + 1, list.length); }
+  for (let i = 0; i < list.length; i++) {
+    if (marks.has(list[i])) continue;
+    for (let j = i + 1; j < list.length; j++) {
+      if (marks.has(list[j])) continue;
       const a = fps[i], b = fps[j]; if (a.ar !== b.ar || a.text !== b.text) continue;
       // the fingerprint only shortlists; the close-up check decides (maxDist: most different 20 px square, 0..255)
       const d = inkDistance(a, b);
       if (d.worst > 0.2 || d.overall > 0.45) continue;
-      const cd = await closeDiff(pages[i], pages[j], d.shift);
+      const cd = await closeDiff(list[i], list[j], d.shift);
       if (cd > maxDist) continue;
-      if (cd > 3 && !sameWords(await pageWords(pages[i]), await pageWords(pages[j]))) continue;   // look alike, say different things
-      dupMarks.set(pages[j], pages[i]);
+      if (cd > 3 && !sameWords(await pageWords(list[i]), await pageWords(list[j]))) continue;   // look alike, say different things
+      marks.set(list[j], list[i]);
     }
   }
+  return marks;
+}
+async function findDuplicates(maxDist, tick = true, onProg) {
+  dupMarks = await findDupPairs(pages, maxDist, onProg);
   if (tick) { selected.clear(); pages.forEach((p, i) => { if (dupMarks.has(p)) selected.add(i); }); }
   return dupMarks.size;
 }
@@ -1487,20 +1506,14 @@ function numberFromWords(words) {   // words: {t, x, y} with x, y as 0..1 of the
   return cands.length ? cands[0].n : null;
 }
 async function pageNumberOf(e, useOcr) {
-  const src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1);
-  const vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + e.rot) % 360 });
   const words = [];
-  for (const it of (await pg.getTextContent()).items) {
-    if (!it.str || !it.str.trim()) continue;
-    const [x, y] = vp.convertToViewportPoint(it.transform[4], it.transform[5]);
-    it.str.trim().split(/\s+/).forEach((t) => words.push({ t, x: x / vp.width, y: y / vp.height }));
-  }
+  for (const it of await entItems(e)) it.str.trim().split(/\s+/).forEach((t) => words.push({ t, x: it.x, y: it.y }));
   let n = numberFromWords(words);
   if (n != null || !useOcr || words.length > 30) return n;
   // a scan: OCR just the top and bottom strips
   // the strips at a high resolution; read cleaned to black on white first (compression noise turns a 3 into
   // a 9 otherwise), and as they are if that finds nothing
-  const c = await rasterize(e, Math.max(1, Math.min(3, 1600 / vp.width))), band = Math.round(c.height * 0.13);   // ~1600 px wide: OCR misreads letters that are too large too
+  const c = await entRaster(e, Math.max(1, Math.min(3, 1600 / await entWidth(e)))), band = Math.round(c.height * 0.13);   // ~1600 px wide: OCR misreads letters that are too large too
   const strips = (clean) => {
     const s = document.createElement("canvas"); s.width = c.width; s.height = band * 2 + 20;
     const g = s.getContext("2d", { willReadFrequently: true }); g.fillStyle = "#fff"; g.fillRect(0, 0, s.width, s.height);
@@ -1593,6 +1606,8 @@ export function initPdfEditor() {
     openTool(t);
   };
   window.__cal2AddPdfFiles = (files) => addFiles(files);
+  // the editor's Organize view uses the same duplicate check and page-number reader
+  window.__cal2PageTools = { duplicates: (list, maxDist, onProg) => findDupPairs(list, maxDist, onProg), pageNumber: (ad, ocr) => pageNumberOf(ad, ocr) };
   window.__cal2ResetPdf = () => { resetAll(); backToGrid(); };
   window.__cal2PdfPageCount = () => pages.length;
   window.__cal2TxtToPdf = (f) => txtToPdf(f);
