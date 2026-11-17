@@ -1242,7 +1242,8 @@ async function sortByNumbersNow() {
   bar.sorting = "";
   if (pages.length !== before.length || pages.some((p, i) => p !== before[i])) { bar.msg = "The pages changed while reading — press Sort again."; renderGrid(); return; }
   const k = found.filter((n) => n != null).length;
-  if (!k) { bar.msg = "No page numbers found on these pages."; renderGrid(); return; }
+  if (!k) { bar.msg = "No page numbers found on these pages — nothing was moved."; renderGrid(); return; }
+  if (!numbersLookReal(found)) { bar.msg = "These pages don't seem to have page numbers (too few found, or the same number on many pages) — nothing was moved. <button data-b=\"review\" class=\"pe-link\">Check them</button>"; renderGrid(); return; }
   bar.undo.push({ pages: before, label: "sort" });
   applyNumberOrder(found);
   bar.msg = `Sorted by page number — found a number on ${k} of ${found.length} page${found.length === 1 ? "" : "s"}${k < found.length ? " (pages without one stay after the page they followed)" : ""}. <button data-b="review" class="pe-link">Check the numbers</button>`;
@@ -1496,8 +1497,8 @@ function numberFromWords(words) {   // words: {t, x, y} with x, y as 0..1 of the
   let m = all.match(/\bpage\s*[:#]?\s*(\d{1,4})\b/i); if (m) return +m[1];
   m = all.match(/\b(\d{1,4})\s*(?:of|0f|o f|\/)\s*(\d{1,4})\b/i); if (m && +m[1] <= +m[2]) return +m[1];
   const cands = words.filter((w) => (w.y > 0.88 || w.y < 0.1) && /^[-–—(\[]?\d{1,4}[-–—)\].]?$/.test(w.t.trim()))
-    .map((w) => ({ n: +w.t.replace(/\D/g, ""), score: (w.y > 0.88 ? 0 : 0.5) + Math.min(Math.abs(w.x - 0.5), Math.abs(w.x - 0.08), Math.abs(w.x - 0.92)) + 0.3 * words.filter((o) => o !== w && Math.abs(o.y - w.y) < 0.012).length }))
-    .filter((c) => c.n > 0 && c.n < 1900);
+    .map((w) => ({ n: +w.t.replace(/\D/g, ""), score: (w.y > 0.88 ? 0 : 0.5) + Math.min(Math.abs(w.x - 0.5), Math.abs(w.x - 0.08), Math.abs(w.x - 0.92)) + (words.some((o) => o !== w && Math.abs(o.y - w.y) < 0.012) ? 9 : 0) }))   // shares its line (a badge beside "Sign off", a figure in a sentence): not a page number
+    .filter((c, k, all) => c.n > 0 && c.n < 1900 && c.score < 1);   // a lone number has nothing else on its line
   // a whole line at the top or bottom that is just a number with decoration around it ("- 3 -", "[ 3 ]", "~3~")
   const lines = [];
   words.filter((w) => w.y > 0.88 || w.y < 0.1).forEach((w) => { const l = lines.find((q) => Math.abs(q.y - w.y) < 0.012); if (l) l.ws.push(w); else lines.push({ y: w.y, ws: [w] }); });
@@ -1534,6 +1535,14 @@ async function pageNumberOf(e, useOcr) {
     n = numberFromWords(ow); if (n != null) return n;
   }
   return null;
+}
+// Page numbers on a set of pages are (nearly) all different. If the same number turns up on many pages it is
+// something else (a badge, a year, a form number): say so rather than shuffle the pages.
+function numbersLookReal(found) {
+  const nums = found.filter((n) => n != null);
+  if (nums.length < Math.max(2, Math.ceil(found.length * 0.3))) return false;   // a stray number on one or two pages is not a numbering
+  const count = {}; nums.forEach((n) => count[n] = (count[n] || 0) + 1);
+  return Math.max(...Object.values(count)) <= Math.max(1, Math.ceil(nums.length * 0.2));
 }
 // numbered pages go in number order; a page without a number stays right after the page it followed
 function applyNumberOrder(found) {
@@ -1608,7 +1617,7 @@ export function initPdfEditor() {
   };
   window.__cal2AddPdfFiles = (files) => addFiles(files);
   // the editor's Organize view uses the same duplicate check and page-number reader
-  window.__cal2PageTools = { duplicates: (list, maxDist, onProg) => findDupPairs(list, maxDist, onProg), pageNumber: (ad, ocr) => pageNumberOf(ad, ocr) };
+  window.__cal2PageTools = { duplicates: (list, maxDist, onProg) => findDupPairs(list, maxDist, onProg), pageNumber: (ad, ocr) => pageNumberOf(ad, ocr), numbersLookReal };
   window.__cal2ResetPdf = () => { resetAll(); backToGrid(); };
   window.__cal2PdfPageCount = () => pages.length;
   window.__cal2TxtToPdf = (f) => txtToPdf(f);

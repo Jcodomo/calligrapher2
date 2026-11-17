@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=37";
+import { initPdfEditor } from "./pdfedit.js?v=39";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
@@ -754,6 +754,7 @@ async function sortOrgByNumber() {
   if (docPages.length !== list.length || docPages.some((p, i) => p !== list[i])) { renderOrgTools(); toast("The pages changed while reading — press Sort again."); return; }
   const k = found.filter((n) => n != null).length;
   if (!k) { renderOrgTools(); toast("No page numbers found on these pages — nothing was moved."); return; }
+  if (T.numbersLookReal && !T.numbersLookReal(found)) { renderOrgTools(); toast("These pages don't seem to have page numbers (too few found, or the same number on many pages) — nothing was moved."); return; }
   // numbered pages in number order; a page without a number stays right after the page it followed
   let last = -1e9, seq = 0;
   const keyed = list.map((p, i) => found[i] != null ? (last = found[i], seq = 0, { i, k: found[i], s: 0 }) : { i, k: last, s: ++seq });
