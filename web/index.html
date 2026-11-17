@@ -391,6 +391,13 @@
   .pe-seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}.pe-seg button{border:0;background:var(--surface);color:var(--text2);padding:6px 12px;cursor:pointer;font-size:13px}.pe-seg button.on{background:var(--accent);color:#fff}
   .pe-nav{display:flex;gap:6px;align-items:center;font-size:13px}.pe-nav button{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:6px;width:30px;height:28px;cursor:pointer}.pe-nav select{height:28px}
   .pe-count{font-size:12.5px;color:var(--muted)}
+  .pe-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px}
+  .pe-act{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:7px;padding:5px 11px;cursor:pointer;font-size:12.5px}
+  .pe-act:hover{border-color:var(--accent)}.pe-act.danger{border-color:#e5484d;color:#e5484d}.pe-act.danger:hover{background:#e5484d;color:#fff}
+  .pe-dupcount .pe-link{color:#e5484d;font-weight:600}
+  .pe-link{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;padding:0 2px;text-decoration:underline}
+  .pe-busy{color:var(--muted)}.pe-ok{color:#2e9d5b}
+  .pe-msg{background:var(--tint);border:1px solid var(--line);border-radius:7px;padding:4px 8px;display:inline-flex;gap:6px;align-items:center}
   .pe-full{position:relative;background:#fff;border:1px solid var(--line);border-radius:4px;box-shadow:var(--page-shadow)}
   .pe-full.sel{outline:2px solid var(--sel);outline-offset:1px}.pe-full img{display:block;max-width:100%;height:auto}
   .pe-dup{position:absolute;bottom:40px;left:6px;right:6px;background:#e5484d;color:#fff;font-size:11px;padding:2px 6px;border-radius:6px;text-align:center}
@@ -1034,7 +1041,7 @@ jumps over the lazy dog</textarea>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script type="module" src="./app.js?v=48"></script>
+<script type="module" src="./app.js?v=54"></script>
 <script type="module" src="./shell.js?v=11"></script>
 </body>
 </html>

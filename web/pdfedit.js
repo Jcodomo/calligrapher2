@@ -92,7 +92,7 @@ async function addFiles(fileList) {
       rememberSource(r.src).catch(() => {});
     } catch (e) { note("Could not open " + f.name + ": " + (e.message || e), true); }
   }
-  if (added) { buildGrid(); renderGrid(); }
+  if (added) { buildGrid(); renderGrid(); scanDuplicatesNow(); }
 }
 // ---- recent documents (shared store with Sign & scan) ----------------------
 async function rememberSource(src) {
@@ -1184,11 +1184,73 @@ function viewBar() {
   const bar = document.createElement("div"); bar.className = "pe-viewbar";
   const n = pages.length; fullIdx = Math.max(0, Math.min(fullIdx, n - 1));
   bar.innerHTML = `<div class="pe-seg"><button data-v="grid" class="${viewMode === "grid" ? "on" : ""}" title="All pages as thumbnails">▦ Pages</button><button data-v="full" class="${viewMode === "full" ? "on" : ""}" title="One page at a time, large">▭ Full page</button></div>` +
-    (viewMode === "full" ? `<div class="pe-nav"><button data-n="-1" title="Previous page">‹</button><select title="Go to page">${pages.map((_, i) => `<option value="${i}"${i === fullIdx ? " selected" : ""}>Page ${i + 1}</option>`).join("")}</select><span>of ${n}</span><button data-n="1" title="Next page">›</button></div>` : `<span class="pe-count">${n} page${n === 1 ? "" : "s"}${selected.size ? " · " + selected.size + " ticked" : ""} · double-click a page to view it large</span>`);
+    (viewMode === "full" ? `<div class="pe-nav"><button data-n="-1" title="Previous page">‹</button><select title="Go to page">${pages.map((_, i) => `<option value="${i}"${i === fullIdx ? " selected" : ""}>Page ${i + 1}</option>`).join("")}</select><span>of ${n}</span><button data-n="1" title="Next page">›</button></div>` : `<span class="pe-count">${n} page${n === 1 ? "" : "s"}${selected.size ? " · " + selected.size + " ticked" : ""} · double-click a page to view it large</span>`) + barTools();
   bar.querySelectorAll("[data-v]").forEach((b) => b.onclick = () => setView(b.dataset.v));
   bar.querySelectorAll("[data-n]").forEach((b) => b.onclick = () => { fullIdx = Math.max(0, Math.min(n - 1, fullIdx + +b.dataset.n)); renderGrid(); });
   const sel = bar.querySelector("select"); if (sel) sel.onchange = () => { fullIdx = +sel.value; renderGrid(); };
+  const on = (k, f) => { const b = bar.querySelector(`[data-b="${k}"]`); if (b) b.onclick = f; };
+  on("dupdel", removeDuplicatesNow); on("dupshow", () => { selected.clear(); pages.forEach((p, i) => { if (liveDups().has(p)) selected.add(i); }); renderGrid(); });
+  on("sort", sortByNumbersNow); on("undo", undoBar); on("review", () => { if (window.__cal2OpenTool) window.__cal2OpenTool("pagesort"); });
+  on("x", () => { bar.msg = ""; renderGrid(); });
   return bar;
+}
+// ---- the bar's own tools: duplicates (found automatically when pages are added), sort, undo ----------
+const bar = { scan: 0, scanning: "", sorting: "", msg: "", undo: [] };   // undo: earlier page orders, newest last
+function liveDups() { const s = new Set(pages); const out = new Set(); dupMarks.forEach((orig, p) => { if (s.has(p) && s.has(orig)) out.add(p); }); return out; }
+function barTools() {
+  const n = liveDups().size, b = [];
+  if (pages.length > 1) {
+    if (bar.scanning) b.push(`<span class="pe-busy">${bar.scanning}</span>`);
+    else if (n) b.push(`<span class="pe-dupcount" title="Pages that look the same as an earlier page (marked in red)"><button data-b="dupshow" class="pe-link" title="Tick them so you can check">⧉ ${n} duplicate${n === 1 ? "" : "s"}</button></span><button data-b="dupdel" class="pe-act danger">Remove duplicates</button>`);
+    else if (bar.scanned) b.push(`<span class="pe-ok">✓ No duplicates</span>`);
+    b.push(bar.sorting ? `<span class="pe-busy">${bar.sorting}</span>` : `<button data-b="sort" class="pe-act" title="Read each page's printed page number (OCR for scans) and put the pages in that order">1↓ Sort by page number</button>`);
+  }
+  const last = bar.undo[bar.undo.length - 1];
+  if (last) b.push(`<button data-b="undo" class="pe-act" title="${bar.undo.length} step${bar.undo.length === 1 ? "" : "s"} can be undone">↶ Undo ${last.label === "sort" ? "sort" : "remove"}</button>`);
+  if (bar.msg) b.push(`<span class="pe-msg">${bar.msg}<button data-b="x" class="pe-link" title="Dismiss">✕</button></span>`);
+  return b.length ? `<div class="pe-tools">${b.join("")}</div>` : "";
+}
+async function scanDuplicatesNow() {
+  const tok = ++bar.scan;
+  if (pages.length < 2) { dupMarks = new Map(); bar.scanning = ""; return; }
+  bar.scanning = "Checking for duplicates…"; renderBarOnly();
+  try {
+    await findDuplicates(32, false, (i, n) => { if (tok === bar.scan && n > 6) { bar.scanning = `Checking for duplicates… ${i}/${n}`; renderBarOnly(); } });
+  } catch (_) {}
+  if (tok !== bar.scan) return;
+  bar.scanning = ""; bar.scanned = true; renderGrid();
+}
+function renderBarOnly() {
+  const old = document.querySelector("#pdfedit_stage .pe-viewbar"); if (old) old.replaceWith(viewBar());
+}
+function removeDuplicatesNow() {
+  const d = liveDups(); if (!d.size) return;
+  bar.undo.push({ pages: pages.slice(), label: "remove" });
+  pages = pages.filter((p) => !d.has(p)); selected.clear(); dupMarks = new Map(); fullIdx = Math.min(fullIdx, pages.length - 1);
+  bar.msg = `Removed ${d.size} duplicate page${d.size === 1 ? "" : "s"} — ${pages.length} left. Download PDF to save.`;
+  renderGrid();
+}
+async function sortByNumbersNow() {
+  if (bar.sorting) return;
+  const before = pages.slice(), found = [];
+  for (let i = 0; i < before.length; i++) {
+    bar.sorting = `Reading page numbers… ${i + 1}/${before.length}`; renderBarOnly();
+    let n = null; try { n = await pageNumberOf(before[i], true); } catch (_) {}
+    found.push(n);
+  }
+  bar.sorting = "";
+  if (pages.length !== before.length || pages.some((p, i) => p !== before[i])) { bar.msg = "The pages changed while reading — press Sort again."; renderGrid(); return; }
+  const k = found.filter((n) => n != null).length;
+  if (!k) { bar.msg = "No page numbers found on these pages."; renderGrid(); return; }
+  bar.undo.push({ pages: before, label: "sort" });
+  applyNumberOrder(found);
+  bar.msg = `Sorted by page number — found a number on ${k} of ${found.length} page${found.length === 1 ? "" : "s"}${k < found.length ? " (pages without one stay after the page they followed)" : ""}. <button data-b="review" class="pe-link">Check the numbers</button>`;
+  renderGrid();
+}
+function undoBar() {
+  const last = bar.undo.pop(); if (!last) return;
+  pages = last.pages; bar.msg = ""; selected.clear(); fullIdx = 0;
+  renderGrid(); scanDuplicatesNow();
 }
 function renderFullPage(stage) {
   const idx = fullIdx, entry = pages[idx]; if (!entry) return;
@@ -1305,38 +1367,99 @@ function inkDistance(a, b) {
   for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const d = at(cl(bx - ax) + dx, cl(by - ay) + dy, false); if (!best || d.overall < best.overall) best = d; }
   return at(best.shift[0], best.shift[1], true);
 }
-async function findDuplicates(maxDist) {
+// Close-up check for a likely pair: both pages at 600 px wide, lightly blurred (scan grain and edges don't
+// count), lined up, then the most different 20 px square. A changed digit, word or tick stands out there.
+const VW = 600, VT = 20;
+async function closeLook(e) {
+  const key = "cl|" + e.srcId + "|" + e.srcIndex + "|" + e.rot;
+  if (thumbCache.has(key)) return thumbCache.get(key);
+  const src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1);
+  const vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + e.rot) % 360 });
+  const c = await rasterize(e, VW / vp.width), H = Math.round(VW * c.height / c.width), t = document.createElement("canvas"); t.width = VW; t.height = H;
+  const g = t.getContext("2d", { willReadFrequently: true }); g.fillStyle = "#fff"; g.fillRect(0, 0, VW, H); g.filter = "blur(1.2px)"; g.drawImage(c, 0, 0, VW, H);
+  const d = g.getImageData(0, 0, VW, H).data, L = new Float32Array(VW * H); let lo = 255, hi = 0;
+  for (let i = 0; i < L.length; i++) { const v = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3; L[i] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
+  const span = Math.max(40, hi - lo); for (let i = 0; i < L.length; i++) L[i] = (L[i] - lo) / span * 255;
+  const r = { L, H }; thumbCache.set(key, r); return r;
+}
+async function closeDiff(ea, eb, shift) {
+  const a = await closeLook(ea), b = await closeLook(eb), k = VW / FP_W, H = Math.min(a.H, b.H);
+  let best = Infinity;
+  for (let oy = -3; oy <= 3; oy++) for (let ox = -3; ox <= 3; ox++) {      // fine alignment around the fingerprint's offset
+    const sx = Math.round(shift[0] * k) + ox, sy = Math.round(shift[1] * k) + oy;
+    let worst = 0;
+    for (let ty = 0; ty + VT <= H; ty += VT) for (let tx = 0; tx + VT <= VW; tx += VT) {
+      let t = 0;
+      for (let y = ty; y < ty + VT; y += 2) for (let x = tx; x < tx + VT; x += 2) { const xx = x + sx, yy = y + sy; const bv = xx >= 0 && xx < VW && yy >= 0 && yy < b.H ? b.L[yy * VW + xx] : 255; t += Math.abs(a.L[y * VW + x] - bv); }
+      worst = Math.max(worst, t / (VT * VT / 4));
+      if (worst >= best) break;
+    }
+    if (worst < best) best = worst;
+  }
+  return best;   // 0..255: the most different 20 px square, on average
+}
+// What a page says, for pages that look alike but aren't pixel-identical: its text layer, or OCR. Two pages
+// are only duplicates when every number on them matches (amounts, dates, page numbers, account digits) and
+// nearly all their words do - a renumbered or re-dated page looks the same but is not a copy.
+async function pageWords(e) {
+  const key = "ow|" + e.srcId + "|" + e.srcIndex + "|" + e.rot;
+  if (thumbCache.has(key)) return thumbCache.get(key);
+  const fp = await pageFingerprint(e);
+  let text = fp.text;
+  if (!text || text.length < 20) {
+    const src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1);
+    const vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + e.rot) % 360 });
+    const c = await rasterize(e, Math.max(1, Math.min(3, 1400 / vp.width)));
+    const r = await (await ocrScheduler("eng", ocrPoolSize())).addJob("recognize", c);
+    text = (r.data.text || "").toLowerCase();
+  }
+  const nums = (text.match(/\d[\d,.:/-]*\d|\d/g) || []).map((n) => n.replace(/[,]/g, ""));
+  const words = new Set((text.match(/[a-z]{3,}/g) || []));
+  const out = { nums: nums.join(" "), words }; thumbCache.set(key, out); return out;
+}
+function sameWords(a, b) {
+  if (a.nums !== b.nums) return false;
+  let both = 0; a.words.forEach((w) => { if (b.words.has(w)) both++; });
+  const all = a.words.size + b.words.size - both;
+  return !all || both / all >= 0.85;
+}
+async function findDuplicates(maxDist, tick = true, onProg) {
   const fps = [];
-  for (let i = 0; i < pages.length; i++) fps.push(await pageFingerprint(pages[i]));
+  for (let i = 0; i < pages.length; i++) { fps.push(await pageFingerprint(pages[i])); if (onProg) onProg(i + 1, pages.length); }
   dupMarks = new Map();
   for (let i = 0; i < pages.length; i++) {
     if (dupMarks.has(pages[i])) continue;
     for (let j = i + 1; j < pages.length; j++) {
       if (dupMarks.has(pages[j])) continue;
       const a = fps[i], b = fps[j]; if (a.ar !== b.ar || a.text !== b.text) continue;
+      // the fingerprint only shortlists; the close-up check decides (maxDist: most different 20 px square, 0..255)
       const d = inkDistance(a, b);
-      if (d.worst <= maxDist && d.overall <= maxDist * 2) dupMarks.set(pages[j], pages[i]);
+      if (d.worst > 0.2 || d.overall > 0.45) continue;
+      const cd = await closeDiff(pages[i], pages[j], d.shift);
+      if (cd > maxDist) continue;
+      if (cd > 3 && !sameWords(await pageWords(pages[i]), await pageWords(pages[j]))) continue;   // look alike, say different things
+      dupMarks.set(pages[j], pages[i]);
     }
   }
-  selected.clear(); pages.forEach((p, i) => { if (dupMarks.has(p)) selected.add(i); });
+  if (tick) { selected.clear(); pages.forEach((p, i) => { if (dupMarks.has(p)) selected.add(i); }); }
   return dupMarks.size;
 }
 function openDupes() {
   panelShell("Find duplicate pages", `
     <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Finds pages that look the same (scanned twice, the same picture added twice, repeated pages). The first copy is kept; the later copies are ticked so you can check them before removing.</div>
-    <div class="row"><label>Match</label><select id="pe_dup_tol"><option value="0.03">Exact copies only</option><option value="0.12" selected>Same page, scanned again</option><option value="0.15">Loose (may also catch pages that differ in one small detail)</option></select></div>
+    <div class="row"><label>Match</label><select id="pe_dup_tol"><option value="4">Exact copies only</option><option value="32" selected>Same page, saved or scanned again</option><option value="40">Loose (re-scans in poor condition)</option></select></div>
     <button class="btn" id="pe_dup_go">Find duplicates</button>
     <div id="pe_dup_res" style="font-size:12.5px;margin-top:8px"></div>`);
   $("pe_dup_go").onclick = () => withBusy("Comparing pages…", async () => {
     if (pages.length < 2) return note("Open a document or pictures with at least two pages.", true);
-    const n = await findDuplicates(+$("pe_dup_tol").value); renderGrid();
+    const n = await findDuplicates(+$("pe_dup_tol").value); bar.scanned = true; renderGrid();
     const res = $("pe_dup_res"); res.innerHTML = "";
     if (!n) { res.textContent = "No duplicates found."; return; }
     const ul = document.createElement("div");
     pages.forEach((p, i) => { if (dupMarks.has(p)) ul.appendChild(mk2("div", `Page ${i + 1} is the same as page ${pages.indexOf(dupMarks.get(p)) + 1}`)); });
     res.appendChild(mk2("div", `<b>${n} duplicate page${n === 1 ? "" : "s"}</b> — ticked and marked on the left. Untick any you want to keep.`)); res.appendChild(ul);
     const rm = document.createElement("button"); rm.className = "btn primary"; rm.style.marginTop = "8px"; rm.textContent = "Remove ticked pages";
-    rm.onclick = () => { const k = selected.size; pages = pages.filter((_, i) => !selected.has(i)); selected.clear(); dupMarks.clear(); renderGrid(); res.textContent = ""; note(`Removed ${k} page${k === 1 ? "" : "s"}. Download PDF to save the result.`); };
+    rm.onclick = () => { const k = selected.size; bar.undo.push({ pages: pages.slice(), label: "remove" }); pages = pages.filter((_, i) => !selected.has(i)); selected.clear(); dupMarks.clear(); renderGrid(); res.textContent = ""; note(`Removed ${k} page${k === 1 ? "" : "s"}. Download PDF to save the result (Undo is in the bar above the pages).`); };
     res.appendChild(rm);
   });
 }
@@ -1398,6 +1521,15 @@ async function pageNumberOf(e, useOcr) {
   }
   return null;
 }
+// numbered pages go in number order; a page without a number stays right after the page it followed
+function applyNumberOrder(found) {
+  let lastKey = -1e9, seq = 0; const keyed = pages.map((p, i) => {
+    if (found[i] != null) { lastKey = found[i]; seq = 0; return { p, k: found[i], s: 0, i }; }
+    return { p, k: lastKey, s: ++seq, i };
+  });
+  keyed.sort((a, b) => a.k - b.k || a.s - b.s || a.i - b.i);
+  pages = keyed.map((x) => x.p); selected.clear(); fullIdx = 0; renderGrid();
+}
 function openPageSort() {
   panelShell("Sort by page numbers", `
     <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Reads the page number printed on each page ("Page 3", "3 of 10", or a number at the top or bottom) and puts the pages in that order. Scanned pages are read with OCR. Check the numbers before applying — you can type over any of them.</div>
@@ -1422,13 +1554,8 @@ function openPageSort() {
     $("pe_ps_apply").style.display = "";
   });
   $("pe_ps_apply").onclick = () => {
-    // numbered pages go in number order; a page without a number stays right after the page it followed
-    let lastKey = -1e9, seq = 0; const keyed = pages.map((p, i) => {
-      if (found[i] != null) { lastKey = found[i]; seq = 0; return { p, k: found[i], s: 0, i }; }
-      return { p, k: lastKey, s: ++seq, i };
-    });
-    keyed.sort((a, b) => a.k - b.k || a.s - b.s || a.i - b.i);
-    pages = keyed.map((x) => x.p); selected.clear(); renderGrid();
+    bar.undo.push({ pages: pages.slice(), label: "sort" });
+    applyNumberOrder(found);
     $("pe_ps_list").innerHTML = ""; $("pe_ps_apply").style.display = "none"; $("pe_ps_prog").textContent = "";
     note("Pages sorted by their page numbers. Download PDF to save the result.");
   };
@@ -1482,4 +1609,4 @@ export function initPdfEditor() {
     if (t) openTool(t);
   };
 }
-function resetAll() { enhImages = []; sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1; etSrc = null; etEdits.clear(); }
+function resetAll() { enhImages = []; dupMarks = new Map(); bar.undo = []; bar.msg = ""; bar.scanned = false; bar.scan++; bar.scanning = ""; sources = []; pages = []; selected.clear(); jsDocs.clear(); thumbCache.clear(); srcSeq = 1; etSrc = null; etEdits.clear(); }
