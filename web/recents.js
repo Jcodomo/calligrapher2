@@ -31,13 +31,25 @@ async function delRecent(id) {
   try { const db = await openDB(); await new Promise((res) => { const t = db.transaction(STORE, "readwrite"); t.objectStore(STORE).delete(id); t.oncomplete = res; t.onerror = res; }); } catch (_) {}
 }
 export { delRecent };
+// Keep the work done on a recent document (edits, page order, filled fields) with it, so reopening
+// it brings everything back. Also moves it to the top of the list.
+export async function saveRecentWork(id, work, thumb) {
+  try {
+    const db = await openDB();
+    const rec = await new Promise((res) => { const r = tx(db, "readonly").get(id); r.onsuccess = () => res(r.result); r.onerror = () => res(null); });
+    if (!rec) return false;
+    rec.work = work; rec.ts = Date.now(); if (thumb) rec.thumb = thumb;
+    await new Promise((res, rej) => { const t = db.transaction(STORE, "readwrite"); t.objectStore(STORE).put(rec); t.oncomplete = res; t.onerror = () => rej(t.error); });
+    return true;
+  } catch (_) { return false; }
+}
 // A small clickable thumbnail card for a recent doc. onDelete fires on the × badge.
 export function makeRecentCard(rec, onOpen, onDelete) {
   const card = document.createElement("div");
   card.className = "rec-card"; card.title = rec.name || "document";
   const safe = (rec.name || "doc").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   card.innerHTML = (rec.thumb ? `<img src="${rec.thumb}" alt="">` : `<div style="height:46px"></div>`) +
-    `<div class="rn">${safe}</div><div class="rx" title="Remove">×</div>`;
+    `<div class="rn">${safe}</div>${rec.work ? '<div class="red" title="Your edits are saved with it">Edited</div>' : ""}<div class="rx" title="Remove">×</div>`;
   card.onclick = (e) => { if (e.target.classList.contains("rx")) { e.stopPropagation(); onDelete && onDelete(); return; } onOpen && onOpen(); };
   return card;
 }
@@ -49,7 +61,8 @@ export async function saveRecent({ name, type, bytes, thumb }) {
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const size = u8.byteLength;
     const existing = await listRecents();
-    for (const r of existing) if (r.name === name && r.size === size) await delRecent(r.id);
+    // the same file opened again replaces its plain entry; an entry that holds your edits is kept
+    for (const r of existing) if (r.name === name && r.size === size && !r.work) await delRecent(r.id);
     const id = Date.now() + "-" + Math.random().toString(36).slice(2, 7);
     const rec = { id, name: name || "document", type: type || "pdf", size, bytes: u8.slice().buffer, thumb: thumb || "", ts: Date.now() };
     await new Promise((res, rej) => { const t = db.transaction(STORE, "readwrite"); t.objectStore(STORE).put(rec); t.oncomplete = res; t.onerror = () => rej(t.error); });

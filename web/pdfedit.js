@@ -845,6 +845,9 @@ function cloneCanvas(c) { const k = document.createElement("canvas"); k.width = 
 let ocrPool = null;
 function ocrPoolSize() { return Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)); }
 async function ocrScheduler(langs, acc, n) {
+  if (typeof acc === "number") { n = acc; acc = "fast"; }          // older call shape: (langs, n)
+  if (!Array.isArray(langs)) langs = String(langs || "eng").split("+").filter(Boolean);
+  n = Math.max(1, n || 1);
   const T = await ensureTesseract();
   const key = langs.join("+") + "|" + acc;
   if (ocrPool && ocrPool.key !== key) { try { await ocrPool.sched.terminate(); } catch (_) {} ocrPool = null; }
@@ -1219,7 +1222,7 @@ async function pdfToDocx(entries, { mode, scans }, prog) {
       continue;
     }
     if (scans === "ocr") {
-      if (!ocrSched) ocrSched = await ocrScheduler("eng", ocrPoolSize());
+      if (!ocrSched) ocrSched = await ocrScheduler(["eng"], "fast", ocrPoolSize());
       const c = await rasterize(e, 2), r = await ocrSched.addJob("recognize", c);
       const paras = (r.data.paragraphs || []).map((pp) => pp.text.replace(/\s*\n\s*/g, " ").trim()).filter(Boolean);
       if (paras.length) { paras.forEach((tx) => body.push(`<w:p><w:pPr><w:spacing w:after="100"/></w:pPr>${docxRun({ str: tx }, 11)}</w:p>`)); continue; }
@@ -1663,7 +1666,7 @@ async function pageWords(e) {
   let text = fp.text;
   if (!text || text.length < 20) {
     const c = await entRaster(e, Math.max(1, Math.min(3, 1400 / await entWidth(e))));
-    const r = await (await ocrScheduler("eng", ocrPoolSize())).addJob("recognize", c);
+    const r = await (await ocrScheduler(["eng"], "fast", ocrPoolSize())).addJob("recognize", c);
     text = (r.data.text || "").toLowerCase();
   }
   const nums = (text.match(/\d[\d,.:/-]*\d|\d/g) || []).map((n) => n.replace(/[,]/g, ""));
@@ -1764,7 +1767,7 @@ async function pageNumberOf(e, useOcr) {
     }
     return s;
   };
-  const sched = await ocrScheduler("eng", ocrPoolSize());
+  const sched = await ocrScheduler(["eng"], "fast", ocrPoolSize());
   for (const clean of [true, false]) {
     const s = strips(clean), r = await sched.addJob("recognize", s);
     const ow = (r.data.words || []).map((w) => { const cy = (w.bbox.y0 + w.bbox.y1) / 2; return { t: w.text, x: (w.bbox.x0 + w.bbox.x1) / 2 / s.width, y: cy < band + 10 ? cy / c.height : (c.height - band + (cy - band - 20)) / c.height }; });
@@ -1806,8 +1809,11 @@ function openPageSort() {
     const host = $("pe_ps_list"); host.innerHTML = "";
     found.forEach((n, i) => {
       const row = mk2("div", `<span>Position ${i + 1}</span>`); row.className = "pe-psrow";
-      const inp = document.createElement("input"); inp.type = "number"; inp.min = "0"; inp.value = n == null ? "" : n; inp.placeholder = "none"; inp.title = "Page number found on this page";
-      inp.oninput = () => { found[i] = inp.value === "" ? null : +inp.value; };
+      const inp = document.createElement("input"); inp.type = "text"; inp.inputMode = "numeric"; inp.value = n == null ? "" : n; inp.placeholder = "none"; inp.title = "Page number found on this page: 7, Page 7, p. 7 or vii";
+      // free-form: "7", "p. 7", "Page 7 of 20", roman numerals
+      const read = (t) => { t = String(t || "").trim().toLowerCase(); if (!t) return null; const d = t.match(/\d+/); if (d) return +d[0];
+        if (!/^[ivxlcdm]+$/.test(t)) return undefined; const V = { i: 1, v: 5, x: 10, l: 50, c: 100, d: 500, m: 1000 }; let v = 0; for (let k = 0; k < t.length; k++) { const a = V[t[k]], b = V[t[k + 1]] || 0; v += a < b ? -a : a; } return v; };
+      inp.oninput = () => { const v = read(inp.value); inp.style.outline = v === undefined ? "2px solid #e5484d" : ""; if (v !== undefined) found[i] = v; };
       row.appendChild(inp); host.appendChild(row);
     });
     $("pe_ps_apply").style.display = "";
@@ -1858,7 +1864,9 @@ export function initPdfEditor() {
     finally { sources = sources.filter((q) => q !== src); jsDocs.delete(src.id); }
   };
   // the editor's Organize view uses the same duplicate check and page-number reader
-  window.__cal2PageTools = { duplicates: (list, maxDist, onProg) => findDupPairs(list, maxDist, onProg), pageNumber: (ad, ocr) => pageNumberOf(ad, ocr), numbersLookReal };
+  window.__cal2PageTools = { duplicates: (list, maxDist, onProg) => findDupPairs(list, maxDist, onProg), pageNumber: (ad, ocr) => pageNumberOf(ad, ocr), numbersLookReal,
+    // read a picture's text with word positions (the editor's scanned-page text editing); languages from the OCR tool's choice
+    recognize: async (canvas) => { const langs = ocrOpts().langs || ["eng"]; const sch = await ocrScheduler(langs.length ? langs : ["eng"], "fast", 1); const r = await sch.addJob("recognize", canvas, {}, { text: true, blocks: true }); return r.data; } };
   window.__cal2ResetPdf = () => { resetAll(); backToGrid(); };
   window.__cal2PdfPageCount = () => pages.length;
   window.__cal2TxtToPdf = (f) => txtToPdf(f);

@@ -108,6 +108,14 @@ export async function ensureFontsIn(cssList) {
 // ---- matching the fonts found in PDFs ------------------------------------------
 // PDF font names look like "ABCDEF+Calibri-Bold", "TimesNewRomanPS-ItalicMT", "Helvetica".
 const MAP = [
+  // more specific names first (narrow / black cuts of common families, newer Office fonts)
+  [/glyphless/i, "Arimo"],
+  [/arial ?narrow|helvetica ?(neue ?)?condensed|liberation ?sans ?narrow|roboto ?condensed|nimbus ?sans ?narrow/i, "Roboto Condensed"],
+  [/arial ?black|helvetica ?black/i, "Archivo"], [/impact|haettenschweiler|league ?gothic|oswald/i, "Oswald"],
+  [/aptos|seaford|grandview|skeena/i, "Open Sans"], [/avenir|proxima ?nova|museo ?sans|nunito/i, "Nunito"], [/montserrat|gotham/i, "Montserrat"],
+  [/optima|candara|corbel/i, "Lato"], [/constantia|charter|sitka/i, "Source Serif 4"], [/perpetua|goudy|sabon|bembo/i, "EB Garamond"],
+  [/lucida ?bright|plantin|times ?ten/i, "Tinos"], [/sf ?mono|andale ?mono/i, "Roboto Mono"],
+  [/ocr-?[ab]\b|letter ?gothic|prestige ?elite/i, "Courier Prime"], [/memphis|clarendon/i, "Roboto Slab"],
   [/helvetica ?neue|neue ?haas|^inter/i, "Inter"],
   [/arial|helvetica|liberation ?sans|arimo|nimbus ?sans|swiss/i, "Arimo"],
   [/times|liberation ?serif|tinos|nimbus ?rom|roman ?(std|pro)?$/i, "Tinos"],
@@ -123,18 +131,21 @@ const MAP = [
   [/brush ?script|edwardian|vivaldi|kunstler/i, "Great Vibes"], [/segoe ?script|lucida ?handwriting/i, "Dancing Script"], [/comic/i, "Patrick Hand"],
 ];
 // Returns { family, css, weight, style } for a raw PDF font name.
-export function matchPdfFont(rawName, { serif = false, mono = false } = {}) {
+// flags: what the PDF's font description says (bold, italic) when the name doesn't.
+// known: false when the name matched nothing and a generic stand-in was picked (the caller can then
+// recognise the font from how the text looks).
+export function matchPdfFont(rawName, { serif = false, mono = false, bold: fBold = false, italic: fItalic = false } = {}) {
   const raw = String(rawName || "").replace(/^[A-Z]{6}\+/, "");
-  const bold = /bold|black|heavy|semibold|demi|,b\b/i.test(raw), italic = /italic|oblique|,i\b|-it\b/i.test(raw);
+  const bold = !!fBold || /bold|black|heavy|semibold|demi|,b\b|-bd\b/i.test(raw), italic = !!fItalic || /italic|oblique|,i\b|-it\b|-bi\b|ita$/i.test(raw);
   const base = raw.replace(/[-,](bold|italic|oblique|regular|roman|medium|light|semibold|black|heavy|bd|it|bi|mt|ps)+.*$/i, "").replace(/(PSMT|MT|PS|Std|Pro)$/i, "");
   const spaced = base.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim();
-  let family = null;
+  let family = null, known = true;
   const direct = fontEntry(spaced) || fontEntry(base);
   if (direct && direct.google) family = direct.name;
   if (!family) for (const [re, fam] of MAP) if (re.test(raw)) { family = fam; break; }
-  if (!family) family = mono ? "Cousine" : serif ? "Tinos" : "Arimo";
+  if (!family) { family = mono ? "Cousine" : serif ? "Tinos" : "Arimo"; known = false; }
   const f = fontEntry(family);
   const generic = mono ? "monospace" : serif || (f && f.cat === "Serif") ? "serif" : "sans-serif";
   const own = spaced && spaced.toLowerCase() !== family.toLowerCase() ? `"${spaced}", ` : "";
-  return { family, css: `${own}"${family}", ${generic}`, weight: bold ? 700 : 400, style: italic ? "italic" : "normal" };
+  return { family, css: `${own}"${family}", ${generic}`, weight: bold ? 700 : 400, style: italic ? "italic" : "normal", known };
 }

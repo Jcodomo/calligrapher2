@@ -258,7 +258,11 @@
   .pcell:first-child{border-left:0}
   .pcell label{font-size:12px;color:var(--muted)}
   .pcell select{width:auto;min-width:150px;border:0;background:transparent;font-size:14.5px;padding:4px 6px;cursor:pointer}
-  .pcell input[type=number]{width:62px;border:1px solid var(--line);background:var(--surface2);border-radius:5px;padding:4px 6px;font-size:14.5px;font-family:inherit;text-align:center}
+  .pcell .numbox.bad,.pcell .datebox.bad,.pcell .timebox.bad{outline:2px solid #e5484d}
+  .pcell .datebox{width:96px}.pcell .timebox{width:76px}.pcell .calpick{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+  .pcell .datebox,.pcell .timebox{border:1px solid var(--line);background:var(--surface2);border-radius:5px;padding:4px 6px;font-size:14px;font-family:inherit;color:var(--text)}
+  .row .val{cursor:text;border-radius:4px}.row .val:hover{background:var(--tint)}.row .val.typing{outline:2px solid var(--accent);background:var(--surface2);min-width:36px;padding:0 4px}
+  .pcell input[type=number],.pcell input.numbox{width:62px;border:1px solid var(--line);background:var(--surface2);border-radius:5px;padding:4px 6px;font-size:14.5px;font-family:inherit;text-align:center}
   .pcell input[type=date],.pcell input[type=time],.pcell input[type=text]{border:1px solid var(--line);background:var(--surface2);border-radius:5px;padding:4px 6px;font-size:14px;font-family:inherit}
   .pbtn{display:inline-flex;align-items:center;justify-content:center;min-width:32px;height:32px;padding:0 8px;border:0;border-radius:6px;background:none;cursor:pointer;font-size:14.5px;color:var(--text)}
   .pbtn:hover{background:var(--tint)}
@@ -378,6 +382,9 @@
   .tcover{position:absolute;pointer-events:none}
   .tblock{position:absolute;border:1.5px dashed transparent;border-radius:2px;cursor:text;z-index:2}
   body[data-tool=edittext] .tblock{border-color:rgba(55,143,217,.55)}
+  body[data-tool=edittext] .tblock.ocr{border-color:rgba(46,157,91,.6)}
+  .snapg{position:absolute;pointer-events:none;z-index:30;background:var(--accent,#7c5cff);opacity:.45}
+  .snapg.v{width:1px;top:0;bottom:0}.snapg.h{height:1px;left:0;right:0}
   .tblock:hover{border-color:var(--sel)!important;background:rgba(55,143,217,.08)}
 
   /* organize grid (the open document's pages) */
@@ -448,6 +455,8 @@
   .rec-card .rn{font-size:10px;color:var(--text2);background:var(--surface2);padding:2px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .rec-card .rx{position:absolute;top:0;right:0;background:rgba(0,0,0,.55);color:#fff;font-size:12px;line-height:1;padding:2px 5px;border-radius:0 0 0 6px;display:none}
   .rec-card:hover .rx{display:block}
+  .rec-card .red{position:absolute;top:3px;left:3px;background:var(--accent);color:#fff;font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;pointer-events:none}
+  .ritem .redt,.rrow .redt{font-size:10px;font-weight:600;color:var(--accent);margin-left:4px}
   .recents .rlabel{flex-basis:100%;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
   #et_wrap{position:relative;margin:auto;box-shadow:var(--page-shadow)}
   #et_wrap canvas{display:block}
@@ -472,7 +481,8 @@
   .dp-tools .btn{width:auto;padding:6px 12px}
   .dp-hand{display:none;gap:10px;margin-top:10px}
   .dpad.hand .dp-hand{display:flex}
-  .dp-hand input{flex:1;background:var(--surface2);border:1px solid var(--line2);border-radius:6px;padding:9px;font:inherit;color:var(--text)}
+  .dp-hand input{flex:1;min-width:0;background:var(--surface2);border:1px solid var(--line2);border-radius:6px;padding:9px;font:inherit;color:var(--text)}
+  @media (max-width:560px){ .dpad.hand .dp-hand{flex-direction:column;gap:8px} .dp-hand input{flex:none!important;width:100%;box-sizing:border-box} }
   .dp-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
   .dp-foot .btn{width:auto;padding:8px 16px}
   .dp-warn{color:var(--danger);font-size:13px;min-height:1.2em;margin-top:6px}
@@ -853,7 +863,7 @@ jumps over the lazy dog</textarea>
 
       <div class="group">
         <h2>Seed / hand</h2>
-        <div class="seedline"><input id="seed" type="number" value="1337" /><button class="btn" id="reroll" style="width:auto">New hand</button></div>
+        <div class="seedline"><input id="seed" type="text" inputmode="numeric" value="1337" autocomplete="off" /><button class="btn" id="reroll" style="width:auto">New hand</button></div>
         <div class="actions" style="margin-top:8px">
           <button class="btn" id="last_hand">↶ Last hand</button>
           <button class="btn" id="save_hand">★ Save style</button>
@@ -1081,7 +1091,7 @@ jumps over the lazy dog</textarea>
 
 <div id="toast" role="status" aria-live="polite"></div>
 
-<script type="module" src="./app.js?v=77"></script>
-<script type="module" src="./shell.js?v=12"></script>
+<script type="module" src="./app.js?v=80"></script>
+<script type="module" src="./shell.js?v=13"></script>
 </body>
 </html>

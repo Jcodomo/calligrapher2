@@ -1,10 +1,10 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=45";
-import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
+import { initPdfEditor } from "./pdfedit.js?v=46";
+import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=2";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
-import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
+import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
 import { scanPdfWatermarks, removePdfWatermarks, eraseColor, inpaint, pageBackground } from "./watermark.js?v=2";
 import { pdfjsReady, pdfLibReady, warmPdfLibs, prefetchOn, canvasBytes } from "./libs.js?v=2";
 import { scanWorkersSupported, scanOffThread, scanConcurrency, warmRealistic, bilevelPng } from "./scanpool.js?v=4";
@@ -349,7 +349,7 @@ function params(forWidth) {
     tilt: toggles.tilt ? 0.6 : 0, vary: toggles.vary ? 0.8 : 0,
     inkflow: toggles.inkflow ? 0.85 : 0, natural: toggles.tilt ? 0 : (toggles.natural ? 0.7 : 0),
     caps_cursive: (mode === "signature" || toggles.cursivecaps) ? 1 : 0,
-    seed: +$("seed").value,
+    seed: seedVal(),
   };
 }
 
@@ -456,7 +456,14 @@ async function finishPdf(pdf, L, sel, opts = {}) {
   const rotOf = (pg) => (((pg.getRotation().angle || 0) % 360) + 360) % 360;
   if (!opts.keepPaper && PAPER[mo.paper]) {
     for (let i = 0; i < pdf.getPageCount(); i++) {
-      const page = pdf.getPage(i), r = rotOf(page), emb = await pdf.embedPage(page), w0 = emb.width, h0 = emb.height;
+      const page = pdf.getPage(i), r = rotOf(page);
+      let hasInk = false; try { hasInk = !!page.node.Contents(); } catch (_) {}
+      const emb = hasInk ? await pdf.embedPage(page) : null;   // (pdf-lib embeds when saving, so an empty page must be caught here)
+      if (!emb) {   // an empty page (nothing drawn on it) can't be placed: it just gets the new paper size
+        const { width: bw, height: bh } = page.getSize(); let [PW, PH] = PAPER[mo.paper]; if ((r % 180 ? bh : bw) > (r % 180 ? bw : bh)) [PW, PH] = [PH, PW];
+        pdf.insertPage(i, [PW, PH]); pdf.removePage(i + 1); leftovers = true; continue;
+      }
+      const w0 = emb.width, h0 = emb.height;
       const vw = r % 180 ? h0 : w0, vh = r % 180 ? w0 : h0;
       let [PW, PH] = PAPER[mo.paper]; if (vw > vh) [PW, PH] = [PH, PW];   // a landscape page goes on landscape paper
       if (!r && Math.abs(PW - vw) < 1 && Math.abs(PH - vh) < 1) continue;
@@ -946,18 +953,21 @@ const textBlocks = new Map();      // page key:rot -> Promise<blocks>
 const pdfFonts = new Map();        // source:fontName -> { loadedName, map, inv, fallback }
 // The closest available font for a PDF font (downloaded on demand), used for any
 // characters the PDF's own embedded font does not contain — or when it has none.
-function fontFallback(fo) {
-  const m = matchPdfFont(fo && fo.name, { serif: !!(fo && fo.isSerifFont), mono: !!(fo && fo.isMonospace) });
+function fontFallback(fo, fontName) {
+  // the font's own description says bold / italic even when its name doesn't (ForceBold, Italic flags)
+  const m = matchPdfFont((fo && fo.name) || fontName, { serif: !!(fo && fo.isSerifFont), mono: !!(fo && fo.isMonospace), bold: !!(fo && (fo.bold || fo.black)), italic: !!(fo && fo.italic) });
   ensureFont(m.family);
   const f = fontEntry(m.family);
-  return { css: m.css, family: m.family, weight: m.weight, style: m.style, serif: !!f && f.cat === "Serif", mono: !!f && f.cat === "Mono" };
+  return { css: m.css, family: m.family, weight: m.weight, style: m.style, serif: !!f && f.cat === "Serif", mono: !!f && f.cat === "Mono", known: m.known };
 }
 function registerPdfFont(si, fontName, page) {
   const key = si + ":" + fontName;
   if (pdfFonts.has(key)) return key;
   let fo = null;
   try { if (page.commonObjs.has(fontName)) fo = page.commonObjs.get(fontName); } catch (_) {}
-  const info = { loadedName: null, map: {}, inv: {}, fallback: fontFallback(fo) };
+  const info = { loadedName: null, map: {}, inv: {}, fallback: fontFallback(fo, fontName) };
+  // an OCR text layer (invisible "GlyphLess" text over a scan) says nothing about the font: recognise it from the picture
+  info.glyphless = /glyphless/i.test(((fo && fo.name) || "") + " " + fontName);
   if (fo && fo.loadedName && !fo.missingFile && [...document.fonts].some((f) => f.family.replace(/["']/g, "") === fo.loadedName)) {
     const tfc = fo.toFontChar || [], tu = fo.toUnicode || {};
     const add = (code, uni) => { const fc = tfc[code]; if (uni && fc != null && [...uni].length === 1) { const ch = String.fromCodePoint(fc); info.map[uni] = ch; info.inv[ch] = uni; } };
@@ -965,6 +975,7 @@ function registerPdfFont(si, fontName, page) {
     else if (tu.firstChar != null) { for (let c = tu.firstChar; c <= tu.lastChar; c++) add(c, String.fromCharCode(c)); }
     if (Object.keys(info.map).length) info.loadedName = fo.loadedName;
   }
+  info.visual = info.glyphless || (!info.loadedName && !info.fallback.known);   // no font of its own and an unknown name
   pdfFonts.set(key, info);
   return key;
 }
@@ -1027,36 +1038,182 @@ function sampleBlockColors(p, b) {
     return [hex(bg), hex(fg)];
   } catch (_) { return ["#ffffff", "#000000"]; }
 }
+// Scanned pages (no text of their own): the page is read with OCR and each line becomes editable text
+// in the closest matching font.
+const ocrBlocks = new Map();       // page key:rot -> Promise<blocks>
+function hiResPage(pi) {           // the page drawn sharp for reading (~288 dpi for PDF pages, the picture's own size otherwise)
+  const p = docPages[pi], ck = "hr:" + p.key + ":" + p.rot;
+  if (!ocrBlocks.has(ck)) ocrBlocks.set(ck, sourceCanvas(pi, docSources[p.src].kind === "pdf" ? 2 : 1));
+  return ocrBlocks.get(ck);
+}
+function getOcrBlocks(pi) {
+  const p = docPages[pi], ck = "ocr:" + p.key + ":" + p.rot;
+  if (!ocrBlocks.has(ck)) ocrBlocks.set(ck, (async () => {
+    const T = window.__cal2PageTools; if (!T || !T.recognize) return [];
+    const c = await hiResPage(pi);
+    toast("Reading the text on this scanned page… (first time: downloads the text reader)");
+    const data = await T.recognize(c), out = [];
+    for (const bl of data.blocks || []) for (const par of bl.paragraphs || []) for (const ln of par.lines || []) {
+      const words = (ln.words || []).filter((w) => w.text && w.text.trim());   // every word: a dropped one would be covered over and lost
+      if (!words.length || (ln.confidence || 0) < 20) continue;
+      const x0 = Math.min(...words.map((w) => w.bbox.x0)), x1 = Math.max(...words.map((w) => w.bbox.x1)), y0 = Math.min(...words.map((w) => w.bbox.y0)), y1 = Math.max(...words.map((w) => w.bbox.y1));
+      if (x1 - x0 < 4 || y1 - y0 < 4) continue;
+      const h = y1 - y0;
+      out.push({ str: words.map((w) => w.text).join(" "), ocr: true, conf: Math.round(ln.confidence || 0), asc: 0.9, nx: x0 / c.width, ny: y0 / c.height, nw: (x1 - x0) / c.width, nh: h / c.height, fsN: h / 1.15 / c.width });
+    }
+    toast(out.length ? `Read ${out.length} line${out.length === 1 ? "" : "s"} from the scan — click one to edit it in the closest matching font.` : "No text found on this page. Use Add text to write on it.");
+    return out;
+  })().catch((e) => { toast("Couldn't read this page: " + (e.message || e)); return []; }));
+  return ocrBlocks.get(ck);
+}
 function renderTextBlocks(ov, pi, dispW, dispH) {
   const p = docPages[pi];
-  getTextBlocks(pi).then((blocks) => {
+  getTextBlocks(pi).then(async (blocks) => {
     if (!ov.isConnected || edTool !== "edittext") return;
+    if (!blocks.length && pi === curPage) blocks = await getOcrBlocks(pi);   // a scan: read it
+    if (!ov.isConnected || edTool !== "edittext") return;
+    ov.querySelectorAll(".tblock").forEach((x) => x.remove());   // a second pass over the same page replaces the first
     blocks.forEach((b, bi) => {
       const bid = p.key + ":" + p.rot + ":" + bi;
       if (docItems.some((it) => it.blockId === bid)) return;
-      const t = document.createElement("div"); t.className = "tblock"; t.title = "Click to edit this text";
+      const t = document.createElement("div"); t.className = "tblock" + (b.ocr ? " ocr" : ""); t.title = b.ocr ? `Click to edit this text (read from the scan, ${b.conf}% sure)` : "Click to edit this text";
       t.style.cssText = `left:${b.nx * dispW - 2}px;top:${b.ny * dispH - 2}px;width:${b.nw * dispW + 4}px;height:${b.nh * dispH + 4}px`;
       t.onpointerdown = (e) => { e.preventDefault(); e.stopPropagation(); createTextEdit(pi, b, bid, e.clientX, e.clientY); };
       ov.appendChild(t);
     });
-    if (!blocks.length && docSources[p.src] && docSources[p.src].kind === "pdf" && pi === curPage) toast("No editable text on this page — it may be a scan. Use Add text, or run OCR in Convert & Optimize.");
+
   });
 }
-function createTextEdit(pi, b, bid, cx, cy) {
+let textEditBusy = false;
+async function createTextEdit(pi, b, bid, cx, cy) {
+  if (textEditBusy) return;
   const p = docPages[pi];
   const [bg, fg] = sampleBlockColors(p, b);
-  const info = pdfFonts.get(b.pfont);
+  const info = b.pfont ? pdfFonts.get(b.pfont) : null;
+  // scans, OCR text layers and unknown fonts: recognise the font from how the line looks
+  let vis = null;
+  if (b.ocr || (info && info.visual)) {
+    textEditBusy = true; document.body.style.cursor = "progress";
+    try { toast("Matching the font…"); vis = await matchLineFont(pi, b); } catch (_) { vis = null; }
+    finally { textEditBusy = false; document.body.style.cursor = ""; }
+    if (vis) b = { ...b, ...vis.geom };
+  }
   const padX = b.fsN * 0.08, padY = b.nh * 0.1;
   const it = {
-    id: "it" + itemSeq++, type: "text", tbox: true, tedit: true, page: pi, blockId: bid, pfont: b.pfont,
-    ff: info ? info.fallback.family : "Arimo",
+    id: "it" + itemSeq++, type: "text", tbox: true, tedit: true, page: pi, blockId: bid, pfont: vis ? undefined : b.pfont,
+    ff: vis ? vis.best.family : info ? info.fallback.family : "Arimo", ...(vis ? { bold: vis.best.weight >= 700, italic: vis.best.style === "italic", fontMatches: vis.list.slice(0, 6) } : {}),
     fs: b.fsN, asc: b.asc, color: fg, bg: "none", coverBg: bg, opacity: 1, signer: activeSigner, align: "left",
     cover: { nx: b.nx - padX, ny: b.ny - padY, nw: b.nw + padX * 2, nh: b.nh + padY * 2 },
     nx: b.nx, ny: b.ny, nw: b.nw + padX, ar: (b.nh / (b.nw + padX)) / pageAspect(pi), text: b.str, orig: b.str,
   };
+  if (!it.pfont) delete it.pfont;
+  if (vis) { if (b.ls) it.ls = b.ls; } else await matchLetterSpacing(it, b);
   docItems.push(it); selId = it.id; selDraw = null;
   render();
+  if (vis) toast(`Closest font: ${vis.best.family}${vis.best.weight >= 700 ? " Bold" : ""}${vis.best.style === "italic" ? " Italic" : ""} (${vis.best.pct}% match) — other close matches are at the top of the font list.`);
   requestAnimationFrame(() => { const el = document.querySelector(`#ed_pages .ditem[data-id="${it.id}"]`); if (el) startTboxEdit(it, el, cx, cy); });
+}
+// Letter spacing that makes the line exactly as wide as the original, so the edited text sits where it was.
+let measureCtx = null;
+async function matchLetterSpacing(it, b) {
+  try {
+    const n = [...(it.text || "")].length; if (n < 3 || !(b.fsN > 0)) return;
+    const f = tboxFont(it), font = `${f.style} ${f.weight} 100px ${f.css}`, txt = tboxDisplay(it);
+    await Promise.race([document.fonts.load(font, txt), new Promise((r) => setTimeout(r, 900))]);
+    measureCtx = measureCtx || document.createElement("canvas").getContext("2d");
+    measureCtx.font = font; try { measureCtx.letterSpacing = "0px"; } catch (_) {}
+    const natural = measureCtx.measureText(txt).width / 100, actual = b.nw / b.fsN;   // both in "em"
+    const ls = (actual - natural) / n;
+    if (Math.abs(ls) > 0.003 && ls > -0.08 && ls < 0.25) it.ls = Math.round(ls * 1000) / 1000;
+  } catch (_) {}
+}
+
+// ---- recognising a font from how text looks --------------------------------------------------------
+// The line's ink is compared with the same words drawn in each candidate font (regular and bold, then
+// italics of the closest families): overlap of the shapes plus how wide the line runs.
+const MATCH_FAMILIES = ["Arimo", "Tinos", "Cousine", "Carlito", "Caladea", "Gelasio", "Open Sans", "Roboto", "Lato", "Montserrat", "Source Sans 3",
+  "Noto Sans", "Inter", "Poppins", "Raleway", "PT Sans", "Roboto Condensed", "Libre Franklin", "Oswald", "Work Sans", "Fira Sans", "Ubuntu",
+  "Nunito", "Archivo", "Merriweather", "PT Serif", "Noto Serif", "Lora", "EB Garamond", "Libre Baskerville", "Crimson Text", "Source Serif 4",
+  "Playfair Display", "Old Standard TT", "Bitter", "Roboto Slab", "Roboto Mono", "Courier Prime", "Source Code Pro"];
+function inkOf(data, w, h, isInk) {
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (isInk(data, (y * w + x) * 4)) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+const lumAt = (d, k) => d[k] * 0.3 + d[k + 1] * 0.59 + d[k + 2] * 0.11;
+// How much ink is in each cell of a W x H grid laid over the box (0..1). Blur moves ink around but keeps how
+// much of it there is, so this compares a soft scan with crisp type fairly. paper/ink: the two grey levels.
+function inkMass(src, box, W, H, paper, ink) {
+  const S = 3, c = document.createElement("canvas"); c.width = W * S; c.height = H * S;
+  const g = c.getContext("2d", { willReadFrequently: true }); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.imageSmoothingQuality = "high";
+  g.drawImage(src, box.x, box.y, box.w, box.h, 0, 0, c.width, c.height);
+  const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data, m = new Float32Array(W * H), r = 1 / Math.max(1, paper - ink), cw = W * S;
+  for (let y = 0; y < H * S; y++) { const row = ((y / S) | 0) * W; for (let x = 0; x < cw; x++) { const v = (paper - lumAt(d, (y * cw + x) * 4)) * r; if (v > 0) m[row + ((x / S) | 0)] += (v > 1 ? 1 : v) / (S * S); } }
+  return m;
+}
+async function identifyFont(crop, text, families = MATCH_FAMILIES) {
+  text = String(text || "").trim(); if (!text) return [];
+  const g0 = crop.getContext("2d", { willReadFrequently: true }), cd = g0.getImageData(0, 0, crop.width, crop.height).data, N = crop.width * crop.height;
+  const hist = new Uint32Array(256); for (let i = 0; i < N; i++) hist[lumAt(cd, i * 4) | 0]++;
+  let acc = 0, paper = 255, lo = 0;
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > N * 0.5) { paper = v; break; } }
+  acc = 0; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > N * 0.01) { lo = v; break; } }
+  const thr = (paper + lo) / 2;
+  // the paper's own grain is not ink: only what is darker than the paper's noise counts
+  let bs = 0, bq = 0, bn = 0; for (let i = 0; i < N; i++) { const v = lumAt(cd, i * 4); if (v > thr) { bs += v; bq += v * v; bn++; } }
+  const bm = bs / Math.max(1, bn), floor = bm - 2.5 * Math.sqrt(Math.max(0, bq / Math.max(1, bn) - bm * bm));
+  const cb = inkOf(cd, crop.width, crop.height, (d, k) => lumAt(d, k) < thr); if (!cb || cb.h < 4) return [];
+  const HN = 24, WN = Math.max(8, Math.min(500, Math.round(cb.w * HN / cb.h)));
+  const feats = (m) => { let tot = 0; const rows = new Float32Array(HN); for (let y = 0; y < HN; y++) { let s2 = 0; for (let x = 0; x < WN; x++) s2 += m[y * WN + x]; rows[y] = s2; tot += s2; } for (let y = 0; y < HN; y++) rows[y] /= tot || 1; return { rows, dens: tot / (WN * HN) }; };
+  const T = inkMass(crop, cb, WN, HN, Math.min(paper - 2, floor), lo), fT = feats(T);
+  await Promise.race([Promise.all(families.map((f) => ensureFont(f))), new Promise((r) => setTimeout(r, 6000))]);   // first time: download them
+  const PX = 48, cv = document.createElement("canvas"), g = cv.getContext("2d", { willReadFrequently: true }), out = [];
+  const tryOne = async (family, weight, style) => {
+    const font = `${style} ${weight} ${PX}px "${family}"`;
+    // only a font that is really here (an unknown family is drawn in the browser's default font), with a real bold / italic
+    let faces = []; try { faces = await document.fonts.load(font, text); } catch (_) {}
+    const fw = (f) => { const w = String(f.weight).split(" ").map(Number); return w.length > 1 ? (weight >= w[0] && weight <= w[1]) : Math.abs(w[0] - weight) < 150; };
+    if (!faces.some((f) => f.family.replace(/["']/g, "") === family && fw(f) && (f.style === style || (style === "normal" && f.style !== "italic")))) return;
+    g.font = font; const m = g.measureText(text);
+    cv.width = Math.ceil(m.width + PX); cv.height = PX * 2; g.font = font; g.fillStyle = "#fff"; g.fillRect(0, 0, cv.width, cv.height); g.fillStyle = "#000"; g.textBaseline = "alphabetic";
+    g.fillText(text, PX / 2, PX * 1.4);
+    const d = g.getImageData(0, 0, cv.width, cv.height).data, b = inkOf(d, cv.width, cv.height, (dd, k) => lumAt(dd, k) < 128); if (!b) return;
+    const C = inkMass(cv, b, WN, HN, 255, 0), fC = feats(C);
+    let mn = 0, mx = 0; for (let i = 0; i < C.length; i++) { mn += Math.min(C[i], T[i]); mx += Math.max(C[i], T[i]); }
+    let rowE = 0; for (let y = 0; y < HN; y++) rowE += Math.abs(fC.rows[y] - fT.rows[y]);
+    const shapeE = 1 - (mx ? mn / mx : 0), widthE = Math.abs(Math.log((b.w / b.h) / (cb.w / cb.h))), weightE = Math.abs(Math.log((fC.dens + 1e-3) / (fT.dens + 1e-3)));
+    const fm = g.measureText("Hg");
+    out.push({ family, weight, style, score: shapeE + 1.5 * widthE + weightE + rowE,
+      k: cb.h / b.h, inkW: b.w, inkLeft: b.x - PX / 2, inkTop: PX * 1.4 - b.y, asc: (fm.fontBoundingBoxAscent || PX * 0.9) / PX, desc: (fm.fontBoundingBoxDescent || PX * 0.22) / PX });
+  };
+  for (const f of families) { await tryOne(f, 400, "normal"); await tryOne(f, 700, "normal"); }
+  out.sort((a, b) => a.score - b.score);
+  for (const f of [...new Set(out.slice(0, 6).map((o) => o.family))]) { await tryOne(f, 400, "italic"); await tryOne(f, 700, "italic"); }
+  out.sort((a, b) => a.score - b.score);
+  // a match percentage people can read: the best possible score is 0, about 1.2 is a poor match
+  out.forEach((o) => { o.pct = Math.max(1, Math.min(99, Math.round(100 * Math.exp(-0.6 * o.score)))); });
+  out.cropBox = cb; out.PX = PX;
+  return out;
+}
+// Match the font of one text line of a page; returns the best font, the list, and where the text sits.
+async function matchLineFont(pi, b) {
+  const page = await hiResPage(pi), W = page.width, H = page.height;
+  const padX = Math.round(b.nh * H * 0.4), padY = Math.round(b.nh * H * 0.25);
+  const bx = Math.max(0, Math.floor(b.nx * W) - padX), by = Math.max(0, Math.floor(b.ny * H) - padY);
+  const bw = Math.min(W - bx, Math.ceil(b.nw * W) + padX * 2), bh = Math.min(H - by, Math.ceil(b.nh * H) + padY * 2);
+  if (bw < 4 || bh < 4) return null;
+  const crop = document.createElement("canvas"); crop.width = bw; crop.height = bh; crop.getContext("2d").drawImage(page, bx, by, bw, bh, 0, 0, bw, bh);
+  const list = await identifyFont(crop, b.str); if (!list.length) return null;
+  const best = list[0], cb = list.cropBox, PX = list.PX;
+  // page pixels: font size, baseline, left edge of the text
+  const fsPx = PX * best.k, base = by + cb.y + best.inkTop * best.k, left = bx + cb.x - best.inkLeft * best.k;
+  // letter spacing that closes what's left of the width difference (the font is already the closest in shape)
+  const n = [...b.str].length, ls = n > 2 ? ((cb.w / best.k) - best.inkW) / PX / n : 0;
+  const seen = new Set(), uniq = list.filter((o) => { const k = o.family + o.weight + o.style; if (seen.has(k)) return false; seen.add(k); return true; });
+  return {
+    best, list: uniq.slice(0, 8).map((o) => ({ family: o.family, weight: o.weight, style: o.style, pct: o.pct })),
+    geom: { fsN: fsPx / W, asc: best.asc, nx: left / W, ny: (base - best.asc * fsPx) / H, nw: Math.max(cb.w * 1.02, fsPx) / W, nh: (best.asc + best.desc) * fsPx / H, ls: Math.abs(ls) > 0.003 && Math.abs(ls) < 0.15 ? Math.round(ls * 1000) / 1000 : 0 },
+  };
 }
 
 // ---- creating objects -------------------------------------------------------
@@ -1116,7 +1273,7 @@ function addSigItem(x, y, wm) {
   const text = sigText(wm);
   if (!traced && !text.trim()) { toast("Type it in the side panel first."); openSide(true); return null; }
   const g = currentSignature(wm);
-  const it = pushItem({ type: "sig", wmode: wm, nw: wm === "signature" ? 0.3 : 0.5, ar: (g.h / g.w) || 0.3, svg: g.svg, dynamic: !traced, text, seed: +$("seed").value, autosave: wm === "signature" }, x, y);
+  const it = pushItem({ type: "sig", wmode: wm, nw: wm === "signature" ? 0.3 : 0.5, ar: (g.h / g.w) || 0.3, svg: g.svg, dynamic: !traced, text, seed: seedVal(), autosave: wm === "signature" }, x, y);
   render();
   if (it.dynamic) regenItem(it, undefined, true); else if (wm === "signature") autoSaveSig(it);
   return it;
@@ -1133,6 +1290,8 @@ function addTextItem(x, y) {
 // DocuSign-style timestamp: "MM/DD/YYYY | H:MM AM/PM TZ".
 const TZ_LIST = ["PST", "PDT", "MST", "MDT", "CST", "CDT", "EST", "EDT", "AKST", "AKDT", "HST", "GMT", "UTC", "BST", "CET", "CEST", "EET", "IST", "JST", "KST", "AEST", "AEDT", "NZST"];
 function pad2(n) { return String(n).padStart(2, "0"); }
+// the handwriting seed box takes any text: a number is used as is, anything else ("Mom's card") becomes a number
+function seedVal() { const t = String($("seed").value || "").trim(), n = parseLooseNumber(t); if (n != null) return Math.round(Math.abs(n)); let h = 2166136261; for (const ch of t) h = Math.imul(h ^ ch.codePointAt(0), 16777619) >>> 0; return h % 1e9; }
 function localTzAbbr() {
   try { const m = new Date().toLocaleTimeString("en-US", { timeZoneName: "short" }).match(/[A-Z]{2,5}$/); return (m && m[0]) || "UTC"; }
   catch { return "UTC"; }
@@ -1616,19 +1775,54 @@ function startInlineEdit(it, el) {
   td.onblur = () => { it.text = td.textContent; td.removeAttribute("contenteditable"); render(); };
   td.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); td.blur(); } if (ev.key === "Escape") td.blur(); };
 }
+// ---- alignment guides: while an object is dragged, a faint line shows when its edges or centre line up
+// with another object, a line of the page's text or the middle of the page, and it snaps there.
+// Hold Alt to move freely. The lines go away when the object is let go.
+const textBlocksReady = new Map();   // page key:rot -> blocks (filled as pages' text is read)
+function snapTargets(it, el, dispW, dispH) {
+  const xs = [dispW / 2], ys = [dispH / 2], ov = el.parentNode;
+  if (ov) for (const o of ov.querySelectorAll(".ditem")) {
+    if (o === el || o.dataset.id === it.id) continue;
+    const l = o.offsetLeft, t = o.offsetTop, w = o.offsetWidth, h = o.offsetHeight; if (!w && !h) continue;
+    xs.push(l, l + w / 2, l + w); ys.push(t, t + h / 2, t + h);
+  }
+  const p = docPages[it.page || 0];
+  if (p) {
+    const ck = p.key + ":" + p.rot, bl = textBlocksReady.get(ck);
+    if (bl) for (const b of bl) { xs.push(b.nx * dispW, (b.nx + b.nw) * dispW); ys.push(b.ny * dispH, (b.ny + b.nh) * dispH); }
+    else if (docSources[p.src] && docSources[p.src].kind === "pdf") getTextBlocks(it.page || 0).then((v) => { textBlocksReady.set(ck, v || []); }).catch(() => {});
+  }
+  return { xs, ys };
+}
+function snapMove(it, el, tg, dispW, dispH, guides) {
+  const T = 5, w = el.offsetWidth, h = el.offsetHeight, x = it.nx * dispW, y = it.ny * dispH;
+  const best = (edges, targets) => { let bd = T + 1, off = 0, at = null; for (const [e, k] of edges) for (const t of targets) { const d = Math.abs(t - e); if (d < bd) { bd = d; off = t - e; at = t; } } return at == null ? null : { off, at }; };
+  const sx = best([[x, 0], [x + w / 2, 1], [x + w, 2]], tg.xs), sy = best([[y, 0], [y + h / 2, 1], [y + h, 2]], tg.ys);
+  if (sx) it.nx = (x + sx.off) / dispW;
+  if (sy) it.ny = (y + sy.off) / dispH;
+  guides.v.style.display = sx ? "" : "none"; if (sx) guides.v.style.left = Math.round(sx.at) + "px";
+  guides.h.style.display = sy ? "" : "none"; if (sy) guides.h.style.top = Math.round(sy.at) + "px";
+}
 function startMove(it, el, e, dispW, dispH, wasSel, fromGrip) {
   try { el.setPointerCapture(e.pointerId); } catch (_) {}
   const sx = e.clientX, sy = e.clientY, ox = it.nx, oy = it.ny;
-  let moved = false;
+  let moved = false, tg = null, guides = null;
   const mv = (ev) => {
     if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 3) return;
+    if (!moved && el.parentNode) {
+      tg = snapTargets(it, el, dispW, dispH);
+      guides = { v: mk("div", { className: "snapg v" }), h: mk("div", { className: "snapg h" }) };
+      guides.v.style.display = guides.h.style.display = "none"; el.parentNode.append(guides.v, guides.h);
+    }
     moved = true;
     it.nx = Math.max(-0.1, Math.min(0.98, ox + (ev.clientX - sx) / dispW));
     it.ny = Math.max(-0.1, Math.min(0.98, oy + (ev.clientY - sy) / dispH));
+    if (guides) { if (ev.altKey) guides.v.style.display = guides.h.style.display = "none"; else snapMove(it, el, tg, dispW, dispH, guides); }
     el.style.left = it.nx * dispW + "px"; el.style.top = it.ny * dispH + "px";
   };
   const up = (ev) => {
     el.removeEventListener("pointermove", mv); el.removeEventListener("pointerup", up);
+    if (guides) { guides.v.remove(); guides.h.remove(); guides = null; }
     if (!moved && !fromGrip) {
       if (it.tbox) {            // one click edits a text box right away, caret where you clicked
         const cx = ev.clientX, cy = ev.clientY;
@@ -1832,6 +2026,7 @@ function snapshotNow() {
   const s = snapSig(); if (s === lastSnapSig) return;
   if (lastSnap) { undoStack.push(lastSnap); if (undoStack.length > 80) undoStack.shift(); redoStack = []; }
   lastSnap = takeSnap(); lastSnapSig = s; updateUndoButtons();
+  scheduleWorkSave();
 }
 function resetHistory() { undoStack = []; redoStack = []; lastSnap = doc ? takeSnap() : null; lastSnapSig = doc ? snapSig() : ""; updateUndoButtons(); }
 function restoreSnap(s) {
@@ -1954,7 +2149,7 @@ function colorBtn(value, allowNone, onPick, title) {
   return b;
 }
 // Font picker: every font in the library, searchable, each shown in its own face.
-function fontPicker(value, hasPdf, onPick) {
+function fontPicker(value, hasPdf, onPick, matches) {
   const b = mk("button", { className: "fbtn", type: "button", title: "Font" });
   const ent = fontEntry(value), label = value === "__pdf" ? "Original PDF font" : value;
   if (ent && ent.google) ensureFont(ent.name);
@@ -1970,6 +2165,14 @@ function fontPicker(value, hasPdf, onPick) {
     const build = () => {
       list.innerHTML = ""; const term = q.value.trim().toLowerCase();
       if (hasPdf && !term) { const ob = mk("button", { className: value === "__pdf" ? "on" : "" }); ob.textContent = "Original PDF font"; ob.onclick = () => { closePops(); onPick("__pdf"); }; list.appendChild(ob); }
+      if (matches && matches.length && !term) {   // recognised from how the text looks, best first
+        list.appendChild(mk("h5", {}, "Closest matches"));
+        for (const m of matches) {
+          const fb = mk("button", { className: m.family === value ? "on" : "", title: `${m.family} — ${m.pct}% match` }); const fe = fontEntry(m.family);
+          fb.innerHTML = `<span style="font-family:${fe ? fe.css.replace(/"/g, "'") : "inherit"};font-weight:${m.weight};font-style:${m.style}">${escapeHTML(m.family)}${m.weight >= 700 ? " Bold" : ""}${m.style === "italic" ? " Italic" : ""}</span><small style="float:right;font-family:inherit;font-size:11px;color:var(--muted);margin-top:4px">${m.pct}%</small>`;
+          fb.onclick = () => { closePops(); onPick(m.family, m); }; list.appendChild(fb);
+        }
+      }
       for (const cat of FONT_CATS) {
         const fonts = FONT_LIB.filter((f) => f.cat === cat && (!term || f.name.toLowerCase().includes(term)));
         if (!fonts.length) continue;
@@ -1998,13 +2201,71 @@ function fontPicker(value, hasPdf, onPick) {
   return b;
 }
 
+// ---- free-form entry: number boxes take "12", "12.5pt", "1,200", "50%", "10+2", "3/4"; ↑/↓ step ----------
+function parseLooseNumber(txt) {
+  let t = String(txt == null ? "" : txt).trim().toLowerCase().replace(/[$€£¥\s]/g, "").replace(/(\d),(?=\d{3}\b)/g, "$1").replace(/(pt|px|em|in|mm|cm|%|°|x|×)$/i, "");
+  if (!t) return null;
+  if (/^\(.*\)$/.test(t) && !/[+*/]/.test(t)) t = "-" + t.slice(1, -1);   // (12) = -12
+  t = t.replace(/,/g, ".");                                                // 12,5 = 12.5
+  if (!/^[\d.+\-*/()]+$/.test(t)) return null;
+  let i = 0;                                                               // a tiny calculator, no eval
+  const num = () => { if (t[i] === "(") { i++; const v = sum(); if (t[i] === ")") i++; return v; } if (t[i] === "-") { i++; return -num(); } if (t[i] === "+") { i++; return num(); } const m = /^\d*\.?\d+|^\d+\./.exec(t.slice(i)); if (!m) throw 0; i += m[0].length; return parseFloat(m[0]); };
+  const prod = () => { let v = num(); while (t[i] === "*" || t[i] === "/") { const op = t[i++], r = num(); v = op === "*" ? v * r : v / r; } return v; };
+  const sum = () => { let v = prod(); while (t[i] === "+" || t[i] === "-") { const op = t[i++], r = prod(); v = op === "+" ? v + r : v - r; } return v; };
+  try { const v = sum(); return i === t.length && isFinite(v) ? v : null; } catch (_) { return null; }
+}
 function numBox(value, min, max, step, onChange, title) {
-  const n = mk("input", { type: "number", value: String(value), min, max, step: step || 1, title: title || "" });
-  n.onchange = () => { const v = Math.max(min, Math.min(max, +n.value || min)); n.value = v; onChange(v); };
-  n.oninput = () => { const v = +n.value; if (n.value !== "" && v >= min && v <= max) onChange(v); };
-  n.onkeydown = (e) => e.stopPropagation();
+  const n = mk("input", { type: "text", value: String(value), title: (title || "") + " — type a number, or use ↑ ↓", className: "numbox", autocomplete: "off", spellcheck: false });
+  n.inputMode = "decimal"; let last = +value;
+  const clamp = (v) => Math.max(min, Math.min(max, v));
+  const commit = () => { const v = parseLooseNumber(n.value); if (v == null) { n.value = String(last); n.classList.add("bad"); setTimeout(() => n.classList.remove("bad"), 900); return; } const c = clamp(Math.round(v * 1000) / 1000); last = c; n.value = String(c); onChange(c); };
+  n.onchange = commit;
+  n.oninput = () => { const v = parseLooseNumber(n.value); if (v != null && v >= min && v <= max && /\d$/.test(n.value.trim())) { last = v; onChange(v); } };
+  n.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { commit(); n.blur(); }
+    else if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); const cur = parseLooseNumber(n.value); const v = clamp(Math.round(((cur == null ? last : cur) + (e.key === "ArrowUp" ? 1 : -1) * (step || 1) * (e.shiftKey ? 10 : 1)) * 1000) / 1000); last = v; n.value = String(v); onChange(v); }
+  };
+  n.onfocus = () => n.select();
   return n;
 }
+// free-form dates: 9/15/2026, 9/15/26, 2026-09-15, 09152026, Sep 15 2026, 15 September 2026, today, tomorrow, +30 -> "YYYY-MM-DD"
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+function parseLooseDate(txt, base = new Date()) {
+  const t = String(txt || "").trim().toLowerCase().replace(/(\d)(st|nd|rd|th)\b/g, "$1").replace(/,/g, " ").replace(/\s+/g, " ");
+  if (!t) return null;
+  const iso = (y, m, d) => { const dt = new Date(y, m - 1, d); return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d ? `${y}-${pad2(m)}-${pad2(d)}` : null; };
+  const fromDate = (dt) => iso(dt.getFullYear(), dt.getMonth() + 1, dt.getDate());
+  const yy = (y) => (y < 100 ? (y + 2000 > base.getFullYear() + 20 ? y + 1900 : y + 2000) : y);
+  if (t === "today" || t === "now") return fromDate(base);
+  if (t === "tomorrow") return fromDate(new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1));
+  if (t === "yesterday") return fromDate(new Date(base.getFullYear(), base.getMonth(), base.getDate() - 1));
+  let m = t.match(/^([+-])\s*(\d+)\s*(d|days?|w|weeks?|m|months?)?$/);
+  if (m) { const k = (m[1] === "-" ? -1 : 1) * +m[2], u = (m[3] || "d")[0]; return fromDate(u === "w" ? new Date(base.getFullYear(), base.getMonth(), base.getDate() + 7 * k) : u === "m" ? new Date(base.getFullYear(), base.getMonth() + k, base.getDate()) : new Date(base.getFullYear(), base.getMonth(), base.getDate() + k)); }
+  if ((m = t.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/))) return iso(+m[1], +m[2], +m[3]);
+  if ((m = t.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/))) return iso(yy(+m[3]), +m[1], +m[2]);
+  if ((m = t.match(/^(\d{1,2})[-/.](\d{1,2})$/))) return iso(base.getFullYear(), +m[1], +m[2]);
+  if ((m = t.match(/^(\d{2})(\d{2})(\d{4})$/))) return iso(+m[3], +m[1], +m[2]);
+  if ((m = t.match(/^(\d{4})(\d{2})(\d{2})$/))) return iso(+m[1], +m[2], +m[3]);
+  const FULL = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  const mon = (w) => { if (w.length < 3) return 0; const i = FULL.findIndex((n) => n.indexOf(w) === 0); return i >= 0 ? i + 1 : w === "sept" ? 9 : 0; };   // a real month name or its start ("junk" is not June)
+  if ((m = t.match(/^([a-z]{3,})\.? (\d{1,2})(?: (\d{2}|\d{4}))?$/)) && mon(m[1])) return iso(m[3] ? yy(+m[3]) : base.getFullYear(), mon(m[1]), +m[2]);
+  if ((m = t.match(/^(\d{1,2}) ([a-z]{3,})\.?(?: (\d{2}|\d{4}))?$/)) && mon(m[2])) return iso(m[3] ? yy(+m[3]) : base.getFullYear(), mon(m[2]), +m[1]);
+  return null;
+}
+// free-form times: 3pm, 3:30 pm, 15:30, 1530, noon, now -> "HH:MM"
+function parseLooseTime(txt, base = new Date()) {
+  const t = String(txt || "").trim().toLowerCase().replace(/\./g, "").replace(/\s+/g, "");
+  if (!t) return null;
+  if (t === "now") return `${pad2(base.getHours())}:${pad2(base.getMinutes())}`;
+  if (t === "noon") return "12:00"; if (t === "midnight") return "00:00";
+  const m = t.match(/^(\d{1,2})(?::?(\d{2}))?(am|pm|a|p)?$/); if (!m) return null;
+  let h = +m[1]; const mi = +(m[2] || 0), ap = m[3];
+  if (ap) { if (h < 1 || h > 12) return null; if (ap[0] === "p" && h < 12) h += 12; if (ap[0] === "a" && h === 12) h = 0; }
+  return h < 24 && mi < 60 ? `${pad2(h)}:${pad2(mi)}` : null;
+}
+const showDate = (iso) => { const [y, m, d] = String(iso || "").split("-").map(Number); return y ? `${m}/${d}/${y}` : ""; };
+const showTime = (hm) => { let [h, mi] = String(hm || "").split(":").map(Number); if (isNaN(h)) return ""; const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12; return `${h}:${pad2(mi || 0)} ${ap}`; };
 function selBox(options, value, onChange, title) {
   const s = mk("select", { title: title || "" });
   options.forEach(([v, l]) => { const o = mk("option", { value: v, textContent: l }); s.appendChild(o); });
@@ -2030,7 +2291,11 @@ function renderProps() {
   if (edMode === "convert" && !it && !d) { add(mk("div", { className: "phint" }, "Pick a tool above. It works on the document as you see it; results that change the document update it here (Ctrl+Z undoes).")); return; }
   if (it && it.tbox) {
     const info = pfontInfo(it);
-    add(pcell(fontPicker(info && !it.ffOverride ? "__pdf" : fontByKey(it.ff).name, !!info, (v) => { if (v === "__pdf") it.ffOverride = false; else { it.ff = v; if (info) it.ffOverride = true; if (!it.tedit) TD.text.ff = v; ensureFont(v); } render(); })));
+    add(pcell(fontPicker(info && !it.ffOverride ? "__pdf" : fontByKey(it.ff).name, !!info, (v, m) => {
+      if (v === "__pdf") it.ffOverride = false;
+      else { it.ff = v; if (info) it.ffOverride = true; if (!it.tedit) TD.text.ff = v; ensureFont(v); if (m) { it.bold = m.weight >= 700; it.italic = m.style === "italic"; } }
+      propsSig = ""; render();
+    }, it.fontMatches)));
     const pts = pagePts(it.page || 0);
     const setPt = (v) => { v = Math.max(4, Math.min(200, Math.round(v * 10) / 10)); it.fs = v / pts; if (!it.tedit) TD.text.pt = v; propsSig = ""; render(); };
     add(pcell(pbtn("A−", false, () => setPt(it.fs * pts - 1), "Smaller text"), numBox(Math.round(it.fs * pts * 10) / 10, 4, 200, 0.5, setPt, "Font size (pt)"), pbtn("A+", false, () => setPt(it.fs * pts + 1), "Bigger text"),
@@ -2060,12 +2325,22 @@ function renderProps() {
     add(dupDel()); return;
   }
   if (it && it.isDate) {
-    const dI = mk("input", { type: "date", value: it.date || "" }), tI = mk("input", { type: "time", value: it.time || "" });
+    // typed dates and times in any common form ("9/15/26", "Sep 15", "today", "3pm"); the calendar button still works
+    const dI = mk("input", { type: "text", value: showDate(it.date), title: "Date — e.g. 9/15/2026, Sep 15 2026, today, +30", className: "datebox", autocomplete: "off" });
+    const tI = mk("input", { type: "text", value: showTime(it.time), title: "Time — e.g. 3:30 pm, 15:30, now", className: "timebox", autocomplete: "off" });
+    const cal = mk("input", { type: "date", value: it.date || "", className: "calpick", tabIndex: -1, title: "Pick from a calendar" });
+    const calB = pbtn('<svg class="i" viewBox="0 0 20 20"><rect x="3" y="4.5" width="14" height="12" rx="1.5"/><path d="M3 8.5h14M7 3v3M13 3v3"/></svg>', false, () => { try { cal.showPicker(); } catch (_) { cal.click(); } }, "Pick from a calendar");
     const zones = TZ_LIST.includes(localTzAbbr()) ? TZ_LIST : [localTzAbbr(), ...TZ_LIST];
     const zS = selBox(zones.map((z) => [z, z]), it.tz || "UTC", () => apply(), "Time zone");
-    const apply = () => { it.date = dI.value || it.date; it.time = tI.value || it.time; it.tz = zS.value || it.tz; it.text = fmtDocuSign(it.date, it.time, it.tz); render(); };
-    dI.oninput = apply; tI.oninput = apply; dI.onkeydown = tI.onkeydown = (e) => e.stopPropagation();
-    add(pcell(dI, tI, zS));
+    const apply = () => { it.tz = zS.value || it.tz; it.text = fmtDocuSign(it.date, it.time, it.tz); render(); };
+    const typed = (inp, parse, show, key) => { const v = parse(inp.value); inp.classList.toggle("bad", v == null && inp.value.trim() !== ""); if (v != null) { it[key] = v; apply(); } return v; };
+    dI.oninput = () => { if (parseLooseDate(dI.value)) typed(dI, parseLooseDate, showDate, "date"); else dI.classList.remove("bad"); };
+    dI.onchange = () => { if (typed(dI, parseLooseDate, showDate, "date") != null) dI.value = showDate(it.date); else dI.value = showDate(it.date); };
+    tI.oninput = () => { if (parseLooseTime(tI.value)) typed(tI, parseLooseTime, showTime, "time"); };
+    tI.onchange = () => { typed(tI, parseLooseTime, showTime, "time"); tI.value = showTime(it.time); };
+    cal.onchange = () => { if (cal.value) { it.date = cal.value; dI.value = showDate(it.date); apply(); } };
+    dI.onkeydown = tI.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") e.target.blur(); };
+    add(pcell(dI, calB, cal, tI, zS));
     add(pcell(selBox(DOC_FONTS.map((f, i) => [String(i), f.name]), String(it.font || 0), (v) => { it.font = +v; render(); }, "Font")));
     add(pcell(colorBtn(itemColor(it), false, (c) => { it.color = c; render(); }, "Colour")));
     add(opacityCell(() => it.opacity ?? 1, (v) => { it.opacity = v; })); add(dupDel()); return;
@@ -2136,9 +2411,9 @@ async function openDocBytes(u8, name, kind) {
   errEl.textContent = "";
   toast("Opening " + (name || "document") + "…");
   const token = ++loadToken;
-  docName = name || "document";
+  docName = name || "document"; docRecentId = null; clearTimeout(workTimer);
   docSources = []; docPages = []; docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {};
-  pagesSig = ""; curPage = 0; edZoom = 1; orgSel.clear(); textBlocks.clear(); closePanelTool();
+  pagesSig = ""; curPage = 0; edZoom = 1; orgSel.clear(); textBlocks.clear(); ocrBlocks.clear(); closePanelTool();
   await addSource(u8, name, kind);
   await ensurePageImage(0);
   doc = docPages[0];
@@ -2153,9 +2428,11 @@ async function openDocBytes(u8, name, kind) {
   toast("Opened " + docName + (docPages.length > 1 ? ` — ${docPages.length} pages` : "") + ".");
 }
 function closeDoc() {
+  if (docRecentId) saveWorkNow().catch(() => {});   // closing keeps the latest edits with the recent file
+  docRecentId = null;
   loadToken++;
   doc = null; docSources = []; docPages = []; pagesSig = ""; curPage = 0;
-  docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {}; edTool = "select"; orgSel.clear(); textBlocks.clear();
+  docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {}; edTool = "select"; orgSel.clear(); textBlocks.clear(); ocrBlocks.clear();
   closePanelTool();
   ["ed_pages", "ed_thumbs", "org_grid"].forEach((id) => { if ($(id)) $(id).innerHTML = ""; });
   resetHistory();
@@ -2174,7 +2451,8 @@ async function rememberCurrentDoc(name, type, u8) {
       thumb = c.toDataURL("image/jpeg", 0.6);
     }
   } catch (_) {}
-  await saveRecent({ name, type: type === "application/pdf" ? "pdf" : "image", bytes: u8, thumb });
+  const id = await saveRecent({ name, type: type === "application/pdf" ? "pdf" : "image", bytes: u8, thumb });
+  if (id && docName === name && !docRecentId) docRecentId = id;   // edits to this document are kept with it from now on
   refreshRecentLists();
 }
 function refreshRecentLists() { renderSignRecents(); renderRailRecents(); if (window.__cal2RefreshHomeRecents) window.__cal2RefreshHomeRecents(); }
@@ -2190,7 +2468,7 @@ async function renderRailRecents() {
   host.innerHTML = list.length ? "" : '<div class="note" style="margin:0">Files you open show up here.</div>';
   for (const r of list) {
     const row = document.createElement("div"); row.className = "ritem"; row.title = "Open " + r.name;
-    row.innerHTML = `${r.thumb ? `<img src="${r.thumb}" alt="">` : '<span class="noimg"></span>'}<span>${escapeHTML(r.name)}</span><button class="radd" title="Add its pages to this document">+</button>`;
+    row.innerHTML = `${r.thumb ? `<img src="${r.thumb}" alt="">` : '<span class="noimg"></span>'}<span>${escapeHTML(r.name)}${r.work ? '<span class="redt">· edited</span>' : ""}</span><button class="radd" title="Add its pages to this document">+</button>`;
     row.onclick = (e) => { if (e.target.closest(".radd")) return; reopenRecent(r); };
     row.querySelector(".radd").onclick = (e) => { e.stopPropagation(); addRecentToDoc(r.id); };
     host.appendChild(row);
@@ -2199,9 +2477,56 @@ async function renderRailRecents() {
 async function reopenRecent(rec) {
   const full = await getRecent(rec.id); if (!full) return;
   try {
-    await openDocBytes(new Uint8Array(full.bytes), full.name, full.type === "pdf" ? "pdf" : "image");
+    await openRecentDoc(full);
     if (!location.hash.startsWith("#/edit")) location.hash = "#/edit";
   } catch (e) { errEl.textContent = "Could not reopen: " + (e.message || e); }
+}
+
+// ---- recent documents keep their work: edits, page order, turned pages and filled fields -------------
+let docRecentId = null, workTimer = 0;
+function scheduleWorkSave() { if (!docRecentId || restoring) return; clearTimeout(workTimer); workTimer = setTimeout(() => saveWorkNow().catch(() => {}), 1200); }
+// plain data only: no pictures already drawn, no page objects, no "_" helpers
+const plainData = (v) => JSON.parse(JSON.stringify(v, (k, x) => (k && k[0] === "_") || (x && typeof x === "object" && (x instanceof Element || (typeof ImageBitmap !== "undefined" && x instanceof ImageBitmap))) ? undefined : x));
+async function saveWorkNow() {
+  clearTimeout(workTimer);
+  const id = docRecentId; if (!id || !doc || !docSources.length) return;
+  const work = {
+    v: 1, name: docName, ts: Date.now(), cur: curPage,
+    sources: docSources.map((s, i) => ({ name: s.name, kind: s.kind, bytes: i === 0 ? null : s.bytes })),   // the first file is the recent entry's own bytes
+    pages: docPages.map((p) => ({ src: p.src, idx: p.idx, rot: p.rot || 0, w: p.w, h: p.h })),
+    items: plainData(docItems), draws: plainData(docDraws), fields: plainData(fieldValues),
+  };
+  const edited = work.items.length || work.draws.length || Object.keys(work.fields).length || work.sources.length > 1 ||
+    work.pages.some((p, i) => p.src !== 0 || p.idx !== i || p.rot) || work.pages.length !== (docSources[0].pdf ? docSources[0].pdf.numPages : 1);
+  await saveRecentWork(id, edited ? work : null);
+  refreshRecentLists();
+}
+// Open a recent entry; when it holds saved work, put everything back the way it was left.
+async function openRecentDoc(full) {
+  const kind = full.type === "pdf" ? "pdf" : "image", w = full.work;
+  await openDocBytes(new Uint8Array(full.bytes), (w && w.name) || full.name, kind);
+  if (w && w.pages && w.pages.length) {
+    try {
+      for (let i = 1; i < (w.sources || []).length; i++) { const s = w.sources[i]; if (s && s.bytes) await addSource(new Uint8Array(s.bytes), s.name, s.kind); }
+      const pages = w.pages.filter((p) => docSources[p.src]).map((p) => {
+        const src = docSources[p.src], img = src.kind === "image" && !p.rot;
+        return { src: p.src, idx: p.idx, rot: p.rot || 0, img: img ? src.img : null, w: p.w, h: p.h, url: img ? src.url : BLANK_PAGE, fields: [], key: nextKey() };
+      });
+      if (pages.length) {
+        docPages = pages;
+        docItems = (w.items || []).filter((it) => (it.page || 0) < pages.length);
+        docDraws = (w.draws || []).filter((d) => (d.page || 0) < pages.length);
+        fieldValues = w.fields || {};
+        const num = (s) => +String(s || "").replace(/\D+/g, "") || 0;
+        itemSeq = Math.max(itemSeq, ...docItems.map((it) => num(it.id) + 1)); drawSeq = Math.max(drawSeq, ...docDraws.map((d) => num(d.id) + 1));
+        curPage = Math.max(0, Math.min(w.cur || 0, docPages.length - 1));
+        await ensurePageImage(curPage); doc = docPages[curPage];
+        pagesSig = ""; textBlocks.clear(); ocrBlocks.clear(); resetHistory(); render(); renderPagesInBackground(loadToken);
+        toast(`Reopened ${docName} with your edits.`);
+      }
+    } catch (e) { toast("Your saved edits could not be restored: " + (e.message || e)); }
+  }
+  docRecentId = full.id;
 }
 
 // ---- signers ---------------------------------------------------------------------------
@@ -2514,7 +2839,7 @@ async function exportPNG(fmt = "png") {
     const ext = jpg ? "jpg" : "png";
     const name = workMode === "doc" && doc ? outName(`${baseName()}-page${curPage + 1}`, ext) : outName("calligraphy", ext);
     out.toBlob((b) => { download(name, b); toast("Saved " + ext.toUpperCase() + "."); }, jpg ? "image/jpeg" : "image/png", dlQuality().q);
-  } catch (e) { errEl.textContent = "PNG export failed: " + (e.message || e); }
+  } catch (e) { errEl.textContent = "Picture export failed: " + (e.message || e); toast("Picture export failed: " + (e.message || e)); }
 }
 // ---- scanned pages off the main thread (scanpool.js -> scan-worker.js) ------------------------
 // One page's look as worker params. Page 1 keeps the tilt shown in the preview; every other page gets
@@ -2647,7 +2972,7 @@ async function exportPDF() {
     pdf.addPage([pw, ph]).drawImage(img, { x: 0, y: 0, width: pw, height: ph });
     pdf = await finishPdf(pdf, L, null);
     download(outName("calligraphy", "pdf"), await pdfBlob(pdf)); toast("Saved PDF.");
-  } catch (e) { errEl.textContent = "PDF export failed: " + (e.message || e); }
+  } catch (e) { errEl.textContent = "PDF export failed: " + (e.message || e); toast("PDF export failed: " + (e.message || e)); }
 }
 function exportSVG() {
   let svg = mode === "signature" || +$("speed").value ? animateSVG(rawSVG) : rawSVG;
@@ -2841,7 +3166,7 @@ async function exportFillablePDF() {
 function st() {
   return { t: $("text").value, md: mode, sty: $("style").value, sp: +$("speed").value, lg: +$("legibility").value, th: +$("thickness").value,
     fp: +$("font_px").value, sl: +$("slant").value, ct: +$("contrast").value, spc: +$("spacing").value, ln: +$("line_spacing").value,
-    al: align, sd: +$("seed").value, i: ink, p: paper, tx: texIdx, ti: +$("tex_intensity").value, ps: $("paper_style").value,
+    al: align, sd: seedVal(), i: ink, p: paper, tx: texIdx, ti: +$("tex_intensity").value, ps: $("paper_style").value,
     tg: toggles, bl: +$("blur").value, shp: +$("sharpen").value, rs: +$("resolution").value, bm: +$("blemish").value };
 }
 // Share links live in the route as "#/write?s=<state>" (the hash also carries the page
@@ -3229,7 +3554,7 @@ function saveCurrentSig() {
   const it = selectedItem();
   if (it && it.type === "sig") { const w = +(it.svg.match(/width="(\d+)"/) || [])[1] || 400, h = +(it.svg.match(/height="(\d+)"/) || [])[1] || 120; addSavedSig({ name: it.text || "Signature", svg: cleanSigSVG(it.svg), w, h, text: it.text, seed: it.seed }); toast("Signature saved for 60 days."); return; }
   if (!rawSVG) { toast("Nothing to save yet — write something first."); return; }
-  addSavedSig({ name: textForEngine().slice(0, 30) || "Signature", svg: cleanSigSVG(rawSVG), w: hwW, h: hwH, text: textForEngine(), seed: +$("seed").value });
+  addSavedSig({ name: textForEngine().slice(0, 30) || "Signature", svg: cleanSigSVG(rawSVG), w: hwW, h: hwH, text: textForEngine(), seed: seedVal() });
   toast("Signature saved for 60 days.");
 }
 
@@ -3252,7 +3577,7 @@ function applySavedStyle(s) {
   activatePrime(s);
   const l = loadSavedHands(); const x = l.find((y) => y.id === s.id); if (x) { x.usedAt = Date.now(); storeSavedHands(l); }
   const it = selectedItem();
-  if (it && it.type === "sig" && it.dynamic) { it.seed = +$("seed").value; regenItem(it, undefined, true); } else render(true);
+  if (it && it.type === "sig" && it.dynamic) { it.seed = seedVal(); regenItem(it, undefined, true); } else render(true);
   toast("Style “" + s.name + "” applied.");
 }
 function renderSavedHands() {
@@ -3290,7 +3615,7 @@ function restoreLastStyle() {
 function newHand() {
   const it = selectedItem();
   if (it && it.type === "sig" && it.dynamic) { regenItem(it, Math.floor(Math.random() * 1e9)); return; }
-  handHistory.push(+$("seed").value);
+  handHistory.push(seedVal());
   $("seed").value = Math.floor(Math.random() * 1e9);
   if ($("hand")) $("hand").value = "r";
   render(true); rememberLastStyle();
@@ -3513,7 +3838,7 @@ async function wmApply() {
   docSources = sources;
   const changed = new Set(bySrc.keys());
   docPages = docPages.map((p) => changed.has(p.src) ? { ...p, img: null, url: BLANK_PAGE, _loading: null, fields: [], key: nextKey() } : p);
-  textBlocks.clear(); for (const k of [...pdfFonts.keys()]) if (changed.has(+k.split(":")[0])) pdfFonts.delete(k);
+  textBlocks.clear(); ocrBlocks.clear(); for (const k of [...pdfFonts.keys()]) if (changed.has(+k.split(":")[0])) pdfFonts.delete(k);
   pagesSig = ""; await ensurePageImage(curPage); doc = docPages[curPage]; render(); renderPagesInBackground(loadToken);
   $("wm_found").innerHTML = `<div class="note" style="color:var(--ok)">Removed ${total} watermark item${total === 1 ? "" : "s"}. Ctrl+Z puts it back.</div>`; $("wm_apply").hidden = true;
   toast("Watermark removed.");
@@ -4483,11 +4808,11 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("style").addEventListener("change", () => { applyStyle($("style").value); rememberLastStyle(); const it = selectedItem(); if (it && it.type === "sig" && it.dynamic) regenItem(it, undefined, true); });
   $("hand").addEventListener("change", () => {
     const v = $("hand").value;
-    handHistory.push(+$("seed").value);
+    handHistory.push(seedVal());
     $("seed").value = v === "r" ? Math.floor(Math.random() * 1e9) : v;
     rememberLastStyle();
     const it = selectedItem();
-    if (it && it.type === "sig" && it.dynamic) regenItem(it, +$("seed").value); else render(true);
+    if (it && it.type === "sig" && it.dynamic) regenItem(it, seedVal()); else render(true);
   });
   $("paper_style").addEventListener("change", () => render());
   $("reroll").addEventListener("click", newHand);
@@ -4700,6 +5025,26 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   window.__cal2HasDoc = () => !!doc;
   window.__cal2OpenDocFile = (f) => openDocFile(f);
   window.__cal2OpenDocBytes = (u8, name, kind) => openDocBytes(u8, name, kind);
+  window.__cal2OpenRecentDoc = (rec) => openRecentDoc(rec);
+  // every slider's number can be typed: click it, type a value (any form), Enter
+  document.addEventListener("click", (e) => {
+    const v = e.target.closest(".row .val"); if (!v || v.isContentEditable) return;
+    const r = v.parentElement && v.parentElement.querySelector('input[type="range"]'); if (!r) return;
+    const before = v.textContent;
+    v.contentEditable = "true"; v.classList.add("typing"); v.focus();
+    const sel = getSelection(); sel.removeAllRanges(); const rg = document.createRange(); rg.selectNodeContents(v); sel.addRange(rg);
+    const done = (ok) => {
+      v.removeAttribute("contenteditable"); v.classList.remove("typing"); v.onkeydown = v.onblur = null;
+      const n = ok ? parseLooseNumber(v.textContent) : null;
+      if (n == null) { v.textContent = before; return; }
+      r.value = String(Math.max(+r.min || 0, Math.min(+r.max || 100, n)));
+      r.dispatchEvent(new Event("input", { bubbles: true })); r.dispatchEvent(new Event("change", { bubbles: true }));
+      if (v.textContent === before || parseLooseNumber(v.textContent) === n) v.textContent = r.value;
+    };
+    v.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === "Enter") { ev.preventDefault(); done(true); } else if (ev.key === "Escape") done(false); };
+    v.onblur = () => done(true);
+  });
+  window.addEventListener("pagehide", () => { if (docRecentId) saveWorkNow().catch(() => {}); });
   window.__cal2AddFilesToDoc = (files) => addFilesToDoc(files);
   window.__cal2CloseDoc = closeDoc;
   window.__cal2ApplyTool = (id) => applyTool(id);

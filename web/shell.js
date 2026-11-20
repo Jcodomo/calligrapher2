@@ -3,7 +3,7 @@
 // and hash routing (#/, #/tool/<id>, #/edit, #/pdf/<tool>, #/write, #/recent).
 // It drives the app only through the small window.__cal2* hooks app.js and
 // pdfedit.js expose, so the editing code stays in one place.
-import { listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
+import { listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=2";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -310,7 +310,7 @@ async function openRecent(id, where) {
     await window.__cal2OpenPdfEditorBytes(u8, rec.name);
     go("#/pdf");
   } else {
-    await window.__cal2OpenDocBytes(u8, rec.name, rec.type === "pdf" ? "pdf" : "image");
+    if (window.__cal2OpenRecentDoc) await window.__cal2OpenRecentDoc(rec); else await window.__cal2OpenDocBytes(u8, rec.name, rec.type === "pdf" ? "pdf" : "image");
     go(where === "sign" ? "#/edit/sign" : "#/edit");
   }
 }
@@ -457,7 +457,7 @@ async function renderRecentDD() {
   dd.innerHTML = '<h4>Recent files</h4>' + (list.length ? "" : '<div class="note" style="padding:4px 6px 8px">Files you open show up here.</div>');
   for (const r of list) {
     const b = document.createElement("button"); b.className = "rrow";
-    b.innerHTML = (r.thumb ? `<img src="${r.thumb}" alt="">` : '<span class="noimg"></span>') + `<span><b>${esc(r.name)}</b><small>${new Date(r.ts).toLocaleString()}</small></span>`;
+    b.innerHTML = (r.thumb ? `<img src="${r.thumb}" alt="">` : '<span class="noimg"></span>') + `<span><b>${esc(r.name)}</b><small>${r.work ? "Edited · " : ""}${new Date(r.ts).toLocaleString()}</small></span>`;
     b.onclick = () => { closeRecentDD(); openRecent(r.id, "doc"); };
     dd.appendChild(b);
   }
