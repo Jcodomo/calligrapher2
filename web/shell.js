@@ -369,13 +369,13 @@ async function intakeTool(id, files) {
     }
   } catch (e) { toast("Could not open that file: " + (e.message || e)); }
 }
-async function startNoFile(id) {
+async function startNoFile(id, redirect = false) {   // redirect: reached from a #/tool/ link that only forwards (Back should skip it)
   const t = TOOLS[id];
   await appReady();
-  if (t.setup === "drawhand" || (t.setup === "drawsig" && !window.__cal2HasDoc())) { go(window.__cal2HasDoc() ? "#/edit" : "#/write"); setTimeout(() => applySetup(t.setup), 150); return; }
-  if (window.__cal2HasDoc() && ON_DOC(id)) { go("#/edit/" + id); return; }
-  if (t.mode === "pdf") { window.__cal2ResetPdf(); go("#/pdf/" + t.tool); return; }
-  go("#/write");
+  if (t.setup === "drawhand" || (t.setup === "drawsig" && !window.__cal2HasDoc())) { go(window.__cal2HasDoc() ? "#/edit" : "#/write", redirect); setTimeout(() => applySetup(t.setup), 150); return; }
+  if (window.__cal2HasDoc() && ON_DOC(id)) { go("#/edit/" + id, redirect); return; }
+  if (t.mode === "pdf") { window.__cal2ResetPdf(); go("#/pdf/" + t.tool, redirect); return; }
+  go("#/write", redirect);
   setTimeout(() => applySetup(t.setup), 120);
 }
 function applySetup(setup) {
@@ -391,7 +391,8 @@ function applySetup(setup) {
 }
 
 // ---- routing -----------------------------------------------------------------------
-function go(h) { if (location.hash === h) route(); else location.hash = h; }
+// replace: swap the current history entry (a tool link that only forwards somewhere), so Back skips it
+function go(h, replace = false) { if (location.hash === h) route(); else if (replace) location.replace(h); else location.hash = h; }
 function setNavCur(h) {
   document.querySelectorAll("#mainnav a").forEach((a) => a.classList.toggle("cur", a.getAttribute("href") === h));
 }
@@ -409,9 +410,9 @@ async function route() {
     const t = TOOLS[b];
     await appReady();
     // With a document open, a tool works on it — the document stays in view.
-    if (TOOLS[b].setup === "drawhand" || TOOLS[b].setup === "drawsig") { startNoFile(b); return; }
-    if (window.__cal2HasDoc() && ON_DOC(b)) { go("#/edit/" + b); return; }
-    if (t.mode === "write" && !t.setup) { go("#/write"); return; }   // no document open: the handwriting studio
+    if (TOOLS[b].setup === "drawhand" || TOOLS[b].setup === "drawsig") { startNoFile(b, true); return; }
+    if (window.__cal2HasDoc() && ON_DOC(b)) { go("#/edit/" + b, true); return; }
+    if (t.mode === "write" && !t.setup) { go("#/write", true); return; }   // no document open: the handwriting studio
     document.body.dataset.route = "tool"; renderTool(b); document.title = t.name + " — Ghost Calligrapher"; window.scrollTo(0, 0); return;
   }
   // links from the document builder (mtgcalc): #/open/<id> and #/sign/<id> open a recent file

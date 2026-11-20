@@ -674,7 +674,7 @@ function openOcr() {
     <div style="font-weight:600;font-size:12.5px;margin:4px 0">Languages</div>
     <div id="pe_oc_chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px"></div>
     <input id="pe_oc_find" type="text" placeholder="Search ${OCR_LANGS.length} languages…" autocomplete="off" style="width:100%;height:30px;box-sizing:border-box">
-    <div id="pe_oc_list" style="max-height:150px;overflow:auto;border:1px solid var(--line,#8884);border-radius:6px;margin:4px 0 8px;font-size:12.5px"></div>
+    <div id="pe_oc_list" style="height:150px;overflow:auto;border:1px solid var(--line,#8884);border-radius:6px;margin:4px 0 8px;font-size:12.5px"></div>
     <div class="row"><label>Accuracy</label><select id="pe_oc_acc" style="flex:1"><option value="fast">Fast</option><option value="best">Best — slower, reads at 300 dpi</option></select></div>
     <div style="font-weight:600;font-size:12.5px;margin:10px 0 2px">Page cleanup</div>
     ${chk("pe_oc_deskew", "Straighten pages (deskew)", o.deskew, "")}
@@ -702,7 +702,7 @@ function openOcr() {
   const drawList = () => {
     const q = $("pe_oc_find").value.trim().toLowerCase();
     $("pe_oc_list").innerHTML = OCR_LANGS.filter(([c, n]) => !q || n.toLowerCase().includes(q) || c.includes(q))
-      .map(([c, n]) => `<label style="display:flex;gap:8px;padding:3px 8px;cursor:pointer"><input type="checkbox" data-l="${c}"${chosen.has(c) ? " checked" : ""}>${n}<span style="margin-left:auto;color:var(--muted);font-size:11px">${c}</span></label>`).join("") || `<div style="padding:6px 8px;color:var(--muted)">No match.</div>`;
+      .map(([c, n]) => `<label style="display:flex;gap:8px;padding:3px 8px;cursor:pointer"><input type="checkbox" data-l="${c}"${chosen.has(c) ? " checked" : ""}>${n}<span style="margin-left:auto;color:var(--muted);font-size:11px">${c}</span></label>`).join("") || `<div style="padding:10px 8px;color:var(--muted)">No languages match.</div>` || `<div style="padding:6px 8px;color:var(--muted)">No match.</div>`;
     $("pe_oc_list").querySelectorAll("[data-l]").forEach((b) => b.onchange = () => {
       if (b.checked) chosen.add(b.dataset.l); else if (chosen.size > 1) chosen.delete(b.dataset.l); else b.checked = true;
       drawChips(); persist();

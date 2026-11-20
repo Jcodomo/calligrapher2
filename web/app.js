@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=44";
+import { initPdfEditor } from "./pdfedit.js?v=45";
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=2";
@@ -372,13 +372,15 @@ function addFlourish(svg) {
 // Read the Scan & finish controls into one object (shared by preview + export).
 // ---- download options: format, look (clean by default) and quality ----------------------------
 const DL_KEY = "cal2_dl_opts";
-const dlOpts = Object.assign({ format: "pdf", look: "clean", quality: "exact", engine: "fast", meta: {} },(() => { try { const v = JSON.parse(localStorage.getItem(DL_KEY) || "{}") || {}; if (!v.v2) delete v.quality; return v; } catch (_) { return {}; } })(), { v2: 1 });
+const dlOpts = Object.assign({ format: "pdf", look: "clean", quality: "exact", engine: "fast", meta: {}, more: {} },(() => { try { const v = JSON.parse(localStorage.getItem(DL_KEY) || "{}") || {}; if (!v.v2) delete v.quality; return v; } catch (_) { return {}; } })(), { v2: 1 });
 const LOOKS = {
   clean:     { on: false, blur: 0, sharp: 0 },
   light:     { on: true, cspace: "color", border: false, rotate: 0.2, rotvar: 0.35, bright: 1.02, contrast: 1.05, noise: 5, yellow: 0.02, blem: 0.08, blur: 0.25, sharp: 0 },
   scanned:   { on: true, cspace: "color", border: false, rotate: 0.6, rotvar: 0.9, bright: 1.03, contrast: 1.12, noise: 12, yellow: 0.07, blem: 0.22, blur: 0.45, sharp: 0 },
   photocopy: { on: true, cspace: "bw", border: false, rotate: 0.4, rotvar: 0.8, bright: 1.04, contrast: 1.1, noise: 16, yellow: 0, blem: 0.3, blur: 0.35, sharp: 0 },
   // true 1-bit black & white, like an office scanner's "B&W document" mode: crisp and the smallest PDF
+  // the pages as they are, in shades of grey (no tilt, grain or blur)
+  gray:      { on: true, cspace: "gray", border: false, rotate: 0, rotvar: 0, bright: 1, contrast: 1, noise: 0, yellow: 0, blem: 0, blur: 0, sharp: 0 },
   bwscan:    { on: true, cspace: "bilevel", border: false, rotate: 0.3, rotvar: 0.6, bright: 1.06, contrast: 1.15, noise: 6, yellow: 0, blem: 0.1, blur: 0.3, sharp: 0.2 },
 };
 // scale: pixels per page unit (a page unit is half a point, so 2 = 288 dpi); overlay: the same for your edits laid on top
@@ -386,6 +388,125 @@ const QUALITY = { exact: { scale: 2.1, overlay: 2.5, q: 0.95, keepPages: true },
   balanced: { scale: 1.4, overlay: 2, q: 0.85, keepPages: true }, small: { scale: 1, overlay: 1.5, q: 0.6, keepPages: false } };
 let exportLook = null;          // set while a download is being built ("custom" = the side panel's scan settings)
 const dlQuality = () => QUALITY[dlOpts.quality] || QUALITY.exact;
+// "More options" in the download panel
+const DL_MORE = { pages: "all", range: "", skipBlank: false, paper: "orig", turn: "0", num: "none", wm: "none", wmtext: "", dpi: "300", name: "" };
+const dlMore = () => Object.assign({}, DL_MORE, dlOpts.more || {});
+// pixels per page unit for picture downloads (a page unit is half a point: 300 dpi = 2.083)
+const picScale = () => Math.max(0.5, (+dlMore().dpi || 300) / 144);
+// the file name to save as: the name typed in More options, or the usual one
+function outName(def, ext) {
+  const n = String(dlMore().name || "").trim().replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "").replace(/\.(pdf|docx|txt|zip|png|jpe?g)$/i, "").trim();
+  return (n || def) + "." + ext;
+}
+// "1-3, 5, 8-" -> [0,1,2,4,7,8,...] (0-based, in page order, no repeats)
+function parsePageRange(txt, N) {
+  const out = new Set();
+  for (const part of String(txt || "").split(/[,;\s]+/).filter(Boolean)) {
+    const m = part.match(/^(\d*)\s*[-–]\s*(\d*)$/), one = part.match(/^\d+$/);
+    let a, b;
+    if (one) a = b = +part; else if (m && (m[1] || m[2])) { a = m[1] ? +m[1] : 1; b = m[2] ? +m[2] : N; } else continue;
+    if (a > b) [a, b] = [b, a];
+    for (let i = Math.max(1, a); i <= Math.min(N, b); i++) out.add(i - 1);
+  }
+  return [...out].sort((x, y) => x - y);
+}
+// a page with nothing on it: no edits, and its picture is (almost) all white
+async function isBlankPage(i) {
+  if (pageHasContent(i)) return false;
+  try {
+    await ensurePageImage(i); const p = docPages[i]; if (!p || !p.img) return false;
+    const W = 120, H = Math.max(1, Math.round(W * p.h / p.w)), c = document.createElement("canvas"); c.width = W; c.height = H;
+    const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, W, H); g.drawImage(p.img, 0, 0, W, H);
+    const d = g.getImageData(0, 0, W, H).data; let dark = 0;
+    for (let k = 0; k < d.length; k += 4) if (d[k] * 0.3 + d[k + 1] * 0.59 + d[k + 2] * 0.11 < 200) dark++;
+    return dark / (W * H) < 0.002;
+  } catch (_) { return false; }
+}
+// the pages this download takes (0-based), from More options; [] = none match
+async function exportPageList() {
+  const mo = dlMore(), N = docPages.length;
+  let idx = [...Array(N).keys()];
+  if (mo.pages === "cur") idx = [Math.max(0, Math.min(curPage, N - 1))];
+  else if (mo.pages === "odd") idx = idx.filter((i) => i % 2 === 0);
+  else if (mo.pages === "even") idx = idx.filter((i) => i % 2 === 1);
+  else if (mo.pages === "custom") idx = parsePageRange(mo.range, N);
+  if (mo.skipBlank && idx.length > 1) {
+    const keep = [];
+    for (const i of idx) if (!(await isBlankPage(i))) keep.push(i);
+    if (keep.length) idx = keep;
+  }
+  if (!idx.length) toast("None of the pages you chose exist — check Pages under More options.");
+  return idx;
+}
+const PAPER = { letter: [612, 792], legal: [612, 1008], a4: [595.28, 841.89], a5: [419.53, 595.28], tabloid: [792, 1224] };
+// Applied to a finished PDF: keep only the chosen pages, fit them on a paper size, add page numbers and a
+// watermark, and turn them. sel: the 0-based pages to keep (null = all).
+async function finishPdf(pdf, L, sel, opts = {}) {
+  const mo = dlMore();
+  let leftovers = false;   // pdf-lib keeps removed or replaced pages' contents in the file until it is copied afresh
+  if (sel && sel.length < pdf.getPageCount()) {
+    leftovers = true;
+    const keep = new Set(sel), pages = pdf.getPages(), drop = new Set(pages.filter((_, i) => !keep.has(i)).map((pg) => pg.ref));
+    if (pdf.catalog.get(L.PDFName.of("AcroForm"))) {   // fields that live only on pages left out go too
+      const form = pdf.getForm();
+      for (const f of form.getFields()) { try { const ws = f.acroField.getWidgets(); if (ws.length && ws.every((w) => { const r = w.P(); return r && drop.has(r); })) form.removeField(f); } catch (_) {} }
+    }
+    for (let i = pages.length - 1; i >= 0; i--) if (!keep.has(i)) pdf.removePage(i);
+  }
+  const rotOf = (pg) => (((pg.getRotation().angle || 0) % 360) + 360) % 360;
+  if (!opts.keepPaper && PAPER[mo.paper]) {
+    for (let i = 0; i < pdf.getPageCount(); i++) {
+      const page = pdf.getPage(i), r = rotOf(page), emb = await pdf.embedPage(page), w0 = emb.width, h0 = emb.height;
+      const vw = r % 180 ? h0 : w0, vh = r % 180 ? w0 : h0;
+      let [PW, PH] = PAPER[mo.paper]; if (vw > vh) [PW, PH] = [PH, PW];   // a landscape page goes on landscape paper
+      if (!r && Math.abs(PW - vw) < 1 && Math.abs(PH - vh) < 1) continue;
+      const k = Math.min(PW / vw, PH / vh), ox = (PW - vw * k) / 2, oy = (PH - vh * k) / 2;
+      const at = r === 90 ? { x: 0, y: w0, a: -90 } : r === 180 ? { x: w0, y: h0, a: 180 } : r === 270 ? { x: h0, y: 0, a: 90 } : { x: 0, y: 0, a: 0 };
+      const np = pdf.insertPage(i, [PW, PH]);
+      np.drawPage(emb, { x: ox + at.x * k, y: oy + at.y * k, width: w0 * k, height: h0 * k, rotate: L.degrees(at.a) });
+      pdf.removePage(i + 1); leftovers = true;
+    }
+  }
+  if (leftovers && !opts.keepPaper) {   // a flat PDF: copy the pages into a new file so what was left out really is gone
+    const out = await L.PDFDocument.create();
+    (await out.copyPages(pdf, pdf.getPageIndices())).forEach((pg) => out.addPage(pg));
+    pdf = out;
+  }
+  const ansi = (t) => String(t || "").replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, "-").replace(/[^\x20-\x7e\xa0-\xff]/g, "").trim();
+  const wm = ansi(mo.wm === "custom" ? mo.wmtext : mo.wm === "none" ? "" : mo.wm), num = mo.num && mo.num !== "none" ? mo.num : "";
+  if (wm || num) {
+    const font = await pdf.embedFont(L.StandardFonts.Helvetica), bold = wm ? await pdf.embedFont(L.StandardFonts.HelveticaBold) : null, N = pdf.getPageCount();
+    pdf.getPages().forEach((page, i) => {
+      // positions are worked out as the page is seen (after any turn it already has) and mapped back
+      const r = rotOf(page), mb = page.getMediaBox(), W = mb.width, H = mb.height, VW = r % 180 ? H : W, VH = r % 180 ? W : H;
+      const put = (t, f, size, vx, vy, ang, color, opacity) => {
+        const [x, y] = r === 90 ? [W - vy, vx] : r === 180 ? [W - vx, H - vy] : r === 270 ? [vy, H - vx] : [vx, vy];
+        page.drawText(t, { x: mb.x + x, y: mb.y + y, size, font: f, color, opacity, rotate: L.degrees(r + ang) });
+      };
+      if (wm) {
+        const a = Math.atan2(VH, VW), tw1 = bold.widthOfTextAtSize(wm, 1);
+        const size = Math.min(Math.hypot(VW, VH) * 0.7 / tw1, Math.min(VW, VH) * 0.3), tw = tw1 * size, ch = size * 0.36;
+        put(wm, bold, size, VW / 2 - Math.cos(a) * tw / 2 + Math.sin(a) * ch, VH / 2 - Math.sin(a) * tw / 2 - Math.cos(a) * ch, a * 180 / Math.PI, L.rgb(0.55, 0.55, 0.58), 0.2);
+      }
+      if (num) {
+        const t = num === "bc" ? String(i + 1) : `Page ${i + 1} of ${N}`, size = Math.max(7, Math.min(11, VW * 0.0155)), tw = font.widthOfTextAtSize(t, size), m = Math.max(11, VH * 0.016);   // close to the edge, below most documents' own footers
+        const vx = num === "bc" ? (VW - tw) / 2 : VW - Math.max(24, VW * 0.04) - tw, vy = num === "tr" ? VH - m - size * 0.75 : m;
+        put(t, font, size, vx, vy, 0, L.rgb(0.25, 0.25, 0.28), 1);
+      }
+    });
+  }
+  const turn = +mo.turn || 0;
+  if (turn) pdf.getPages().forEach((pg) => pg.setRotation(L.degrees((rotOf(pg) + turn) % 360)));
+  return pdf;
+}
+// the document's PDF bytes cut down to the chosen pages (for Word and text downloads)
+async function selectedDocumentBytes(idx) {
+  const bytes = await buildDocumentBytes();
+  if (!idx || idx.length === docPages.length) return bytes;
+  const L = await pdfLibReady(), pdf = await L.PDFDocument.load(bytes, { ignoreEncryption: true });
+  const keep = new Set(idx); for (let i = pdf.getPageCount() - 1; i >= 0; i--) if (!keep.has(i)) pdf.removePage(i);
+  return pdf.save();
+}
 function scanParams() {
   if (exportLook && LOOKS[exportLook]) return { cspace: "color", border: false, rotate: 0, rotvar: 0, bright: 1, contrast: 1, noise: 0, yellow: 0, blem: 0, blur: 0, sharp: 0, ...LOOKS[exportLook] };
   return {
@@ -1860,14 +1981,19 @@ function fontPicker(value, hasPdf, onPick) {
           list.appendChild(fb); if (f.google) io.observe(fb);
         }
       }
+      if (!list.children.length) list.appendChild(mk("div", { className: "fl-none" }, "No fonts match “" + q.value.trim() + "”"));
     };
     q.oninput = build; q.onkeydown = (ev) => ev.stopPropagation();
     if (docSources.some((s) => s && s.kind === "pdf")) { const sb = mk("button", { className: "fscanbtn", type: "button" }, "Find & save this PDF's fonts…"); sb.onclick = () => { closePops(); openFontScan(); }; pop.appendChild(sb); }
     pop.prepend(q, list); pop.onpointerdown = (ev) => ev.stopPropagation();
     document.body.appendChild(pop);
-    const r = b.getBoundingClientRect();
-    pop.style.left = Math.max(8, Math.min(innerWidth - 300, r.left)) + "px"; pop.style.top = (r.bottom + 6 + scrollY) + "px";
-    popEl = pop; build(); q.focus();
+    // a fixed height that fits on screen (below the button, else above it), so typing a search never resizes or moves it
+    const r = b.getBoundingClientRect(), ph = Math.max(180, Math.min(420, innerHeight - 16));
+    let top = r.bottom + 6;
+    if (top + ph > innerHeight - 8) top = r.top - 6 - ph >= 8 ? r.top - 6 - ph : Math.max(8, innerHeight - 8 - ph);
+    pop.style.height = ph + "px";
+    pop.style.left = Math.max(8, Math.min(innerWidth - 298, r.left)) + "px"; pop.style.top = (top + scrollY) + "px";
+    popEl = pop; build(); q.focus({ preventScroll: true });
   };
   return b;
 }
@@ -2284,12 +2410,10 @@ async function drawDocItemToCtx(ctx, it, W, H, res) {
       lines.forEach((ln, i) => ctx.fillText(ln, bx + pad, by + pad + i * fs * 1.3));
     }
   } else if (it.isField) {
-    ctx.strokeStyle = "rgba(90,90,110,0.6)"; ctx.lineWidth = Math.max(1, W * 0.0012);
-    roundRectPath(ctx, x, y, w, h, Math.min(8 * res, h * 0.2)); ctx.stroke();
+    // downloads show only what's filled in: the box outline and its grey label are editing aids, not part of the page
     if (it.fieldKind === "check") {
       if (it.checked) { ctx.fillStyle = itemColor(it); ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = `700 ${h * 0.82}px system-ui, sans-serif`; ctx.fillText("✓", x + w / 2, y + h / 2); ctx.textAlign = "left"; }
     } else {
-      if (it.label) { ctx.fillStyle = "rgba(80,80,100,0.9)"; ctx.textBaseline = "top"; ctx.font = `${Math.min(h * 0.24, 12 * res)}px system-ui, sans-serif`; ctx.fillText(it.label, x + 5 * res, y + 3 * res); }
       if (it.text) { ctx.fillStyle = itemColor(it); ctx.textBaseline = "alphabetic"; ctx.font = `${h * 0.42}px ${DOC_FONTS[it.font || 0].css}`; ctx.fillText(it.text, x + 6 * res, y + h * 0.82); }
     }
   } else {
@@ -2359,7 +2483,7 @@ async function composeCanvas() {
   const res = +$("resolution").value;
   try { await document.fonts.ready; } catch (_) {}
   if (workMode === "doc" && doc) {
-    const r2 = Math.max(res / 2, dlQuality().scale), c = finishCanvas(await composePage(curPage, r2, "all", { sharp: true })), W0 = Math.round(docPages[curPage].w * r2), H0 = Math.round(docPages[curPage].h * r2);
+    const r2 = Math.max(res / 2, picScale()), c = finishCanvas(await composePage(curPage, r2, "all", { sharp: true })), W0 = Math.round(docPages[curPage].w * r2), H0 = Math.round(docPages[curPage].h * r2);
     if (c.width === W0 && c.height === H0) return c;
     const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d");   // trim the scanned look's tilt back to the page size
     g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); return t;
@@ -2388,7 +2512,7 @@ async function exportPNG(fmt = "png") {
       const g = out.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, out.width, out.height); g.drawImage(c, 0, 0);
     }
     const ext = jpg ? "jpg" : "png";
-    const name = workMode === "doc" && doc ? `${baseName()}-page${curPage + 1}.${ext}` : "calligraphy." + ext;
+    const name = workMode === "doc" && doc ? outName(`${baseName()}-page${curPage + 1}`, ext) : outName("calligraphy", ext);
     out.toBlob((b) => { download(name, b); toast("Saved " + ext.toUpperCase() + "."); }, jpg ? "image/jpeg" : "image/png", dlQuality().q);
   } catch (e) { errEl.textContent = "PNG export failed: " + (e.message || e); }
 }
@@ -2407,10 +2531,11 @@ function workerScanParams(sp, width, pageIndex) {
 }
 // Compose each page here (pdf.js renders on this thread) and hand it to the worker pool, keeping a few
 // pages in flight so composing and scanning overlap. onPage(i, result) is called in page order.
-async function scanPagesOffThread(res, sp, enc, onPage, label) {
-  const N = docPages.length, conc = scanConcurrency(dlOpts.engine), inflight = new Map();
+async function scanPagesOffThread(res, sp, enc, onPage, label, idx = null) {
+  const list = idx || [...docPages.keys()], N = list.length, conc = scanConcurrency(dlOpts.engine), inflight = new Map();
   let next = 0;
-  const start = async (i) => {
+  const start = async (k) => {
+    const i = list[k];
     const c = await composePage(i, res, "all", { sharp: true });
     try { return await scanOffThread(c, workerScanParams(sp, c.width, i), { ...enc, trimW: Math.round(docPages[i].w * res), trimH: Math.round(docPages[i].h * res) }); }
     finally { c.width = c.height = 0; }
@@ -2419,7 +2544,7 @@ async function scanPagesOffThread(res, sp, enc, onPage, label) {
     while (next < N && inflight.size < conc) { const p = start(next); p.catch(() => {}); inflight.set(next, p); next++; }
     toast(`${label}… page ${done + 1} of ${N}`);
     const r = await inflight.get(done); inflight.delete(done);
-    await onPage(done, r);
+    await onPage(list[done], r);
   }
 }
 // A 1-bit black & white page into a PDF page: a real 1-bit image (Flate), not a JPEG.
@@ -2453,6 +2578,8 @@ async function exportPDF() {
     const pdfBlob = async (pdf) => new Blob([await applyPdfMeta(pdf).save(saveOpts())], { type: "application/pdf" });
     if (workMode === "doc" && doc) {
       snapshotNow();
+      const idx = await exportPageList(); if (!idx.length) return;
+      const fname = outName(baseName() + "-edited", "pdf");
       try { await document.fonts.ready; } catch (_) {}
       const sp = scanParams(), Q = dlQuality();
       if (!sp.on && !(sp.blur > 0) && !(sp.sharp > 0) && Q.keepPages) {
@@ -2460,10 +2587,10 @@ async function exportPDF() {
         // edits are laid on top and form fields are filled in and fixed in place. Only pages that must be
         // pictures (redactions, rotated pages, pictures) are drawn as pictures.
         toast("Building PDF…");
-        const { pdf } = await buildOutputPdf();
+        const { pdf } = await buildOutputPdf({ flat: true });
         try { pdf.getForm().updateFieldAppearances(); pdf.getForm().flatten(); } catch (_) {}
-        download(baseName() + "-edited.pdf", await pdfBlob(pdf));
-        toast("Saved " + baseName() + "-edited.pdf.");
+        download(fname, await pdfBlob(await finishPdf(pdf, L, idx)));
+        toast("Saved " + fname + ".");
         return;
       }
       // "Make it look scanned" (or blur / sharpen) is on: every page is a picture, with that look
@@ -2480,15 +2607,16 @@ async function exportPDF() {
             const page = pdf.addPage([r.w / (2 * res), r.h / (2 * res)]);
             if (r.kind === "bilevel") drawBilevel(pdf, L, page, r);
             else page.drawImage(await pdf.embedJpg(new Uint8Array(r.buf)), { x: 0, y: 0, width: page.getWidth(), height: page.getHeight() });
-          }, "Building PDF");
+          }, "Building PDF", idx);
         } catch (e) {
           console.warn("Scan workers failed; rendering on the main thread instead.", e);
           viaWorkers = false; pdf = await L.PDFDocument.create();
           if (dlOpts.engine === "realistic") toast("The realistic engine couldn't load — using the built-in one.");
         }
       }
-      for (let i = 0; !viaWorkers && i < docPages.length; i++) {
-        toast(`Building PDF… page ${i + 1} of ${docPages.length}`);
+      for (let k = 0; !viaWorkers && k < idx.length; k++) {
+        const i = idx[k];
+        toast(`Building PDF… page ${k + 1} of ${idx.length}`);
         let c = finishCanvas(await composePage(i, res, "all", { sharp: true }));
         // the scanned look tilts the page, which grows the picture a little: trim back to the page's own size
         const W0 = Math.round(docPages[i].w * res), H0 = Math.round(docPages[i].h * res);
@@ -2502,21 +2630,23 @@ async function exportPDF() {
         c.width = c.height = 0;   // hand the page's pixel memory back before the next one
       }
       // "Smallest file" with the clean look: pictures of a text PDF can be bigger than the PDF itself - keep the smaller
+      pdf = await finishPdf(pdf, L, null);
       if (!Q.keepPages && !sp.on && !(sp.blur > 0) && !(sp.sharp > 0)) {
-        const pics = await pdfBlob(pdf), kept = await buildOutputPdf();
+        const pics = await pdfBlob(pdf), kept = await buildOutputPdf({ flat: true });
         try { kept.pdf.getForm().updateFieldAppearances(); kept.pdf.getForm().flatten(); } catch (_) {}
-        const keptBytes = await applyPdfMeta(kept.pdf).save(saveOpts());
-        if (keptBytes.length <= pics.size) { download(baseName() + "-edited.pdf", new Blob([keptBytes], { type: "application/pdf" })); toast(`Saved ${baseName()}-edited.pdf — already smallest as it is (${Math.round(keptBytes.length / 1024)} KB, text kept).`); return; }
-        download(baseName() + "-edited.pdf", pics); toast(`Saved ${baseName()}-edited.pdf (${Math.round(pics.size / 1024)} KB, pages as pictures).`); return;
+        const keptBytes = await applyPdfMeta(await finishPdf(kept.pdf, L, idx)).save(saveOpts());
+        if (keptBytes.length <= pics.size) { download(fname, new Blob([keptBytes], { type: "application/pdf" })); toast(`Saved ${fname} — already smallest as it is (${Math.round(keptBytes.length / 1024)} KB, text kept).`); return; }
+        download(fname, pics); toast(`Saved ${fname} (${Math.round(pics.size / 1024)} KB, pages as pictures).`); return;
       }
-      download(baseName() + "-edited.pdf", await pdfBlob(pdf)); toast("Saved " + baseName() + "-edited.pdf.");
+      download(fname, await pdfBlob(pdf)); toast("Saved " + fname + ".");
       return;
     }
     const c = await composeCanvas();
-    const pdf = await L.PDFDocument.create(), pw = c.width / 2, ph = c.height / 2;
+    let pdf = await L.PDFDocument.create(); const pw = c.width / 2, ph = c.height / 2;
     const img = await pdf.embedPng(await canvasBytes(c, "image/png"));   // PNG keeps the ink edges and see-through background exact
     pdf.addPage([pw, ph]).drawImage(img, { x: 0, y: 0, width: pw, height: ph });
-    download("calligraphy.pdf", await pdfBlob(pdf)); toast("Saved PDF.");
+    pdf = await finishPdf(pdf, L, null);
+    download(outName("calligraphy", "pdf"), await pdfBlob(pdf)); toast("Saved PDF.");
   } catch (e) { errEl.textContent = "PDF export failed: " + (e.message || e); }
 }
 function exportSVG() {
@@ -2529,7 +2659,9 @@ function exportSVG() {
 // objects are laid over them, form-builder fields become real fields and notes real
 // comments. Pages that were rotated, came from pictures, or carry redactions become a
 // flat picture so nothing hidden survives.
-async function buildOutputPdf() {
+// fields added in the editor have no border or background in the PDF (no lines around them once filled in)
+const NO_BOX = (L) => ({ borderWidth: 0, borderColor: undefined, backgroundColor: undefined, textColor: L.rgb(0.06, 0.09, 0.17) });
+async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are written as plain text (no form fields, no boxes)
   const L = await pdfLibReady();
   try { await document.fonts.ready; } catch (_) {}
   const s0 = docSources[0];
@@ -2603,11 +2735,19 @@ async function buildOutputPdf() {
         continue;
       }
       if (!it.isField) continue;
+      if (opts.flat) {   // the clean download: only what's filled in, no field and no box around it
+        try {
+          if (it.fieldKind === "check") { if (it.checked) { const s = Math.min(wf, hf) || 14, zf = await pdf.embedFont(L.StandardFonts.ZapfDingbats); page.drawText("✔", { x: x + s * 0.12, y: ph - it.ny * ph - s * 0.85, size: s * 0.9, font: zf, color: L.rgb(0.06, 0.09, 0.17) }); } }
+          else if (it.text) { const hv = await pdf.embedFont(L.StandardFonts.Helvetica), t = String(it.text); let sz = Math.min(hf * 0.62, 14); while (sz > 5 && hv.widthOfTextAtSize(t, sz) > wf - 4) sz -= 0.5;
+            page.drawText(t, { x: x + 3, y: ph - it.ny * ph - hf / 2 - sz * 0.35, size: sz, font: hv, color: L.rgb(0.06, 0.09, 0.17) }); }
+        } catch (_) {}
+        continue;
+      }
       let name = ((it.label || it.fieldKind || "field") + "_" + it.id).replace(/[^\w.-]/g, "_");
       while (used[name]) name += "_"; used[name] = 1;
       try {
-        if (it.fieldKind === "check") { const s = Math.min(wf, hf) || 14, y = ph - it.ny * ph - s; const cb = form.createCheckBox(name); cb.addToPage(page, { x, y, width: s, height: s }); if (it.checked) cb.check(); }
-        else { const y = ph - it.ny * ph - hf; const tf = form.createTextField(name); if (it.text) tf.setText(String(it.text)); tf.addToPage(page, { x, y, width: wf, height: hf }); }
+        if (it.fieldKind === "check") { const s = Math.min(wf, hf) || 14, y = ph - it.ny * ph - s; const cb = form.createCheckBox(name); cb.addToPage(page, { x, y, width: s, height: s, ...NO_BOX(L) }); if (it.checked) cb.check(); }
+        else { const y = ph - it.ny * ph - hf; const tf = form.createTextField(name); if (it.text) tf.setText(String(it.text)); tf.addToPage(page, { x, y, width: wf, height: hf, ...NO_BOX(L) }); }
         nf++;
       } catch (_) {}
     }
@@ -2629,61 +2769,70 @@ async function exportAllImages() {
   if (!doc) return;
   if (!window.JSZip) await new Promise((res, rej) => { const sc = document.createElement("script"); sc.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); });
   snapshotNow();
-  const Q = dlQuality(), png = dlOpts.quality === "exact", zip = new window.JSZip(), keep = curPage;
-  const sp = scanParams(), name = (i, ext) => `${baseName()}-page${String(i + 1).padStart(2, "0")}.${ext}`;
+  const idx = await exportPageList(); if (!idx.length) return;
+  const sp = scanParams(), Q = dlQuality(), S = picScale(), zip = new window.JSZip(), keep = curPage, zname = outName(baseName() + "-pages", "zip");
+  const png = dlOpts.quality === "exact" && !sp.on;   // lossless PNG for clean pages; a scanned look's grain makes PNGs huge, so JPG
+  const name = (i, ext) => `${baseName()}-page${String(i + 1).padStart(2, "0")}.${ext}`;
   if (sp.on && scanWorkersSupported()) {
     // scanned look: pages rendered in parallel in the worker pool; 1-bit pages saved as tiny 1-bit PNGs
     try {
       const bilevel = sp.cspace === "bilevel" && typeof CompressionStream !== "undefined";
       const spx = bilevel ? sp : { ...sp, cspace: sp.cspace === "bilevel" ? "bw" : sp.cspace };
-      await scanPagesOffThread(Q.scale, spx, { type: png ? "image/png" : "image/jpeg", quality: Q.q }, async (i, r) => {
+      await scanPagesOffThread(S, spx, { type: png ? "image/png" : "image/jpeg", quality: Q.q }, async (i, r) => {
         if (r.kind === "bilevel") zip.file(name(i, "png"), await bilevelPng(r.bits, r.w, r.h));
         else zip.file(name(i, png ? "png" : "jpg"), new Uint8Array(r.buf));
-      }, "Saving pictures");
+      }, "Saving pictures", idx);
       curPage = keep;
-      download(baseName() + "-pages.zip", await zip.generateAsync({ type: "blob" })); toast(`Saved ${baseName()}-pages.zip (${docPages.length} pictures).`);
+      download(zname, await zip.generateAsync({ type: "blob" })); toast(`Saved ${zname} (${idx.length} picture${idx.length === 1 ? "" : "s"}).`);
       return;
     } catch (e) { console.warn("Scan workers failed; rendering on the main thread instead.", e); }
   }
-  for (let i = 0; i < docPages.length; i++) {
-    toast(`Saving page ${i + 1} of ${docPages.length}…`);
-    let c = finishCanvas(await composePage(i, Q.scale, "all", { sharp: true }));
-    const W0 = Math.round(docPages[i].w * Q.scale), H0 = Math.round(docPages[i].h * Q.scale);
+  for (let k = 0; k < idx.length; k++) {
+    const i = idx[k];
+    toast(`Saving page ${k + 1} of ${idx.length}…`);
+    let c = finishCanvas(await composePage(i, S, "all", { sharp: true }));
+    const W0 = Math.round(docPages[i].w * S), H0 = Math.round(docPages[i].h * S);
     if (c.width !== W0 || c.height !== H0 || !png) { const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); c = t; }
     zip.file(`${baseName()}-page${String(i + 1).padStart(2, "0")}.${png ? "png" : "jpg"}`, await new Promise((r) => c.toBlob(r, png ? "image/png" : "image/jpeg", Q.q)));
   }
   curPage = keep;
-  download(baseName() + "-pages.zip", await zip.generateAsync({ type: "blob" })); toast(`Saved ${baseName()}-pages.zip (${docPages.length} pictures).`);
+  download(zname, await zip.generateAsync({ type: "blob" })); toast(`Saved ${zname} (${idx.length} picture${idx.length === 1 ? "" : "s"}).`);
 }
 // the document's text, page by page (the PDF's own text; OCR for scanned pages)
 async function exportText() {
   if (!doc || !window.__cal2DocxFromBytes) return;
   try {
-    snapshotNow(); toast("Reading the text…");
-    const blob = await window.__cal2DocxFromBytes(await buildDocumentBytes(), baseName(), (m) => toast(m));
+    snapshotNow(); const idx = await exportPageList(); if (!idx.length) return;
+    toast("Reading the text…");
+    const blob = await window.__cal2DocxFromBytes(await selectedDocumentBytes(idx), baseName(), (m) => toast(m));
     const xml = await (await window.JSZip.loadAsync(blob)).file("word/document.xml").async("string");
     const txt = xml.replace(/<w:br w:type="page"\/>/g, "\n\n\f").replace(/<w:tab\/>/g, "\t").replace(/<\/w:p>/g, "\n").replace(/<[^>]+>/g, "")
       .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
-    download(baseName() + ".txt", new Blob([txt], { type: "text/plain;charset=utf-8" })); toast("Saved " + baseName() + ".txt.");
+    const fname = outName(baseName(), "txt");
+    download(fname, new Blob([txt], { type: "text/plain;charset=utf-8" })); toast("Saved " + fname + ".");
   } catch (e) { toast("Text export failed: " + (e.message || e)); }
 }
 async function exportWord() {
   if (!doc || !window.__cal2DocxFromBytes) return;
   try {
-    snapshotNow(); toast("Building the Word document…");
-    const blob = await window.__cal2DocxFromBytes(await buildDocumentBytes(), baseName(), (m) => toast(m));
-    download(baseName() + ".docx", blob); toast("Saved " + baseName() + ".docx.");
+    snapshotNow(); const idx = await exportPageList(); if (!idx.length) return;
+    toast("Building the Word document…");
+    const blob = await window.__cal2DocxFromBytes(await selectedDocumentBytes(idx), baseName(), (m) => toast(m));
+    const fname = outName(baseName(), "docx");
+    download(fname, blob); toast("Saved " + fname + ".");
   } catch (e) { toast("Word export failed: " + (e.message || e)); }
 }
 async function exportFillablePDF() {
   if (!doc) { errEl.textContent = "Open a document first."; return; }
   try {
-    snapshotNow(); toast("Building your PDF…");
+    snapshotNow(); const idx = await exportPageList(); if (!idx.length) return;
+    toast("Building your PDF…");
     const { pdf, nf, nn } = await buildOutputPdf();
-    const bytes = await applyPdfMeta(pdf).save({ useObjectStreams: true });
-    download(baseName() + "-editable.pdf", new Blob([bytes], { type: "application/pdf" }));
+    await finishPdf(pdf, await pdfLibReady(), idx, { keepPaper: true });   // re-fitting pages onto new paper would drop the fields
+    const bytes = await applyPdfMeta(pdf).save({ useObjectStreams: true }), fname = outName(baseName() + "-editable", "pdf");
+    download(fname, new Blob([bytes], { type: "application/pdf" }));
     const bits = [nf ? `${nf} fillable field${nf > 1 ? "s" : ""}` : "", nn ? `${nn} comment${nn > 1 ? "s" : ""}` : ""].filter(Boolean).join(", ");
-    toast("Saved " + baseName() + "-editable.pdf" + (bits ? " — " + bits : "") + ".");
+    toast("Saved " + fname + (bits ? " — " + bits : "") + ".");
   } catch (e) { errEl.textContent = "PDF export failed: " + (e.message || e); toast("PDF export failed: " + (e.message || e)); }
 }
 
@@ -4412,9 +4561,21 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
     const m = dlOpts.meta || (dlOpts.meta = {});
     META.forEach((k) => { $("dl_meta_" + k).value = m[k] || ""; });
     $("dl_meta_strip").checked = !!m.strip;
+    // More options: which rows apply to this format
+    const mo = dlMore(), docLike = f !== "png" && f !== "jpg", isPdf = f === "pdf" || f === "fill", inDoc = workMode === "doc" && !!doc;
+    $("dl_pages").value = mo.pages; $("dl_range").value = mo.range; $("dl_skipblank").checked = !!mo.skipBlank; $("dl_paper").value = mo.paper;
+    $("dl_turn").value = mo.turn; $("dl_num").value = mo.num; $("dl_wm").value = mo.wm; $("dl_wmtext").value = mo.wmtext; $("dl_dpi").value = mo.dpi; $("dl_name").value = mo.name;
+    const show = (id, on) => { $(id).style.display = on ? "" : "none"; };
+    show("dl_pages_row", docLike && inDoc); show("dl_range_row", docLike && inDoc && mo.pages === "custom"); show("dl_skipblank_row", docLike && inDoc && mo.pages !== "cur");
+    show("dl_paper_row", f === "pdf"); show("dl_turn_row", isPdf); show("dl_num_row", isPdf); show("dl_wm_row", isPdf); show("dl_wmtext_row", isPdf && mo.wm === "custom");
+    show("dl_dpi_row", f === "png" || f === "jpg" || f === "zip");
+    const ext = { pdf: "pdf", fill: "pdf", docx: "docx", png: "png", jpg: "jpg", zip: "zip", txt: "txt" }[f];
+    $("dl_name").placeholder = (inDoc ? baseName() + ({ pdf: "-edited", fill: "-editable", zip: "-pages", png: `-page${curPage + 1}`, jpg: `-page${curPage + 1}` }[f] || "") : "calligraphy") + "." + ext;
+    const changed = Object.keys(DL_MORE).filter((k) => String(mo[k]) !== String(DL_MORE[k]) && k !== "range" && k !== "wmtext").length;
+    $("dl_more_count").textContent = changed ? ` · ${changed} set` : "";
     $("dl_hint").textContent = {
       pdf: dlOpts.look === "clean" ? (dlOpts.quality === "small" ? "Smallest file: whichever is smaller — your pages as they are, or compressed pictures of them." : "Your pages stay exactly as they are (sharp, selectable text); edits and filled fields are added on top in high resolution.") : "Pages are saved as pictures with this look.",
-      zip: "Every page as a picture in one .zip — PNG for Exact, JPG otherwise.",
+      zip: "Every page as a picture in one .zip — PNG for Exact (clean look), JPG otherwise.",
       txt: "The document's text, page by page (scanned pages are read with OCR).",
       fill: "Real text kept; form fields and comments stay editable.",
       docx: "An editable Word document; scanned pages are read with OCR.",
@@ -4425,7 +4586,13 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   ["dl_format", "dl_look", "dl_quality", "dl_engine"].forEach((id) => { $(id).onchange = () => { dlOpts[id.slice(3)] = $(id).value; lsSet(DL_KEY, dlOpts); dlSync(); if (id === "dl_engine" && dlOpts.engine === "realistic") warmRealistic(); }; });
   META.forEach((k) => { $("dl_meta_" + k).oninput = () => { (dlOpts.meta || (dlOpts.meta = {}))[k] = $("dl_meta_" + k).value; lsSet(DL_KEY, dlOpts); }; });
   $("dl_meta_strip").onchange = () => { (dlOpts.meta || (dlOpts.meta = {})).strip = $("dl_meta_strip").checked; lsSet(DL_KEY, dlOpts); };
+  const setMore = (k, v, resync = true) => { (dlOpts.more || (dlOpts.more = {}))[k] = v; lsSet(DL_KEY, dlOpts); if (resync) dlSync(); };
+  [["dl_pages", "pages"], ["dl_paper", "paper"], ["dl_turn", "turn"], ["dl_num", "num"], ["dl_wm", "wm"], ["dl_dpi", "dpi"]].forEach(([id, k]) => { $(id).onchange = () => setMore(k, $(id).value); });
+  [["dl_range", "range"], ["dl_wmtext", "wmtext"], ["dl_name", "name"]].forEach(([id, k]) => { $(id).oninput = () => setMore(k, $(id).value, false); $(id).onchange = () => dlSync(); });
+  $("dl_skipblank").onchange = () => setMore("skipBlank", $("dl_skipblank").checked);
+  $("dl_more_reset").onclick = () => { dlOpts.more = {}; lsSet(DL_KEY, dlOpts); dlSync(); };
   $("dl_panel").addEventListener("click", (e) => e.stopPropagation());
+  document.querySelector('[data-ddbtn="dl"]')?.addEventListener("click", () => dlSync());   // page-dependent hints (file name) stay current
   $("dl_go").onclick = async () => {
     closeDropdowns(); const f = dlOpts.format;
     exportLook = (f === "pdf" || f === "png" || f === "jpg" || f === "zip") ? dlOpts.look : null;
@@ -4523,6 +4690,12 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   window.addEventListener("resize", () => { const w = $("stage").clientWidth; if (w !== lastW) { lastW = w; renderD(); } });
 
   // ---- hooks used by the page shell (shell.js) and the PDF tools (pdfedit.js) ----
+  // leaving the page (Back button, a link, another tool) closes the pop-up windows that belong to it
+  let lastPath = location.hash.split("?")[0];
+  window.addEventListener("hashchange", () => {
+    const path = location.hash.split("?")[0]; if (path === lastPath) return; lastPath = path;
+    document.querySelectorAll("dialog.dpad[open]").forEach((d) => { try { d.close(); } catch (_) {} });
+  });
   window.__cal2SetWork = setWorkMode;
   window.__cal2HasDoc = () => !!doc;
   window.__cal2OpenDocFile = (f) => openDocFile(f);

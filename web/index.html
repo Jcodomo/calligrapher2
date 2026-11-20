@@ -48,8 +48,11 @@
   .wordmark{font-weight:700;font-size:21px;letter-spacing:-.2px;color:var(--text);margin-right:10px;white-space:nowrap}
   .tools-btn{display:flex;align-items:center;gap:6px;height:38px;padding:0 12px;border:1px solid var(--line2);border-radius:6px;background:var(--surface2);cursor:pointer;font-size:15px;color:var(--text2)}
   .tools-btn:hover,.tools-btn[aria-expanded=true]{border-color:var(--accent);color:var(--accent)}
-  .mainnav{display:flex;gap:20px;margin-left:16px}
-  .mainnav a{color:var(--text2);font-size:15px;height:var(--top);display:flex;align-items:center;border-bottom:2px solid transparent}
+  .mainnav{display:flex;gap:20px;margin-left:16px;min-width:0;overflow:hidden}
+  .mainnav a{color:var(--text2);font-size:15px;height:var(--top);display:flex;align-items:center;border-bottom:2px solid transparent;white-space:nowrap;flex:none}
+  .wordmark,.tools-btn,.topbar .btn-blue,.toplink,.iconbtn{flex:none}
+  html,body{overflow-x:clip}
+  @media (max-width:1320px){ .mainnav{gap:14px;margin-left:8px} .mainnav a{font-size:14px} }
   .mainnav a:hover,.mainnav a.cur{color:var(--accent);border-bottom-color:var(--accent)}
   .spacer{flex:1}
   .toplink{display:inline-flex;align-items:center;gap:6px;color:var(--text2);font-size:15px;margin-right:6px;white-space:nowrap;background:none;border:0;cursor:pointer;height:38px;padding:0 8px;border-radius:6px}
@@ -59,8 +62,8 @@
   .btn-blue{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;padding:0 16px;border:0;border-radius:6px;background:var(--accent-strong);color:#fff;font-weight:700;font-size:15px;cursor:pointer;white-space:nowrap}
   .btn-blue:hover{background:var(--accent-strong-h)}
   .burger{display:none}
-  @media (max-width:1023px){ .mainnav,.toplink .lbl{display:none} .burger{display:inline-flex} }
-  @media (max-width:560px){ .tools-btn .lbl,#top_choose .lbl{display:none} .wordmark{font-size:18px} }
+  @media (max-width:1180px){ .mainnav,.toplink .lbl{display:none} .burger{display:inline-flex} }
+  @media (max-width:560px){ .tools-btn .lbl,#top_choose .lbl{display:none} .wordmark{font-size:18px} .tools-btn,#theme_btn{display:none} .topbar{padding:0 10px;gap:4px} }
   .recent-dd{display:none;position:absolute;right:16px;top:calc(var(--top) - 4px);z-index:61;width:360px;max-width:calc(100vw - 24px);background:var(--pop);border:1px solid var(--line);border-radius:10px;box-shadow:var(--pop-shadow);padding:10px}
   .recent-dd.open{display:block}
   .recent-dd h4{margin:2px 4px 8px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
@@ -212,6 +215,7 @@
   body[data-work=doc].view-single:not([data-edmode=organize]) .pgnav{display:flex}
   .modebar{align-items:center;gap:8px;min-height:54px;padding:6px 12px;background:var(--surface);flex:none;flex-wrap:wrap}
   .ed-side{display:flex;align-items:center;gap:4px;flex:none}
+  @media (max-width:420px){ .ed-side{gap:1px} .ed-side #ed_zval{display:none} .ed-side .viewseg button{padding-left:6px;padding-right:6px} }
   .tabs{flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap}
   .tab{display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 15px;border:0;border-radius:999px;background:var(--band);color:var(--text);font-weight:700;font-size:15px;cursor:pointer;white-space:nowrap}
   .tab:hover{filter:brightness(.97)}
@@ -286,8 +290,10 @@
   .org-tools .ot-dup .tl{color:#e5484d;font-weight:600}.org-tools .ot-del{border:1px solid #e5484d;color:#e5484d}.org-tools .ot-del:hover{background:#e5484d;color:#fff}.org-tools .ot-del:hover .tl{color:#fff}
   .org-tools .ot-busy{font-size:12.5px;color:var(--muted);padding:0 6px}.org-tools .ot-ok{font-size:12.5px;color:#2e9d5b;padding:0 6px}
   .og .ogdup{position:absolute;left:6px;right:6px;bottom:36px;background:#e5484d;color:#fff;font-size:11px;padding:2px 6px;border-radius:6px;text-align:center;pointer-events:none}
-  .dl-panel{padding:12px!important;min-width:280px}
-  .dl-panel .dlr{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px}.dl-panel .dlr span{width:58px;color:var(--muted)}.dl-panel select{flex:1;height:32px}
+  .dl-panel{padding:12px!important;min-width:300px;max-width:min(360px,calc(100vw - 20px));max-height:calc(100vh - 90px);overflow:auto}
+  .dl-panel .dlr{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px}.dl-panel .dlr span{width:70px;flex:none;color:var(--muted)}
+  .dl-panel select{min-width:0}.dl-panel .dl-more .dlr input[type=text]{flex:1;height:30px;min-width:0}.dl-panel .dl-more .dlchk{margin:0 0 8px 80px}
+  .dl-panel .dl-reset{background:none;border:0;color:var(--muted);font-size:12px;text-decoration:underline;cursor:pointer;padding:2px 0}.dl-panel select{flex:1;height:32px}
   .dl-panel .dl-hint{font-size:12px;color:var(--muted);margin:2px 0 10px;line-height:1.4}.dl-panel #dl_go{width:100%}
   .dl-panel .dl-meta{margin:0 0 10px;font-size:13px}.dl-panel .dl-meta summary{cursor:pointer;color:var(--muted);margin-bottom:6px}
   .dl-panel .dl-meta input[type=text]{flex:1;height:30px;min-width:0}.dl-panel .dl-meta .dlchk{display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--muted);margin-top:2px}
@@ -528,9 +534,9 @@
   /* font picker */
   .fbtn{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;min-width:170px;max-width:220px;height:32px;padding:0 8px;border:0;background:transparent;color:var(--text);cursor:pointer;font-size:15px;white-space:nowrap;overflow:hidden}
   .fbtn span{overflow:hidden;text-overflow:ellipsis}
-  .fpop{position:absolute;z-index:45;width:290px;max-height:420px;display:flex;flex-direction:column;background:var(--pop);border:1px solid var(--line);border-radius:8px;box-shadow:var(--pop-shadow)}
+  .fpop{position:absolute;z-index:45;width:290px;max-width:calc(100vw - 16px);height:420px;max-height:calc(100vh - 16px);display:flex;flex-direction:column;background:var(--pop);border:1px solid var(--line);border-radius:8px;box-shadow:var(--pop-shadow)}
   .fpop input{margin:8px;padding:7px 9px;border:1px solid var(--line2);border-radius:6px;background:var(--surface2);font:inherit;font-size:14px}
-  .fpop .fl{overflow-y:auto;padding:0 6px 8px}
+  .fpop .fl{flex:1;min-height:0;overflow-y:auto;padding:0 6px 8px}.fpop .fl-none{padding:14px 8px;color:var(--muted);font-size:13px}.fpop input{flex:none}
   .fpop h5{margin:8px 6px 4px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
   .fpop button{display:block;width:100%;text-align:left;border:0;background:none;padding:6px 8px;border-radius:5px;cursor:pointer;font-size:17px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .fpop button:hover,.fpop button.on{background:var(--tint);color:var(--accent)}
@@ -608,7 +614,7 @@
         <button class="btn-blue" data-ddbtn="dl"><svg class="i" viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M4 17h12"/></svg><span class="tl">Download</span></button>
         <div class="ddm right dl-panel" id="dl_panel">
           <label class="dlr"><span>Format</span><select id="dl_format"><option value="pdf">PDF</option><option value="fill">PDF — keep it editable</option><option value="docx">Word (.docx)</option><option value="png">PNG image (this page)</option><option value="jpg">JPG image (this page)</option><option value="zip">All pages as pictures (.zip)</option><option value="txt">Text only (.txt)</option></select></label>
-          <label class="dlr" id="dl_look_row"><span>Look</span><select id="dl_look"><option value="clean">Clean (as is)</option><option value="light">Slightly scanned</option><option value="scanned">Scanned</option><option value="photocopy">Photocopy (black &amp; white)</option><option value="bwscan">Black &amp; white scan (smallest file)</option><option value="custom">My scan settings (side panel)</option></select></label>
+          <label class="dlr" id="dl_look_row"><span>Look</span><select id="dl_look"><option value="clean">Clean (as is)</option><option value="light">Slightly scanned</option><option value="scanned">Scanned</option><option value="gray">Grayscale (as is, in grey)</option><option value="photocopy">Photocopy (black &amp; white)</option><option value="bwscan">Black &amp; white scan (smallest file)</option><option value="custom">My scan settings (side panel)</option></select></label>
           <label class="dlr" id="dl_quality_row"><span>Quality</span><select id="dl_quality"><option value="exact">Exact (no quality loss)</option><option value="balanced">Balanced</option><option value="small">Smallest file</option></select></label>
           <label class="dlr" id="dl_engine_row"><span>Engine</span><select id="dl_engine"><option value="fast">Fast (built in)</option><option value="realistic">Realistic — ImageMagick (15 MB, once)</option></select></label>
           <details class="dl-meta" id="dl_meta_row"><summary>PDF details (title, author…)</summary>
@@ -617,6 +623,19 @@
             <label class="dlr"><span>Subject</span><input type="text" id="dl_meta_subject" autocomplete="off"></label>
             <label class="dlr"><span>Keywords</span><input type="text" id="dl_meta_keywords" autocomplete="off" placeholder="comma, separated"></label>
             <label class="dlchk"><input type="checkbox" id="dl_meta_strip"> Remove other hidden details (software, dates)</label>
+          </details>
+          <details class="dl-meta dl-more" id="dl_more"><summary title="Pages, paper size, turning, page numbers, watermark, resolution and file name">More options<span id="dl_more_count"></span></summary>
+            <label class="dlr" id="dl_pages_row"><span>Pages</span><select id="dl_pages"><option value="all">All pages</option><option value="cur">This page only</option><option value="odd">Odd pages (1, 3, 5…)</option><option value="even">Even pages (2, 4, 6…)</option><option value="custom">Choose pages…</option></select></label>
+            <label class="dlr" id="dl_range_row"><span></span><input type="text" id="dl_range" autocomplete="off" placeholder="e.g. 1-3, 5, 8-"></label>
+            <label class="dlchk" id="dl_skipblank_row"><input type="checkbox" id="dl_skipblank"> Leave out blank pages</label>
+            <label class="dlr" id="dl_paper_row"><span>Paper</span><select id="dl_paper"><option value="orig">Same as the original</option><option value="letter">Letter (8.5 × 11 in)</option><option value="legal">Legal (8.5 × 14 in)</option><option value="tabloid">Tabloid (11 × 17 in)</option><option value="a4">A4</option><option value="a5">A5</option></select></label>
+            <label class="dlr" id="dl_turn_row"><span>Turn</span><select id="dl_turn"><option value="0">Don't turn</option><option value="90">90° right</option><option value="180">Upside down</option><option value="270">90° left</option></select></label>
+            <label class="dlr" id="dl_num_row"><span>Numbers</span><select id="dl_num"><option value="none">No page numbers</option><option value="bc">1, 2, 3 — bottom centre</option><option value="br">Page 1 of 3 — bottom right</option><option value="tr">Page 1 of 3 — top right</option></select></label>
+            <label class="dlr" id="dl_wm_row"><span>Watermark</span><select id="dl_wm"><option value="none">None</option><option value="DRAFT">DRAFT</option><option value="COPY">COPY</option><option value="CONFIDENTIAL">CONFIDENTIAL</option><option value="SAMPLE">SAMPLE</option><option value="VOID">VOID</option><option value="custom">My own text…</option></select></label>
+            <label class="dlr" id="dl_wmtext_row"><span></span><input type="text" id="dl_wmtext" autocomplete="off" maxlength="40" placeholder="Watermark text"></label>
+            <label class="dlr" id="dl_dpi_row"><span>Resolution</span><select id="dl_dpi"><option value="150">150 dpi — smaller</option><option value="300">300 dpi — print</option><option value="600">600 dpi — very sharp</option></select></label>
+            <label class="dlr"><span>File name</span><input type="text" id="dl_name" autocomplete="off" spellcheck="false"></label>
+            <button type="button" class="dl-reset" id="dl_more_reset">Reset these options</button>
           </details>
           <div class="dl-hint" id="dl_hint"></div>
           <button class="btn primary" id="dl_go" type="button">⤓ Download</button>
@@ -1062,7 +1081,7 @@ jumps over the lazy dog</textarea>
 
 <div id="toast" role="status" aria-live="polite"></div>
 
-<script type="module" src="./app.js?v=71"></script>
-<script type="module" src="./shell.js?v=11"></script>
+<script type="module" src="./app.js?v=77"></script>
+<script type="module" src="./shell.js?v=12"></script>
 </body>
 </html>
