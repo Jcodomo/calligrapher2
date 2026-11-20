@@ -718,6 +718,11 @@ function renderPagesInBackground(token) {
   (async () => {
     for (let i = 0; i < docPages.length; i++) {
       if (token !== loadToken) return;
+      // page pictures on screen first: full-size renders wait while thumbnails are being drawn
+      for (let w = 0; w < 100 && !thumbsIdle(); w++) await new Promise((r) => setTimeout(r, 40));
+      if (edMode === "organize" && i !== curPage) await new Promise((r) => (window.requestIdleCallback || setTimeout)(r, { timeout: 300 }));
+      if (token !== loadToken) return;
+      if (!docPages[i] || docPages[i].img) continue;
       if (!docPages[i].img) { try { await ensurePageImage(i); if (docPages[i] && docPages[i].fields.length) render(); } catch (_) {} }
     }
   })();
@@ -725,7 +730,7 @@ function renderPagesInBackground(token) {
 // A late-rendered page swaps its picture in place (no rebuild, so editing isn't interrupted).
 function updatePageImage(i) {
   const p = docPages[i]; if (!p) return;
-  document.querySelectorAll(`#ed_pages .pg[data-page="${i}"] > img, #ed_thumbs .thumb[data-page="${i}"] img, #org_grid .og[data-i="${i}"] img`).forEach((im) => { im.src = p.url; });
+  document.querySelectorAll(`#ed_pages .pg[data-page="${i}"] > img`).forEach((im) => { im.src = p.url; });
 }
 // Add a PDF or picture as pages of the open document (at the end by default).
 async function addSource(u8, name, kind, at) {
@@ -735,10 +740,9 @@ async function addSource(u8, name, kind, at) {
   } else { src.url = URL.createObjectURL(new Blob([u8])); src.img = await loadImgEl(src.url); }
   const si = docSources.push(src) - 1, pages = [];
   if (kind === "pdf") {
-    for (let i = 0; i < src.pdf.numPages; i++) {
-      const pg = await src.pdf.getPage(i + 1), vp = pg.getViewport({ scale: 2 });
-      pages.push({ src: si, idx: i, rot: 0, img: null, w: Math.round(vp.width), h: Math.round(vp.height), url: BLANK_PAGE, fields: [], key: nextKey() });
-    }
+    // every page's size, asked for all at once (one at a time was a round trip to the PDF worker each)
+    const vps = await Promise.all(Array.from({ length: src.pdf.numPages }, (_, i) => src.pdf.getPage(i + 1).then((pg) => pg.getViewport({ scale: 2 }))));
+    vps.forEach((vp, i) => pages.push({ src: si, idx: i, rot: 0, img: null, w: Math.round(vp.width), h: Math.round(vp.height), url: BLANK_PAGE, fields: [], key: nextKey() }));
   } else pages.push({ src: si, idx: 0, rot: 0, img: src.img, w: src.img.naturalWidth, h: src.img.naturalHeight, url: src.url, fields: [], key: nextKey() });
   if (at == null || at > docPages.length) at = docPages.length;
   docItems.forEach((it) => { if ((it.page || 0) >= at) it.page += pages.length; });
@@ -853,6 +857,8 @@ function pageAdapter(p) {
   return {
     key: "ed|" + p.key + "|" + p.rot, wPt: p.w / 2,
     render: async (scale) => {
+      // a small picture straight from the PDF: the duplicate check needs ~32 px, not the full-size page
+      if (!p.img) { try { const c = await pageCanvasAt(p, Math.max(8, Math.round(p.w / 2 * scale))); if (c) return c; } catch (_) {} }
       const i = docPages.indexOf(p); if (i >= 0) await ensurePageImage(i);
       const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(p.w / 2 * scale)); c.height = Math.max(1, Math.round(p.h / 2 * scale));
       const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); if (p.img) g.drawImage(p.img, 0, 0, c.width, c.height);
@@ -928,7 +934,7 @@ function renderOrganize() {
     const d = document.createElement("div");
     d.className = "og" + (orgSel.has(i) ? " sel" : ""); d.draggable = true; d.dataset.i = i;
     const dupOf = liveOrgDups().get(p);
-    d.innerHTML = `<input type="checkbox" ${orgSel.has(i) ? "checked" : ""} title="Select page"><img src="${p.url}" alt="Page ${i + 1}" style="aspect-ratio:${p.w}/${p.h}" draggable="false"><div class="ogn">${i + 1}</div>` +
+    d.innerHTML = `<input type="checkbox" ${orgSel.has(i) ? "checked" : ""} title="Select page"><img data-pk="${p.key}" src="${thumbNow(p) || BLANK_PAGE}" alt="Page ${i + 1}" style="aspect-ratio:${p.w}/${p.h}" draggable="false"><div class="ogn">${i + 1}</div>` +
       (dupOf ? `<div class="ogdup">Same as page ${docPages.indexOf(dupOf) + 1}</div>` : "") +
       `<div class="ogb"><button data-a="l" title="Rotate left">⟲</button><button data-a="r" title="Rotate right">⟳</button><button data-a="d" title="Duplicate">⧉</button><button data-a="x" title="Delete">🗑</button></div>`;
     d.querySelector("input").onclick = (e) => { e.stopPropagation(); if (e.target.checked) orgSel.add(i); else orgSel.delete(i); d.classList.toggle("sel", e.target.checked); };
@@ -958,6 +964,321 @@ function renderOrganize() {
   add.addEventListener("dragleave", () => add.classList.remove("over"));
   add.addEventListener("drop", (e) => { e.preventDefault(); e.stopPropagation(); add.classList.remove("over"); if (e.dataTransfer.files.length) addFilesToDoc([...e.dataTransfer.files]); });
   g.appendChild(add);
+  observeThumbs(g);
+}
+
+// ---- small page pictures for the page views (Merge, Split, Organize, the page list) ---------------------
+// Drawn straight from the PDF at thumbnail size (not from the full-size page picture, which is 4-10x the
+// pixels and was rendered and PNG-encoded one page at a time), a few at once, only for pages on screen.
+let srcUid = 0;
+const thumbUrls = new Map(), thumbJobs = new Map(), thumbQueue = [];
+let thumbActive = 0;
+const THUMB_W = 280, THUMB_CONC = 3;
+const thumbKey = (p) => { const s = docSources[p.src]; if (s && !s.uid) s.uid = ++srcUid; return (s ? s.uid : "x") + ":" + p.idx + ":" + p.rot; };
+const thumbNow = (p) => thumbUrls.get(thumbKey(p)) || null;
+// one page drawn at a given width in pixels (white paper), turned as it is in the document
+async function pageCanvasAt(p, wpx) {
+  const src = docSources[p.src]; if (!src) return null;
+  const c = document.createElement("canvas"), g = c.getContext("2d");
+  if (src.kind === "pdf") {
+    const page = await src.pdf.getPage(p.idx + 1), rotation = ((page.rotate || 0) + p.rot) % 360;
+    const vp1 = page.getViewport({ scale: 1, rotation }), vp = page.getViewport({ scale: wpx / vp1.width, rotation });
+    c.width = Math.max(1, Math.round(vp.width)); c.height = Math.max(1, Math.round(vp.height));
+    g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+    // "print" draws the page in one go: the screen intent draws a slice per animation frame, which crawls
+    // in a background tab and lets a long page list fall behind
+    await page.render({ canvasContext: g, viewport: vp, intent: "print" }).promise;
+    return c;
+  }
+  const im = p.img || src.img; if (!im) return null;
+  if (p.img) { c.width = wpx; c.height = Math.max(1, Math.round(wpx * p.h / p.w)); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(p.img, 0, 0, c.width, c.height); return c; }
+  const sw = im.naturalWidth, sh = im.naturalHeight, swap = p.rot % 180 !== 0, k = wpx / (swap ? sh : sw);
+  c.width = wpx; c.height = Math.max(1, Math.round((swap ? sw : sh) * k));
+  g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+  g.translate(c.width / 2, c.height / 2); g.rotate(p.rot * Math.PI / 180); g.drawImage(im, -sw * k / 2, -sh * k / 2, sw * k, sh * k);
+  return c;
+}
+function requestThumb(p, urgent) {
+  const k = thumbKey(p);
+  if (thumbUrls.has(k)) return Promise.resolve(thumbUrls.get(k));
+  if (thumbJobs.has(k)) return thumbJobs.get(k).promise;
+  let resolve; const promise = new Promise((r) => { resolve = r; });
+  const job = { k, p, resolve, promise };
+  thumbJobs.set(k, job); if (urgent) thumbQueue.unshift(job); else thumbQueue.push(job);
+  pumpThumbs();
+  return promise;
+}
+function pumpThumbs() {
+  while (thumbActive < THUMB_CONC && thumbQueue.length) {
+    const job = thumbQueue.shift();
+    if (thumbKey(job.p) !== job.k) {   // its document was closed or replaced meanwhile
+      thumbJobs.delete(job.k); job.resolve(BLANK_PAGE); continue;
+    }
+    thumbActive++;
+    (async () => {
+      let url = null;
+      try {
+        // a page that never finishes drawing must not hold up the others
+        const c = await Promise.race([pageCanvasAt(job.p, THUMB_W), new Promise((r) => setTimeout(() => r(null), 20000))]);
+        // a small JPEG written at once (toBlob waits for a background task: up to a second each in a background tab)
+        if (c) { url = c.toDataURL("image/jpeg", 0.84); c.width = c.height = 0; }
+      } catch (_) {}
+      if (url) thumbUrls.set(job.k, url);
+      thumbJobs.delete(job.k); thumbActive--; job.resolve(url || job.p.url || BLANK_PAGE);
+      pumpThumbs();
+    })();
+  }
+}
+const thumbsIdle = () => !thumbActive && !thumbQueue.length;
+// pictures with data-pk get their thumbnail when they come near the screen
+const thumbObservers = new WeakMap(), VIEWPORT = {};   // one observer per scrolling box (dropped with it)
+function observeThumbs(host, root) {
+  if (!host) return;
+  const key = root || VIEWPORT;
+  let ob = thumbObservers.get(key);
+  if (!ob) {
+    ob = new IntersectionObserver((es) => es.forEach((e) => {
+      if (!e.isIntersecting) return;
+      const im = e.target; ob.unobserve(im);
+      const p = docPages.find((x) => x.key === im.dataset.pk); if (!p) return;
+      const want = thumbKey(p);
+      requestThumb(p, true).then((u) => { if (im.isConnected && im.dataset.tk === want) im.src = u; });
+    }), { root: root || null, rootMargin: "500px" });
+    thumbObservers.set(key, ob);
+  }
+  let first = 0;
+  host.querySelectorAll("img[data-pk]").forEach((im) => {
+    const p = docPages.find((x) => x.key === im.dataset.pk); if (!p) return;
+    const want = im.dataset.tk = thumbKey(p);
+    const u = thumbNow(p); if (u) { im.src = u; return; }
+    // the first screenful starts at once (the observer only reports after the next screen refresh)
+    if (first++ < 18) requestThumb(p).then((url) => { if (im.isConnected && im.dataset.tk === want) im.src = url; });
+    else ob.observe(im);
+  });
+}
+
+// ---- Merge and Split: the document's files and pages as cards ------------------------------------------
+// Merge: Files (one card per file, in order) or Pages. Split: scissors between pages - each click cuts
+// there; Extract: tick pages to take out as one PDF. Everything works on the open document, so edits made
+// in the editor go into what you download.
+const pw = { on: "", view: "files", split: "split", cuts: new Set(), sel: new Set(), snip: "" };
+const PW_TAGS = [["#f6d3db", "#7a2335"], ["#d2eee0", "#1d5a3f"], ["#f7e4c0", "#6b470b"], ["#dcdcf7", "#322f7a"], ["#d1e6f6", "#1a486c"], ["#f2d6ef", "#652861"]];
+const PW_I = {
+  back: '<svg viewBox="0 0 20 20"><path d="M4.5 10a5.5 5.5 0 105.5-5.5H6.5"/><path d="M8.5 2.3L6.2 4.5l2.3 2.2"/></svg>',
+  files: '<svg viewBox="0 0 20 20"><path d="M6 2.8h6l3.2 3.2V17H6z"/><path d="M12 2.8V6h3.2M8.3 9.5h4.6M8.3 12h4.6M8.3 14.5h3"/><path d="M3.8 5.5v13h9"/></svg>',
+  pages: '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx=".8"/><rect x="11" y="3" width="6" height="6" rx=".8"/><rect x="3" y="11" width="6" height="6" rx=".8"/><rect x="11" y="11" width="6" height="6" rx=".8"/></svg>',
+  cut: '<svg viewBox="0 0 20 20"><circle cx="5.5" cy="5.5" r="2.4"/><circle cx="5.5" cy="14.5" r="2.4"/><path d="M7.4 7l9.6 9M7.4 13l9.6-9"/></svg>',
+  extract: '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx=".6" fill="currentColor"/><rect x="11" y="3" width="6" height="6" rx=".6"/><rect x="3" y="11" width="6" height="6" rx=".6"/><rect x="11" y="11" width="6" height="6" rx=".6" fill="currentColor"/></svg>',
+  add: '<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.2"/><path d="M10 6.6v6.8M6.6 10h6.8"/></svg>',
+  rotl: '<svg viewBox="0 0 20 20"><path d="M4.6 10.5a5.6 5.6 0 105.6-5.6H6.4"/><path d="M8.4 2.6L6.2 4.9l2.3 2.2"/><circle cx="10.2" cy="10.5" r="1" fill="currentColor" stroke="none"/></svg>',
+  rotr: '<svg viewBox="0 0 20 20"><path d="M15.4 10.5a5.6 5.6 0 11-5.6-5.6h3.8"/><path d="M11.6 2.6l2.2 2.3-2.3 2.2"/><circle cx="9.8" cy="10.5" r="1" fill="currentColor" stroke="none"/></svg>',
+  del: '<svg viewBox="0 0 20 20"><path d="M4 6h12M8 6V4h4v2M5.6 6l.9 11h7l.9-11M8.5 9v5.5M11.5 9v5.5"/></svg>',
+  plus: '<svg viewBox="0 0 20 20"><path d="M10 5.5v9M5.5 10h9"/></svg>',
+  caret: '<svg viewBox="0 0 20 20"><path d="M6 8.5l4 4 4-4" fill="currentColor"/></svg>',
+};
+function openPw(mode) {
+  pw.on = mode === "extract" ? "split" : mode;
+  if (pw.on === "split") pw.split = mode === "extract" ? "extract" : "split";
+  pw.view = "files"; pw.sel.clear();
+  document.body.dataset.pw = pw.on;
+  closePanelTool(); openSide(false);
+  render();
+}
+function closePw() { pw.on = ""; pw.sel.clear(); document.body.dataset.pw = ""; render(); }
+// files = runs of pages that come from the same file, in document order
+function pwRuns() {
+  const runs = [];
+  docPages.forEach((p, i) => { const r = runs[runs.length - 1]; if (r && r.src === p.src) r.idx.push(i); else runs.push({ src: p.src, idx: [i] }); });
+  return runs;
+}
+// Split: the pages between cuts (a cut is stored as the page it comes after)
+function pwGroups() {
+  const out = [[]];
+  docPages.forEach((p, i) => { out[out.length - 1].push(i); if (pw.cuts.has(p.key) && i < docPages.length - 1) out.push([]); });
+  return out.filter((g) => g.length);
+}
+const pwSelIdx = () => docPages.map((p, i) => pw.sel.has(p.key) ? i : -1).filter((i) => i >= 0);
+const pwName = (si) => (docSources[si] && docSources[si].name) || "document";
+function pwTagHtml(si) { const [bg, fg] = PW_TAGS[si % PW_TAGS.length]; return `<div class="pw-tag" style="background:${bg};color:${fg}" title="${escapeHTML(pwName(si))}">${escapeHTML(pwName(si))}</div>`; }
+function pwCard(p, i, opts = {}) {
+  const st = opts.stack ? " stack" : "", chk = opts.check ? `<span class="pw-chk${opts.checked ? " on" : ""}" role="checkbox" aria-checked="${!!opts.checked}" title="Select"></span>` : "";
+  const k = Math.min(144 / p.w, 190 / p.h), w = Math.round(p.w * k), h = Math.round(p.h * k);   // the page's shape even before its picture arrives
+  return `<div class="pw-card${st}">${chk}<img data-pk="${p.key}" src="${thumbNow(p) || BLANK_PAGE}" alt="Page ${i + 1}" draggable="false" style="--w:${w}px;--h:${h}px"></div>`;
+}
+function pwAddTile(at) {
+  return `<div class="pw-addtile" data-at="${at}"><span class="pw-addi">${PW_I.add}</span><span>Add <b>PDF</b>, <b>image</b>, <b>Word</b>, <b>Excel</b>, and <b>PowerPoint</b> files</span></div>`;
+}
+function pwPick(at) {
+  const inp = document.createElement("input"); inp.type = "file"; inp.multiple = true;
+  inp.accept = "application/pdf,.pdf,image/*,.docx,.xlsx,.pptx,.doc,.xls,.ppt,.odt,.ods,.odp,.rtf,.txt,.csv,.html,.htm,.md";
+  inp.onchange = () => { if (inp.files && inp.files.length) addFilesToDoc([...inp.files], at); };
+  inp.click();
+}
+function renderPw() {
+  const host = $("pw"); if (!host) return;
+  const scroll = host.querySelector(".pw-body") ? host.querySelector(".pw-body").scrollTop : 0;
+  const merge = pw.on === "merge", extract = !merge && pw.split === "extract", N = docPages.length;
+  const live = new Set(docPages.map((p) => p.key));
+  [...pw.sel].forEach((k) => { if (!live.has(k)) pw.sel.delete(k); });
+  const selN = pw.sel.size, groups = merge ? null : pwGroups();
+  const seg = merge
+    ? `<div class="pw-seg"><button data-v="files" class="${pw.view === "files" ? "on" : ""}">${PW_I.files}Files</button><button data-v="pages" class="${pw.view === "pages" ? "on" : ""}">${PW_I.pages}Pages</button></div>`
+    : `<div class="pw-seg"><button data-s="split" class="${!extract ? "on" : ""}">${PW_I.cut}Split</button><button data-s="extract" class="${extract ? "on" : ""}">${PW_I.extract}Extract</button></div>`;
+  const parts = groups ? groups.length : 0;
+  const go = merge ? `Download merged PDF${N ? ` (${N} page${N === 1 ? "" : "s"})` : ""}`
+    : extract ? (selN ? `Extract ${selN} page${selN === 1 ? "" : "s"}` : "Tick pages to extract")
+    : (parts > 1 ? `Split into ${parts} files` : "Click ✂ to cut");
+  const goOff = merge ? !N : extract ? !selN : parts < 2;
+  const extra = !merge && !extract ? `<div class="pw-sp"></div><button class="pw-link" data-a="cutall" title="Cut after every page: each page becomes its own file">Cut every page</button>${pw.cuts.size ? '<button class="pw-link" data-a="clearcuts">Clear cuts</button>' : ""}` : '<div class="pw-sp"></div>';
+  let body = "";
+  if (merge && pw.view === "files") {
+    const runs = pwRuns();
+    runs.forEach((r, k) => {
+      const p = docPages[r.idx[0]], on = r.idx.every((i) => pw.sel.has(docPages[i].key));
+      if (k) body += `<button class="pw-ins" data-at="${r.idx[0]}" title="Add files here">${PW_I.plus}</button>`;
+      body += `<div class="pw-item pw-file" draggable="true" data-run="${k}">${pwCard(p, r.idx[0], { stack: r.idx.length > 1, check: true, checked: on })}${pwTagHtml(r.src)}<div class="pw-sub">${r.idx.length} page${r.idx.length === 1 ? "" : "s"}</div></div>`;
+    });
+    if (runs.length) body += `<button class="pw-ins" data-at="${N}" title="Add files here">${PW_I.plus}</button>`;
+    body += pwAddTile(N);
+  } else if (merge || extract) {
+    docPages.forEach((p, i) => {
+      body += `<div class="pw-item pw-page" draggable="true" data-i="${i}">${pwCard(p, i, { check: true, checked: pw.sel.has(p.key) })}${pwTagHtml(p.src)}<div class="pw-sub">${i + 1}</div></div>`;
+    });
+    body += pwAddTile(N);
+  } else {
+    groups.forEach((g, gi) => {
+      body += `<div class="pw-group${groups.length > 1 ? " cut" : ""}">`;
+      g.forEach((i, k) => {
+        const p = docPages[i];
+        body += `<div class="pw-item pw-page" draggable="true" data-i="${i}">${pwCard(p, i)}${pwTagHtml(p.src)}<div class="pw-sub">${i + 1}</div></div>`;
+        if (k < g.length - 1) body += `<div class="pw-cutline"><button class="pw-cut${pw.snip === p.key ? " snip" : ""}" data-after="${p.key}" title="Cut here: pages ${i + 1} and ${i + 2} go into separate files">${PW_I.cut}</button></div>`;
+      });
+      body += "</div>";
+      if (gi < groups.length - 1) { const last = docPages[g[g.length - 1]]; body += `<div class="pw-cutline on"><button class="pw-cut on${pw.snip === last.key ? " snip" : ""}" data-after="${last.key}" title="Join these pages again">${PW_I.cut}</button></div>`; }
+    });
+    body += pwAddTile(N);
+  }
+  host.innerHTML =
+    `<div class="pw-head"><button class="pw-back" data-a="back" title="Back to all pages">${PW_I.back}</button><h2>${merge ? "Merge" : "Split"}</h2><div class="pw-sp"></div>` +
+    `<button class="pw-go" data-a="go"${goOff ? " disabled" : ""}>${go}</button></div>` +
+    `<div class="pw-bar">${seg}<span class="pw-div"></span>` +
+    `<div class="pw-dd"><button class="pw-btn" data-a="addmenu">${PW_I.add}Add${PW_I.caret}</button><div class="pw-menu"><button data-a="addfiles">Files from this device…</button><button data-a="blank">Blank page</button></div></div><span class="pw-div"></span>` +
+    `<div class="pw-grp"><button data-a="rotl" title="Rotate ${selN ? "selected" : "all"} pages left">${PW_I.rotl}</button><button data-a="rotr" title="Rotate ${selN ? "selected" : "all"} pages right">${PW_I.rotr}</button><button data-a="del" title="Delete selected"${selN ? "" : " disabled"}>${PW_I.del}</button></div>${extra}</div>` +
+    (merge || extract ? `<label class="pw-all"><span class="pw-chk${N && selN === N ? " on" : ""}"></span>Select all${selN ? `<small>${selN} selected</small>` : ""}</label>` : `<div class="pw-hint">${parts > 1 ? `${parts} files: ${groups.map((g) => g.length === 1 ? `page ${g[0] + 1}` : `pages ${g[0] + 1}-${g[g.length - 1] + 1}`).join(" · ")}` : "Click a ✂ between two pages to cut the document there."}</div>`) +
+    `<div class="pw-body"><div class="pw-grid${merge ? "" : " split"}">${body}</div></div>`;
+  pw.snip = "";
+  const bodyEl = host.querySelector(".pw-body"); bodyEl.scrollTop = scroll;
+  wirePw(host);
+  observeThumbs(host, bodyEl);
+}
+function pwToggle(keys, on) { keys.forEach((k) => { if (on) pw.sel.add(k); else pw.sel.delete(k); }); renderPw(); }
+function pwMoveRun(from, to) {   // move file run `from` before run `to` (to = runs.length: to the end)
+  const runs = pwRuns(); if (from === to || from + 1 === to) return;
+  const order = [];
+  runs.forEach((r, k) => { if (k === to) order.push(...runs[from].idx); if (k !== from) order.push(...r.idx); });
+  if (to >= runs.length) order.push(...runs[from].idx);
+  applyPageOrder(order); render();
+}
+function wirePw(host) {
+  host.querySelectorAll("[data-v]").forEach((b) => b.onclick = () => { pw.view = b.dataset.v; renderPw(); });
+  host.querySelectorAll("[data-s]").forEach((b) => b.onclick = () => { pw.split = b.dataset.s; pw.sel.clear(); renderPw(); });
+  host.querySelectorAll("[data-a]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    const a = b.dataset.a, sel = pwSelIdx(), all = docPages.map((_, i) => i);
+    if (a === "back") closePw();
+    else if (a === "go") pwGo();
+    else if (a === "addmenu") b.parentNode.classList.toggle("open");
+    else if (a === "addfiles") { b.closest(".pw-dd").classList.remove("open"); pwPick(docPages.length); }
+    else if (a === "blank") { b.closest(".pw-dd").classList.remove("open"); addBlankPage(); }
+    else if (a === "rotl" || a === "rotr") rotatePages(sel.length ? sel : all, a === "rotl" ? -1 : 1);
+    else if (a === "del") { if (sel.length >= docPages.length) { toast("A document needs at least one page."); return; } pw.sel.clear(); deletePages(sel); }
+    else if (a === "cutall") { docPages.forEach((p, i) => { if (i < docPages.length - 1) pw.cuts.add(p.key); }); renderPw(); }
+    else if (a === "clearcuts") { pw.cuts.clear(); renderPw(); }
+  });
+  host.onclick = (e) => { if (!e.target.closest(".pw-dd")) host.querySelectorAll(".pw-dd.open").forEach((d) => d.classList.remove("open")); };
+  const all = host.querySelector(".pw-all");
+  if (all) all.onclick = (e) => { e.preventDefault(); const on = pw.sel.size !== docPages.length; pwToggle(docPages.map((p) => p.key), on); };
+  host.querySelectorAll(".pw-cut").forEach((b) => b.onclick = () => {
+    const k = b.dataset.after;
+    if (pw.cuts.has(k)) pw.cuts.delete(k); else pw.cuts.add(k);
+    pw.snip = k; renderPw();
+  });
+  host.querySelectorAll(".pw-ins").forEach((b) => b.onclick = () => pwPick(+b.dataset.at));
+  host.querySelectorAll(".pw-addtile").forEach((t) => {
+    t.onclick = () => pwPick(+t.dataset.at);
+    t.ondragover = (e) => { e.preventDefault(); t.classList.add("over"); };
+    t.ondragleave = () => t.classList.remove("over");
+    t.ondrop = (e) => {
+      e.preventDefault(); e.stopPropagation(); t.classList.remove("over");
+      if (e.dataTransfer.files && e.dataTransfer.files.length) addFilesToDoc([...e.dataTransfer.files], +t.dataset.at);
+      else { const d = e.dataTransfer.getData("text/x-pw"); if (d) pwDropOn(JSON.parse(d), null); }
+    };
+  });
+  host.querySelectorAll(".pw-item").forEach((el) => {
+    const run = el.dataset.run != null ? +el.dataset.run : null, i = el.dataset.i != null ? +el.dataset.i : null;
+    const keys = () => run != null ? pwRuns()[run].idx.map((x) => docPages[x].key) : [docPages[i].key];
+    const chk = el.querySelector(".pw-chk");
+    el.onclick = () => {   // a click anywhere on a card ticks or unticks it (Split has no ticks: the scissors do the work)
+      if (!chk) return;
+      const ks = keys(); pwToggle(ks, !ks.every((k) => pw.sel.has(k)));
+    };
+    el.ondblclick = () => { if (i != null) { closePw(); curPage = i; doc = docPages[i]; setEdMode("edit"); setCurPage(i, true); } };
+    el.ondragstart = (e) => { e.dataTransfer.setData("text/x-pw", JSON.stringify(run != null ? { run } : { i })); e.dataTransfer.effectAllowed = "move"; el.classList.add("dragging"); };
+    el.ondragend = () => el.classList.remove("dragging");
+    el.ondragover = (e) => { e.preventDefault(); el.classList.add("drop"); };
+    el.ondragleave = () => el.classList.remove("drop");
+    el.ondrop = (e) => {
+      e.preventDefault(); e.stopPropagation(); el.classList.remove("drop");
+      if (e.dataTransfer.files && e.dataTransfer.files.length) { addFilesToDoc([...e.dataTransfer.files], run != null ? pwRuns()[run].idx[0] : i); return; }
+      const d = e.dataTransfer.getData("text/x-pw"); if (d) pwDropOn(JSON.parse(d), run != null ? { run } : { i });
+    };
+  });
+  // dropping files anywhere in the workspace adds them at the end
+  const bodyEl = host.querySelector(".pw-body");
+  bodyEl.ondragover = (e) => { if ([...(e.dataTransfer.types || [])].includes("Files")) e.preventDefault(); };
+  bodyEl.ondrop = (e) => { if (e.dataTransfer.files && e.dataTransfer.files.length) { e.preventDefault(); e.stopPropagation(); addFilesToDoc([...e.dataTransfer.files]); } };
+}
+function pwDropOn(src, dst) {
+  if (src.run != null) { const runs = pwRuns(); pwMoveRun(src.run, dst && dst.run != null ? dst.run : runs.length); return; }
+  if (src.i != null) movePage(src.i, dst && dst.i != null ? dst.i : docPages.length - 1);
+}
+async function ensureZip() {
+  if (!window.JSZip) await new Promise((res, rej) => { const sc = document.createElement("script"); sc.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"; sc.onload = res; sc.onerror = () => rej(new Error("Could not load the zip library")); document.head.appendChild(sc); });
+  return window.JSZip;
+}
+let pwBusy = false;
+async function pwGo() {
+  if (pwBusy) return;
+  if (pw.on === "merge") {   // the same PDF as the Download button gives, with the Download panel's look and quality
+    snapshotNow(); pwBusy = true; exportLook = dlOpts.look;
+    try { await exportPDF(); } finally { exportLook = null; pwBusy = false; }
+    return;
+  }
+  const extract = pw.split === "extract";
+  const groups = extract ? [pwSelIdx()] : pwGroups();
+  if (!groups[0] || !groups[0].length || (!extract && groups.length < 2)) { toast(extract ? "Tick the pages to extract first." : "Click a ✂ between two pages to cut there first."); return; }
+  pwBusy = true; const btn = document.querySelector("#pw .pw-go"); if (btn) { btn.disabled = true; btn.textContent = extract ? "Extracting…" : "Splitting…"; }
+  try {
+    snapshotNow();
+    const L = await pdfLibReady();
+    const { pdf } = await buildOutputPdf({ flat: true });   // the document with your edits, built once; each part copies its pages from it
+    try { pdf.getForm().updateFieldAppearances(); pdf.getForm().flatten(); } catch (_) {}   // filled-in fields fixed in place, as in Download
+    const base = baseName(), files = [];
+    for (let k = 0; k < groups.length; k++) {
+      const g = groups[k], out = await L.PDFDocument.create();
+      (await out.copyPages(pdf, g)).forEach((pg) => out.addPage(pg));
+      const span = g.length === 1 ? `page${g[0] + 1}` : extract ? `${g.length}pages` : `pages${g[0] + 1}-${g[g.length - 1] + 1}`;
+      files.push([extract ? `${base}-extract.pdf` : `${base}-part${k + 1}-${span}.pdf`, await applyPdfMeta(out).save(saveOpts())]);
+    }
+    if (files.length === 1) download(files[0][0], new Blob([files[0][1]], { type: "application/pdf" }));
+    else {
+      const Z = await ensureZip(), zip = new Z();
+      files.forEach(([n, b]) => zip.file(n, b));
+      download(`${base}-split.zip`, await zip.generateAsync({ type: "blob" }));
+    }
+    toast(extract ? `Saved ${groups[0].length} page${groups[0].length === 1 ? "" : "s"} as ${files[0][0]}.` : `Saved ${files.length} PDFs in ${base}-split.zip.`);
+  } catch (e) { toast((extract ? "Extract" : "Split") + " failed: " + (e.message || e)); }
+  finally { pwBusy = false; renderPw(); }
 }
 
 // ---- the PDF's own text: find it, edit it in its own font, remove it -----------------
@@ -1542,8 +1863,9 @@ function setCurPage(i, scroll) {
 }
 function renderThumbs() {
   const host = $("ed_thumbs"); if (!host) return;
-  host.innerHTML = docPages.map((p, i) => `<button class="thumb${i === curPage ? " cur" : ""}" data-page="${i}" title="Page ${i + 1}"><img src="${p.url}" alt="" style="aspect-ratio:${p.w}/${p.h}">${i + 1}</button>`).join("");
+  host.innerHTML = docPages.map((p, i) => `<button class="thumb${i === curPage ? " cur" : ""}" data-page="${i}" title="Page ${i + 1}"><img data-pk="${p.key}" src="${thumbNow(p) || BLANK_PAGE}" alt="" style="aspect-ratio:${p.w}/${p.h}">${i + 1}</button>`).join("");
   host.querySelectorAll(".thumb").forEach((b) => b.onclick = () => setCurPage(+b.dataset.page, true));
+  observeThumbs(host, host.closest(".rail") || null);
 }
 function setView(single) {
   viewSingle = !!single;
@@ -1566,7 +1888,7 @@ function zoomStep(dir) {
 }
 
 function renderDoc() {
-  if (edMode === "organize") { renderOrganize(); renderThumbs(); updateEdChrome(); renderProps(); if (holdSnap) scheduleSnapshot(); else snapshotNow(); return; }
+  if (edMode === "organize") { if (pw.on) renderPw(); else renderOrganize(); renderThumbs(); updateEdChrome(); renderProps(); if (holdSnap) scheduleSnapshot(); else snapshotNow(); return; }
   const host = $("ed_pages"); if (!host) return;
   const list = viewSingle ? [curPage] : docPages.map((_, i) => i);
   const widths = list.map((i) => pageDispW(i));
@@ -2147,6 +2469,7 @@ function closeDropdowns() { document.querySelectorAll(".dd.open").forEach((d) =>
 function openSide(on) { document.body.classList.toggle("side-open", !!on); $("ed_side_btn") && $("ed_side_btn").classList.toggle("on", !!on); }
 function setEdMode(m) {
   edMode = m; document.body.dataset.edmode = m;
+  pw.on = ""; document.body.dataset.pw = "";
   document.querySelectorAll("#ed_tabs .tab").forEach((t) => t.classList.toggle("on", t.dataset.edmode === m));
   closePanelTool(); closePops(); document.body.classList.remove("wmpanel");
   edTool = "select"; selId = null; selDraw = null;
@@ -2157,6 +2480,7 @@ function setEdTool(t) {
   closeDropdowns(); closePops();
   if (!t) t = "select";
   if (t.startsWith("panel:")) { openPanelTool(t.slice(6)); return; }
+  if (t.startsWith("pw:")) { openPw(t.slice(3)); return; }
   if (t === "image") { setEdTool("select"); pickImageForDoc(); return; }
   if (t === "wm") { openWmPanel(); return; }
   if (t === "drawsig") { openDrawPad("sig"); return; }
@@ -2182,7 +2506,7 @@ const TOOL_MAP = {
   watermark: ["edit", "panel:watermark"], crop: ["edit", "panel:crop"], scanlook: ["edit", "select", "scan"],
   sign: ["sign", "sig"], fillsign: ["sign", "text"], adddate: ["sign", "date"], forms: ["sign", "field:text"], fillform: ["sign", "formview"],
   write: ["sign", "handwrite"], handwrite: ["sign", "handwrite"], signature: ["sign", "sig", "signature"], sigimport: ["sign", "sig", "sigimport"],
-  merge: ["organize"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "panel:split"], extract: ["organize", "panel:extract"], number: ["organize", "panel:number"],
+  merge: ["organize", "pw:merge"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "pw:split"], extract: ["organize", "pw:extract"], number: ["organize", "panel:number"],
   unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"], pdffonts: ["edit", "fonts"],
   compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], pdf2word: ["convert", "panel:pdfword"], fillweb: ["sign", "fillweb"], enhance: ["convert", "panel:enhance"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"],
 };
@@ -3111,6 +3435,7 @@ async function composeCanvas() {
 let dlCapture = null;
 function download(name, blob) {
   if (dlCapture) { dlCapture.blob = blob; dlCapture.name = name; return; }
+  if (Array.isArray(window.__cal2Capture)) { window.__cal2Capture.push({ name, blob }); return; }   // automated tests collect downloads here
   if (!blob || !blob.size) { toast("Nothing to save yet — wait for the page or writing to finish drawing, then try again."); return; }   // an empty canvas gives no picture
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }
 let toastTimer = 0;
