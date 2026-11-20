@@ -986,12 +986,38 @@ function registerPdfFont(si, fontName, page) {
     if (tu._map) { for (const code in tu._map) add(+code, tu._map[code]); }
     else if (tu.firstChar != null) { for (let c = tu.firstChar; c <= tu.lastChar; c++) add(c, String.fromCharCode(c)); }
     if (Object.keys(info.map).length) info.loadedName = fo.loadedName;
+    // the same font again, answering to every weight: the line can then ask for the weight of its fallback
+    // font (for characters the PDF's copy lacks) without the PDF's own letters being drawn fake-bold
+    if (info.loadedName && fo.data) {
+      try { const ff = new FontFace(info.loadedName + "_w", fo.data, { weight: "1 1000" }); document.fonts.add(ff); ff.load().catch(() => {}); info.anyWeight = info.loadedName + "_w"; } catch (_) {}
+    }
   }
   info.visual = info.glyphless || (!info.loadedName && !info.fallback.known);   // no font of its own and an unknown name
   pdfFonts.set(key, info);
   return key;
 }
 const pfontInfo = (it) => (it && it.pfont ? pdfFonts.get(it.pfont) : null);
+// A PDF font with no usable name (e.g. "CIDFont+F1") says nothing about the font it was made from, so a
+// character its embedded copy lacks (a "4" typed into "2021") would come out in a plain stand-in. Its own
+// drawing of the line is compared with the candidate fonts instead, so those characters match it in
+// family, weight and slant.
+function matchMissingGlyphs(info, str) {
+  if (!info || !info.loadedName || info.fallback.known || !String(str || "").trim()) return Promise.resolve(null);
+  if (!info.fbMatch) info.fbMatch = (async () => {
+    const PX = 64, disp = toFontStr(info, str), font = `${PX}px "${info.loadedName}"`;
+    try { await document.fonts.load(font, disp); } catch (_) {}
+    measureCtx = measureCtx || document.createElement("canvas").getContext("2d");
+    measureCtx.font = font; try { measureCtx.letterSpacing = "0px"; } catch (_) {}
+    const c = document.createElement("canvas"); c.width = Math.ceil(measureCtx.measureText(disp).width + PX); c.height = PX * 2;
+    const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#000"; g.font = font; g.textBaseline = "alphabetic"; g.fillText(disp, PX / 2, PX * 1.4);
+    const best = (await identifyFont(c, str))[0]; if (!best) return null;
+    const fe = fontEntry(best.family);
+    info.fallback = { ...info.fallback, css: fe ? fe.css : `"${best.family}", sans-serif`, family: best.family, weight: best.weight, style: best.style, known: true, matched: true };
+    return best;
+  })().catch(() => null);
+  return info.fbMatch;
+}
 function toFontStr(info, s) { if (!info || !info.loadedName) return s; let o = ""; for (const ch of String(s)) o += info.map[ch] || ch; return o; }
 function fromFontStr(info, s) { if (!info || !info.loadedName) return s; let o = ""; for (const ch of String(s)) o += info.inv[ch] || ch; return o; }
 function getTextBlocks(pi) {
@@ -1124,13 +1150,25 @@ async function createTextEdit(pi, b, bid, cx, cy) {
   render();
   if (vis) toast(`Closest font: ${vis.best.family}${vis.best.weight >= 700 ? " Bold" : ""}${vis.best.style === "italic" ? " Italic" : ""} (${vis.best.pct}% match) — other close matches are at the top of the font list.`);
   requestAnimationFrame(() => { const el = document.querySelector(`#ed_pages .ditem[data-id="${it.id}"]`); if (el) startTboxEdit(it, el, cx, cy); });
+  if (!vis && info && info.loadedName && !info.fallback.known) matchMissingGlyphs(info, b.str).then(async (best) => {
+    if (!best) return;
+    ensureFont(best.family);
+    delete it.ls; await matchLetterSpacing(it, b);   // characters such as spaces are now drawn in the matched font
+    if (editingId !== it.id) { render(); return; }
+    // being typed in: restyle the line in place, so the caret stays where it is
+    const td = document.querySelector(`#ed_pages .ditem[data-id="${it.id}"] .tbtext`); if (!td) return;
+    const f = tboxFont(it), fsPx = parseFloat(td.style.fontSize) || 0, tl = teditLine(it, f, fsPx);
+    Object.assign(td.style, { fontFamily: f.css, fontWeight: f.weight, fontStyle: f.style, letterSpacing: (it.ls || 0) + "em", lineHeight: tl.lh + "px", transform: Math.abs(tl.dy) > 0.05 ? `translateY(${tl.dy}px)` : "" });
+  });
 }
 // Letter spacing that makes the line exactly as wide as the original, so the edited text sits where it was.
 let measureCtx = null;
 async function matchLetterSpacing(it, b) {
   try {
-    const n = [...(it.text || "")].length; if (n < 3 || !(b.fsN > 0)) return;
-    const f = tboxFont(it), font = `${f.style} ${f.weight} 100px ${f.css}`, txt = tboxDisplay(it);
+    // measured on the line as it was in the PDF (it may have been typed over since)
+    const orig = b.str != null ? b.str : it.text || "", g = glyphInfo(it);
+    const n = [...orig].length; if (n < 3 || !(b.fsN > 0)) return;
+    const f = tboxFont(it), font = `${f.style} ${f.weight} 100px ${f.css}`, txt = g ? toFontStr(g, orig) : orig;
     await Promise.race([document.fonts.load(font, txt), new Promise((r) => setTimeout(r, 900))]);
     measureCtx = measureCtx || document.createElement("canvas").getContext("2d");
     measureCtx.font = font; try { measureCtx.letterSpacing = "0px"; } catch (_) {}
@@ -1659,7 +1697,11 @@ function tboxFont(it) {
   const info = pfontInfo(it);
   if (info) {
     const fb = info.fallback;
-    if (info.loadedName && !it.ffOverride) return { css: `"${info.loadedName}", ${fb.css}`, weight: it.bold ? 700 : 400, style: it.italic ? "italic" : "normal", synth: !it.bold && !it.italic };
+    if (info.loadedName && !it.ffOverride) {
+      // as in the PDF: its own letters as they are, anything they lack in the fallback's weight
+      if (it.bold == null && it.italic == null && info.anyWeight) return { css: `"${info.anyWeight}", ${fb.css}`, weight: fb.weight, style: "normal", synth: true };
+      return { css: `"${info.loadedName}", ${fb.css}`, weight: it.bold ? 700 : 400, style: it.italic ? "italic" : "normal", synth: !it.bold && !it.italic };
+    }
     if (!it.ffOverride) return { css: fb.css, weight: it.bold != null ? (it.bold ? 700 : 400) : fb.weight, style: it.italic != null ? (it.italic ? "italic" : "normal") : fb.style };
   }
   const fe = fontByKey(it.ff); if (fe.google) ensureFont(fe.name);
@@ -1667,6 +1709,25 @@ function tboxFont(it) {
   return { css: fe.css, weight: it.bold ? 700 : 400, style: it.italic ? "italic" : "normal" };
 }
 const tboxDisplay = (it) => { const g = glyphInfo(it); return g ? toFontStr(g, it.text || "") : (it.text || ""); };
+// The ascent / descent (in em) the browser really draws a font with: its first available face. A PDF's own
+// numbers for a font often differ (0.75 in the text layer, 0.95 in the font file), and lining edited text
+// up by the wrong one moves it off the line.
+const fontMetricCache = new Map();
+function cssFontMetrics(f) {
+  const key = `${f.style} ${f.weight} 100px ${f.css}`;
+  const hit = fontMetricCache.get(key); if (hit) return hit;
+  measureCtx = measureCtx || document.createElement("canvas").getContext("2d");
+  measureCtx.font = key;
+  const t = measureCtx.measureText("Hg"), m = { a: (t.fontBoundingBoxAscent || 90) / 100, d: (t.fontBoundingBoxDescent || 22) / 100 };
+  let ready = false; try { ready = document.fonts.check(key, "Hg"); } catch (_) {}
+  if (ready) fontMetricCache.set(key, m);   // not loaded yet: measured again once it is
+  return m;
+}
+// Edited PDF text: one line exactly as tall as the font, moved so its baseline lands on the original one.
+function teditLine(it, f, fsPx) {
+  const m = cssFontMetrics(f);
+  return { lh: (m.a + m.d) * fsPx, dy: ((it.asc || 0.86) - m.a) * fsPx };
+}
 function shapeSVG(it, w, h) {
   const sw = it.color === "none" ? 0 : Math.max(1, (it.sw || 3 / REF_W) * (w / it.nw)), fill = it.fill && it.fill !== "none" ? it.fill : "none", c = it.color === "none" ? "none" : itemColor(it);
   const inner = it.shape === "ellipse"
@@ -1682,8 +1743,8 @@ function itemEl(it, dispW, dispH) {
   el.dataset.id = it.id;
   el.style.cssText = `left:${it.nx * dispW}px;top:${it.ny * dispH}px;width:${w}px;height:${h}px;opacity:${it.opacity ?? 1};color:${itemColor(it)}`;
   if (it.tbox) {
-    const f = tboxFont(it), fsPx = it.fs * dispW, pad = it.tedit ? 0 : Math.round(fsPx * 0.2);
-    el.innerHTML = `<div class="tbtext" style="font-family:${f.css.replace(/"/g, "&quot;")};font-size:${fsPx}px;font-weight:${f.weight};font-style:${f.style};${f.synth ? "font-synthesis:none;" : ""}line-height:${it.lh || (it.tedit ? "normal" : 1.2)};letter-spacing:${it.ls || 0}em;color:${itemColor(it)};background:${it.bg && it.bg !== "none" ? it.bg : "transparent"};text-align:${it.align || "left"};padding:${pad}px;white-space:${it.tedit ? "pre" : "pre-wrap"}">${escapeHTML(tboxDisplay(it))}</div>`;
+    const f = tboxFont(it), fsPx = it.fs * dispW, pad = it.tedit ? 0 : Math.round(fsPx * 0.2), tl = it.tedit ? teditLine(it, f, fsPx) : null;
+    el.innerHTML = `<div class="tbtext" style="font-family:${f.css.replace(/"/g, "&quot;")};font-size:${fsPx}px;font-weight:${f.weight};font-style:${f.style};${f.synth ? "font-synthesis:none;" : ""}line-height:${tl ? tl.lh + "px" : it.lh || 1.2};${tl && Math.abs(tl.dy) > 0.05 ? `transform:translateY(${tl.dy}px);` : ""}letter-spacing:${it.ls || 0}em;color:${itemColor(it)};background:${it.bg && it.bg !== "none" ? it.bg : "transparent"};text-align:${it.align || "left"};padding:${pad}px;white-space:${it.tedit ? "pre" : "pre-wrap"}">${escapeHTML(tboxDisplay(it))}</div>`;
   } else if (it.type === "sig") el.innerHTML = it.svg.replace("<svg ", '<svg preserveAspectRatio="none" style="width:100%;height:100%;display:block;pointer-events:none" ');
   else if (it.type === "img") el.innerHTML = `<img src="${it.src}" alt="" draggable="false" style="width:100%;height:100%;display:block;pointer-events:none">`;
   else if (it.type === "shape") el.innerHTML = shapeSVG(it, w, h);

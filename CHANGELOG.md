@@ -41,6 +41,8 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 - Duplicate-page detection and sort by page number used an old way of calling the OCR reader after the update merge and failed.
 - Choosing a paper size failed on a page with nothing on it; export errors now show a message instead of "Building PDF…".
 - The handwriting pad's style-name box ran off the screen on phones.
+- **Edited PDF text stays on its line.** Opening a line with Edit text could move it up or down and make it look bigger: the editor lined it up by the ascent the PDF's text layer gives (often 0.75) while the browser draws the font with the ascent in the font file (often 0.95). The line is now placed by the font it is really drawn with, so its baseline lands exactly on the original - on screen and in the download.
+- **Typed characters match the line's weight.** A character the PDF's embedded font doesn't contain (a "4" typed into "2021" when the document has no bold 4) was drawn in plain regular Arimo. Fonts with no usable name ("CIDFont+F1") are now matched from their own drawing of the line, so missing characters come out in the closest family, bold when the line is bold (Carlito Bold for Calibri Bold), and the letter spacing is refitted so the line keeps its width.
 
 ## 2026-11-19
 
