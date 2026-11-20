@@ -7,6 +7,9 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 
 ## 2026-11-20
 
+### Downloads & exports
+- **Live download preview:** the Download panel shows the first page exactly as it will be saved - built by the real download, so the look, quality, watermark, page numbers, paper size, turn and page choice all show as you change them - with its size in inches or pixels and about how big the file is per page. Click it for a bigger look. Word and text downloads say there's no picture preview.
+
 ### OCR & fonts
 - **Edit scanned text in a matching font.** With Edit text on a scanned page (or a page with an OCR text layer, or a PDF font with an unknown name), the page is read with OCR and each line opens as editable text in the closest matching font. The match compares the line's ink with 39 font families in regular, bold and italic; tested 32 of 32 on sharp text and 23 of 32 exact (28 in the top three) on small, blurry, noisy text.
 - **Closest matches first in the font list,** each with a match percentage; picking one also sets its weight and slant.

@@ -295,6 +295,13 @@
   .org-tools .ot-busy{font-size:12.5px;color:var(--muted);padding:0 6px}.org-tools .ot-ok{font-size:12.5px;color:#2e9d5b;padding:0 6px}
   .og .ogdup{position:absolute;left:6px;right:6px;bottom:36px;background:#e5484d;color:#fff;font-size:11px;padding:2px 6px;border-radius:6px;text-align:center;pointer-events:none}
   .dl-panel{padding:12px!important;min-width:300px;max-width:min(360px,calc(100vw - 20px));max-height:calc(100vh - 90px);overflow:auto}
+  .dl-panel .dl-prev{position:relative;height:210px;margin:0 0 6px;border-radius:8px;background:var(--surface2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:zoom-in}
+  .dl-panel .dl-prev canvas{max-width:calc(100% - 16px);max-height:194px;width:auto;height:auto;box-shadow:0 1px 6px rgba(0,0,0,.25);background:#fff}
+  .dl-panel .dl-prev.busy canvas{opacity:.45}.dl-panel .dl-prev.busy::after{content:"";position:absolute;width:22px;height:22px;border:3px solid var(--accent);border-right-color:transparent;border-radius:50%;animation:dlspin .8s linear infinite}
+  .dl-panel .dl-prev.none{display:none}.dl-panel .dl-prev-meta{font-size:11.5px;color:var(--muted);margin:0 0 10px;min-height:15px}
+  @keyframes dlspin{to{transform:rotate(360deg)}}
+  .dl-prev-big{position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;cursor:zoom-out;padding:20px}
+  .dl-prev-big img{max-width:100%;max-height:100%;box-shadow:0 10px 40px rgba(0,0,0,.5);background:#fff}
   .dl-panel .dlr{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px}.dl-panel .dlr span{width:70px;flex:none;color:var(--muted)}
   .dl-panel select{min-width:0}.dl-panel .dl-more .dlr input[type=text]{flex:1;height:30px;min-width:0}.dl-panel .dl-more .dlchk{margin:0 0 8px 80px}
   .dl-panel .dl-reset{background:none;border:0;color:var(--muted);font-size:12px;text-decoration:underline;cursor:pointer;padding:2px 0}.dl-panel select{flex:1;height:32px}
@@ -623,6 +630,8 @@
       <div class="dd" data-dd="dl">
         <button class="btn-blue" data-ddbtn="dl"><svg class="i" viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M4 17h12"/></svg><span class="tl">Download</span></button>
         <div class="ddm right dl-panel" id="dl_panel">
+          <div class="dl-prev" id="dl_prev" title="Click for a bigger look"><canvas id="dl_prev_c"></canvas></div>
+          <div class="dl-prev-meta" id="dl_prev_meta"></div>
           <label class="dlr"><span>Format</span><select id="dl_format"><option value="pdf">PDF</option><option value="fill">PDF — keep it editable</option><option value="docx">Word (.docx)</option><option value="png">PNG image (this page)</option><option value="jpg">JPG image (this page)</option><option value="zip">All pages as pictures (.zip)</option><option value="txt">Text only (.txt)</option></select></label>
           <label class="dlr" id="dl_look_row"><span>Look</span><select id="dl_look"><option value="clean">Clean (as is)</option><option value="light">Slightly scanned</option><option value="scanned">Scanned</option><option value="gray">Grayscale (as is, in grey)</option><option value="photocopy">Photocopy (black &amp; white)</option><option value="bwscan">Black &amp; white scan (smallest file)</option><option value="custom">My scan settings (side panel)</option></select></label>
           <label class="dlr" id="dl_quality_row"><span>Quality</span><select id="dl_quality"><option value="exact">Exact (no quality loss)</option><option value="balanced">Balanced</option><option value="small">Smallest file</option></select></label>
@@ -1091,7 +1100,7 @@ jumps over the lazy dog</textarea>
 
 <div id="toast" role="status" aria-live="polite"></div>
 
-<script type="module" src="./app.js?v=80"></script>
+<script type="module" src="./app.js?v=81"></script>
 <script type="module" src="./shell.js?v=14"></script>
 </body>
 </html>

@@ -436,6 +436,7 @@ async function exportPageList() {
     if (keep.length) idx = keep;
   }
   if (!idx.length) toast("None of the pages you chose exist — check Pages under More options.");
+  if (dlCapture && idx.length) { dlCapture.total = idx.length; idx = [idx[0]]; }   // a preview builds only the first page it would save
   return idx;
 }
 const PAPER = { letter: [612, 792], legal: [612, 1008], a4: [595.28, 841.89], a5: [419.53, 595.28], tabloid: [792, 1224] };
@@ -482,7 +483,7 @@ async function finishPdf(pdf, L, sel, opts = {}) {
   const ansi = (t) => String(t || "").replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, "-").replace(/[^\x20-\x7e\xa0-\xff]/g, "").trim();
   const wm = ansi(mo.wm === "custom" ? mo.wmtext : mo.wm === "none" ? "" : mo.wm), num = mo.num && mo.num !== "none" ? mo.num : "";
   if (wm || num) {
-    const font = await pdf.embedFont(L.StandardFonts.Helvetica), bold = wm ? await pdf.embedFont(L.StandardFonts.HelveticaBold) : null, N = pdf.getPageCount();
+    const font = await pdf.embedFont(L.StandardFonts.Helvetica), bold = wm ? await pdf.embedFont(L.StandardFonts.HelveticaBold) : null, N = dlCapture && dlCapture.total ? dlCapture.total : pdf.getPageCount();
     pdf.getPages().forEach((page, i) => {
       // positions are worked out as the page is seen (after any turn it already has) and mapped back
       const r = rotOf(page), mb = page.getMediaBox(), W = mb.width, H = mb.height, VW = r % 180 ? H : W, VH = r % 180 ? W : H;
@@ -2822,11 +2823,14 @@ async function composeCanvas() {
   return finishCanvas(c);
 }
 
+// While the download panel builds its preview, the finished file is kept here instead of being saved, and messages stay quiet.
+let dlCapture = null;
 function download(name, blob) {
+  if (dlCapture) { dlCapture.blob = blob; dlCapture.name = name; return; }
   if (!blob || !blob.size) { toast("Nothing to save yet — wait for the page or writing to finish drawing, then try again."); return; }   // an empty canvas gives no picture
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }
 let toastTimer = 0;
-function toast(m) { const t = $("toast"); if (!t) return; t.textContent = m; t.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("on"), 2800); }
+function toast(m) { if (dlCapture) { dlCapture.msg = m; return; } const t = $("toast"); if (!t) return; t.textContent = m; t.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("on"), 2800); }
 function flash(m) { toast(m); }
 async function exportPNG(fmt = "png") {
   try {
@@ -4918,8 +4922,10 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("dl_more_reset").onclick = () => { dlOpts.more = {}; lsSet(DL_KEY, dlOpts); dlSync(); };
   $("dl_panel").addEventListener("click", (e) => e.stopPropagation());
   document.querySelector('[data-ddbtn="dl"]')?.addEventListener("click", () => dlSync());   // page-dependent hints (file name) stay current
-  $("dl_go").onclick = async () => {
-    closeDropdowns(); const f = dlOpts.format;
+  // ---- live preview: the first page exactly as it will be saved, rebuilt whenever a setting changes ----
+  let prevTok = 0, prevTimer = 0, prevRun = null, dlBusy = false;
+  const panelOpen = () => !!document.querySelector('[data-dd="dl"].open');
+  const runExport = async (f) => {
     exportLook = (f === "pdf" || f === "png" || f === "jpg" || f === "zip") ? dlOpts.look : null;
     try {
       if (f === "pdf") await exportPDF();
@@ -4929,6 +4935,60 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
       else if (f === "txt") await exportText();
       else await exportPNG(f);
     } finally { exportLook = null; }
+  };
+  const drawPreview = async (tok) => {
+    const box = $("dl_prev"), cv = $("dl_prev_c"), meta = $("dl_prev_meta"), f = dlOpts.format;
+    if (f === "docx" || f === "txt") { box.classList.add("none"); meta.textContent = f === "docx" ? "Word files open in Word - no picture preview." : "A text file - no picture preview."; return; }
+    box.classList.remove("none"); box.classList.add("busy"); meta.textContent = "Building the preview…";
+    const cap = dlCapture = { blob: null, name: "", msg: "", total: 0 };
+    try {
+      await runExport(f);
+      for (let i = 0; i < 60 && !cap.blob && !cap.msg; i++) await new Promise((r) => setTimeout(r, 50));   // pictures arrive a moment later
+    } finally { dlCapture = null; }
+    if (tok !== prevTok) return;
+    box.classList.remove("busy");
+    if (!cap.blob) { meta.textContent = cap.msg || "Nothing to preview yet."; cv.width = cv.height = 0; return; }
+    let src = cap.blob, pageW = 0, pageH = 0, rot = 0;
+    if (/\.zip$/.test(cap.name) && window.JSZip) { const z = await window.JSZip.loadAsync(src), first = Object.keys(z.files).sort()[0]; if (first) src = await z.file(first).async("blob"); }
+    const W = Math.round(box.clientWidth * (window.devicePixelRatio || 1)) || 300;
+    if (src.type === "application/pdf" || /\.pdf$/.test(cap.name)) {
+      const pj = await pdfjsReady(), d = await pj.getDocument({ data: new Uint8Array(await src.arrayBuffer()) }).promise, pg = await d.getPage(1);
+      const v1 = pg.getViewport({ scale: 1 }); pageW = v1.width; pageH = v1.height; rot = pg.rotate || 0;
+      const vp = pg.getViewport({ scale: W / v1.width }); cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+      const g = cv.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, cv.width, cv.height);
+      await pg.render({ canvasContext: g, viewport: vp }).promise; d.destroy();
+    } else {
+      const bm = await createImageBitmap(src); pageW = bm.width; pageH = bm.height;
+      cv.width = W; cv.height = Math.round(W * bm.height / bm.width); const g = cv.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, cv.width, cv.height); g.drawImage(bm, 0, 0, cv.width, cv.height); bm.close();
+    }
+    if (tok !== prevTok) return;
+    const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+    const isPdf = /\.pdf$/.test(cap.name), pages = cap.total || 1, inch = (pt) => (pt / 72).toFixed(2).replace(/\.?0+$/, "");
+    const size = isPdf ? `${inch(pageW)} × ${inch(pageH)} in${rot ? " · turned " + rot + "°" : ""}` : `${pageW} × ${pageH} px`;
+    meta.textContent = `${isPdf || f === "zip" ? `Page 1 of ${pages} · ` : ""}${size} · this page about ${kb(cap.blob.size)}${pages > 1 && f !== "zip" ? " (file grows with each page)" : ""}`;
+  };
+  const schedulePreview = () => {
+    clearTimeout(prevTimer);
+    if (!panelOpen() || dlBusy) return;
+    prevTimer = setTimeout(() => { const tok = ++prevTok; prevRun = (prevRun || Promise.resolve()).catch(() => {}).then(() => tok === prevTok ? drawPreview(tok) : null).catch((e) => { $("dl_prev_meta").textContent = "Preview failed: " + (e.message || e); }); }, 350);
+  };
+  window.__cal2DlPreview = schedulePreview;
+  ["dl_format", "dl_look", "dl_quality", "dl_engine", "dl_pages", "dl_paper", "dl_turn", "dl_num", "dl_wm", "dl_dpi", "dl_skipblank"].forEach((id) => $(id) && $(id).addEventListener("change", schedulePreview));
+  ["dl_range", "dl_wmtext"].forEach((id) => $(id) && $(id).addEventListener("input", schedulePreview));
+  $("dl_more_reset").addEventListener("click", schedulePreview);
+  document.querySelector('[data-ddbtn="dl"]')?.addEventListener("click", () => setTimeout(schedulePreview, 30));
+  $("dl_prev").onclick = () => {   // a bigger look
+    const cv = $("dl_prev_c"); if (!cv.width) return;
+    const ov = mk("div", { className: "dl-prev-big" }); const im = mk("img", { src: cv.toDataURL("image/png"), alt: "Preview" }); ov.appendChild(im);
+    ov.onclick = () => ov.remove(); document.body.appendChild(ov);
+  };
+  $("dl_go").onclick = async () => {
+    closeDropdowns(); const f = dlOpts.format;
+    clearTimeout(prevTimer); prevTok++; dlBusy = true;
+    try { await prevRun; } catch (_) {}   // a preview being built finishes first, so the real download is never caught by it
+    dlBusy = false;
+    dlBusy = true;
+    try { await runExport(f); } finally { dlBusy = false; }
   };
   dlSync();
   document.querySelectorAll("#ed_tools [data-org]").forEach((b) => b.onclick = () => {
