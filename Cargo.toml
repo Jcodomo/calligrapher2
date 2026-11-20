@@ -9,7 +9,8 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [profile.release]
-opt-level = "z"
+# speed over size: the scan-look pixel loops run ~20-35% faster than with "z", for ~19 KB more wasm
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"

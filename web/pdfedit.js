@@ -8,6 +8,8 @@
 // a static site can't do. Everything else runs locally.
 
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
+import { OCR_LANGS } from "./ocr-langs.js?v=1";
+import { ocrPrepOffThread, scanWorkersSupported, warmRealistic } from "./scanpool.js?v=4";
 
 const $ = (id) => document.getElementById(id);
 
@@ -21,8 +23,8 @@ let srcSeq = 1, dragFrom = -1, redactMode = false, activeTool = null;
 let etSrc = null, etPageNum = 1, etScale = 1, etBgCtx = null, etCanvasH = 0, etAddMode = false;
 const etEdits = new Map(); // pageIndex -> { changes:[{idx,px,py,psize,pw,fontKey,bg,fg,text}], adds:[{pdfX,pdfYbaseline,pdfSize,fontKey,fg,text}] }
 
-const pdfjs = () => window.pdfjsLib;
-const PDFLib = () => window.PDFLib;
+import { pdfjsReady, pdfLibReady, canvasBytes } from "./libs.js?v=2";
+const pdfjs = () => window.pdfjsLib;   // sync access, only after a PDF has been opened (pdfjsReady loaded it)
 
 // ---- small utilities -------------------------------------------------------
 function dl(name, blob) {
@@ -56,7 +58,7 @@ async function ensureTesseract() {
 
 async function jsDoc(src) {
   if (jsDocs.has(src.id)) return jsDocs.get(src.id);
-  const d = await pdfjs().getDocument({ data: src.bytes.slice() }).promise; // slice keeps bytes intact for export
+  const d = await (await pdfjsReady()).getDocument({ data: src.bytes.slice() }).promise; // slice keeps bytes intact for export
   jsDocs.set(src.id, d); return d;
 }
 async function rasterize(entry, scale = 2) {
@@ -227,24 +229,94 @@ function drawRedactBoxes(wrap, entry) {
 }
 
 // ---- building / producing PDFs ---------------------------------------------
+// Parsed source PDFs, kept between calls: Split builds one PDF per part, and used to re-read the whole
+// source for every part (a 100-page split = 100 full parses). Copying pages out never changes the source,
+// so one parse serves every part. The entry is dropped automatically if a source's bytes are replaced.
+const parsedSources = new WeakMap();   // src -> { bytes, lib }
+async function parsedSource(L, src) {
+  const hit = parsedSources.get(src);
+  if (hit && hit.bytes === src.bytes) return hit.lib;
+  const lib = await L.PDFDocument.load(src.bytes, { ignoreEncryption: true, updateMetadata: false });
+  parsedSources.set(src, { bytes: src.bytes, lib });
+  return lib;
+}
 async function buildPdf(entries) {
-  const L = PDFLib();
+  const L = (await pdfLibReady());
   const out = await L.PDFDocument.create();
-  const libCache = new Map();
-  for (const e of entries) {
-    const src = sources.find((s) => s.id === e.srcId);
-    let lib = libCache.get(src.id);
-    if (!lib) { lib = await L.PDFDocument.load(src.bytes, { ignoreEncryption: true }); libCache.set(src.id, lib); }
-    const [cp] = await out.copyPages(lib, [e.srcIndex]);
+  // copy each source's pages in one call (in document order), then add them in the requested order
+  const bySrc = new Map();
+  entries.forEach((e, k) => { if (!bySrc.has(e.srcId)) bySrc.set(e.srcId, []); bySrc.get(e.srcId).push(k); });
+  const copied = new Array(entries.length);
+  for (const [srcId, ks] of bySrc) {
+    const src = sources.find((s) => s.id === srcId);
+    const lib = await parsedSource(L, src);
+    const pagesCopied = await out.copyPages(lib, ks.map((k) => entries[k].srcIndex));
+    ks.forEach((k, j) => { copied[k] = pagesCopied[j]; });
+  }
+  entries.forEach((e, k) => {
+    const cp = copied[k];
     const base = (cp.getRotation() && cp.getRotation().angle) || 0;
     cp.setRotation(L.degrees((base + e.rot) % 360));
     out.addPage(cp);
-  }
+  });
   return out;
+}
+
+// Smallpdf-style compression that keeps text: re-encode the photos inside the PDF (JPEG images only)
+// at a lower resolution / quality; text, vector graphics and fonts stay exactly as they are.
+// Leaves alone anything it can't safely re-encode (CMYK, inverted, masks, non-JPEG images).
+async function recompressImages(out, { maxPx, quality }, onProgress) {
+  const L = await pdfLibReady();
+  const N = (s) => L.PDFName.of(s);
+  const isName = (v, s) => v === N(s);
+  const okColour = (cs) => {
+    if (!cs) return false;
+    if (isName(cs, "DeviceRGB") || isName(cs, "DeviceGray")) return true;
+    const arr = cs instanceof L.PDFArray ? cs : null;
+    if (arr && arr.size() === 2 && isName(arr.get(0), "ICCBased")) {
+      const icc = out.context.lookup(arr.get(1));
+      const n = icc && icc.dict && icc.dict.get(N("N"));
+      return n && (n.asNumber() === 3 || n.asNumber() === 1);
+    }
+    return false;
+  };
+  const jobs = [];
+  for (const [ref, obj] of out.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof L.PDFRawStream)) continue;
+    const d = obj.dict;
+    if (!isName(d.get(N("Subtype")), "Image") || d.get(N("ImageMask")) || d.get(N("Decode"))) continue;
+    const f = d.get(N("Filter"));
+    const dct = isName(f, "DCTDecode") || (f instanceof L.PDFArray && f.size() === 1 && isName(f.get(0), "DCTDecode"));
+    if (!dct || !okColour(d.get(N("ColorSpace")))) continue;
+    jobs.push([ref, obj]);
+  }
+  let saved = 0, changed = 0, done = 0;
+  for (const [ref, obj] of jobs) {
+    onProgress && onProgress(++done, jobs.length);
+    const bytes = obj.contents;
+    let bmp;
+    try { bmp = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }), { imageOrientation: "none" }); }
+    catch (_) { try { bmp = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" })); } catch (_) { continue; } }
+    const s = Math.min(1, maxPx / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * s)), h = Math.max(1, Math.round(bmp.height * s));
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const g = c.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(bmp, 0, 0, w, h); bmp.close();
+    const nb = await canvasBytes(c, "image/jpeg", quality);
+    c.width = c.height = 0;
+    if (nb.length >= bytes.length * 0.92) continue;   // not worth replacing
+    const nd = L.PDFDict.withContext(out.context);
+    const skip = new Set(["/Width", "/Height", "/ColorSpace", "/BitsPerComponent", "/Filter", "/DecodeParms", "/Length"]);
+    for (const [k, v] of obj.dict.entries()) if (!skip.has(k.asString())) nd.set(k, v);
+    nd.set(N("Width"), L.PDFNumber.of(w)); nd.set(N("Height"), L.PDFNumber.of(h));
+    nd.set(N("ColorSpace"), N("DeviceRGB")); nd.set(N("BitsPerComponent"), L.PDFNumber.of(8)); nd.set(N("Filter"), N("DCTDecode"));
+    out.context.assign(ref, L.PDFRawStream.of(nd, nb));
+    saved += bytes.length - nb.length; changed++;
+  }
+  return { images: jobs.length, changed, saved };
 }
 // Rasterize current pages into a flat image-only PDF (used by flatten/compress/redact/unlock).
 async function rasterizeToPdf(entries, scale, quality) {
-  const L = PDFLib();
+  const L = (await pdfLibReady());
   const out = await L.PDFDocument.create();
   for (const e of entries) {
     const c = await rasterize(e, scale);
@@ -252,7 +324,7 @@ async function rasterizeToPdf(entries, scale, quality) {
       const x = c.getContext("2d"); x.fillStyle = "#000";
       e.red.forEach((b) => x.fillRect(b.x * c.width, b.y * c.height, b.w * c.width, b.h * c.height));
     }
-    const u8 = dataURLtoU8(c.toDataURL("image/jpeg", quality));
+    const u8 = (await canvasBytes(c, "image/jpeg", quality));
     const img = await out.embedJpg(u8);
     const pw = c.width / scale, ph = c.height / scale;   // keep the page's real size (points), whatever the render scale
     const pg = out.addPage([pw, ph]);
@@ -269,7 +341,7 @@ async function save(out, name) {
 }
 
 async function stampNumbersWatermark(out, { nums, pos, wm }) {
-  const L = PDFLib();
+  const L = (await pdfLibReady());
   if (!nums && !wm) return;
   const font = await out.embedFont(L.StandardFonts.HelveticaBold);
   out.getPages().forEach((pg, i) => {
@@ -448,7 +520,7 @@ function openCrop() {
     <button class="btn" id="pe_crop_go">Crop → PDF</button>`);
   ["pe_ct", "pe_cr", "pe_cb", "pe_cl"].forEach((id) => $(id).oninput = () => $(id + "_v").textContent = $(id).value + "%");
   $("pe_crop_go").onclick = () => withBusy("Cropping…", async () => {
-    const L = PDFLib();
+    const L = (await pdfLibReady());
     const out = await buildPdf(pages);
     const t = +$("pe_ct").value / 100, r = +$("pe_cr").value / 100, b = +$("pe_cb").value / 100, l = +$("pe_cl").value / 100;
     out.getPages().forEach((pg) => {
@@ -478,23 +550,46 @@ function openWatermark() {
     await save(out, "watermarked.pdf"); note("Saved watermarked.pdf.");
   });
 }
+// Compression levels, Smallpdf-style. Basic and Strong keep the text (selectable, sharp) and only
+// shrink the photos inside; Extreme turns pages into pictures (smallest, but text is no longer text).
+const COMPRESS = {
+  basic:   { maxPx: 2000, quality: 0.8, label: "Basic" },
+  strong:  { maxPx: 1300, quality: 0.62, label: "Strong" },
+  extreme: { scale: 1.3, quality: 0.5, label: "Extreme" },
+};
 function openCompress() {
   panelShell("Compress", `
-    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Rasterizes pages at a lower quality to shrink the file (text becomes image).</div>
-    <div class="row"><label>Quality</label><input id="pe_q" type="range" min="30" max="90" value="55"><span class="val" id="pe_q_v">55%</span></div>
+    <div class="row"><label>Level</label><select id="pe_cl_lvl" style="flex:1">
+      <option value="basic" selected>Basic — keeps text, good quality</option>
+      <option value="strong">Strong — keeps text, smaller pictures</option>
+      <option value="extreme">Extreme — pages as pictures (smallest)</option></select></div>
+    <div style="font-size:12px;color:var(--muted);margin:2px 0 8px" id="pe_cl_hint"></div>
     <button class="btn" id="pe_cmp_go">Compress → PDF</button>`);
-  $("pe_q").oninput = () => $("pe_q_v").textContent = $("pe_q").value + "%";
+  const hint = () => { $("pe_cl_hint").textContent = $("pe_cl_lvl").value === "extreme"
+    ? "Every page becomes a picture: the smallest file, but text can no longer be selected or searched."
+    : "Text, fonts and drawings stay exactly as they are; only the photos inside are made smaller."; };
+  $("pe_cl_lvl").onchange = hint; hint();
   $("pe_cmp_go").onclick = () => withBusy("Compressing…", async () => {
-    const q = +$("pe_q").value / 100;
-    const scale = 1 + q; // lower quality -> smaller render
-    // two ways to shrink: re-save as is (compact structure) or pages as JPEG pictures; the smallest wins
+    const lvl = COMPRESS[$("pe_cl_lvl").value] || COMPRESS.basic;
     const before = sources.reduce((n, q2) => n + q2.bytes.length, 0);
-    const lossless = await buildPdf(pages), lb = await lossless.save({ useObjectStreams: true });
-    const lossy = await rasterizeToPdf(pages, scale, q), yb = await lossy.save();
-    const best = Math.min(lb.length, yb.length);
-    if (best >= before && sources.length === 1) { note(`This PDF is already as small as it gets (${Math.round(before / 1024)} KB) — nothing saved.`); return; }
-    await save(yb.length < lb.length ? lossy : lossless, "compressed.pdf");
-    note(`Saved compressed.pdf — ${Math.round(before / 1024)} KB → ${Math.round(best / 1024)} KB` + (yb.length < lb.length ? " (pages turned into pictures; text is no longer selectable)." : " (text kept)."));
+    let out, extra = "";
+    if (lvl.scale) {
+      out = await rasterizeToPdf(pages, lvl.scale, lvl.quality);
+      extra = " (pages turned into pictures; text is no longer selectable)";
+    } else {
+      out = await buildPdf(pages);
+      const r = await recompressImages(out, lvl, (i, n) => note(`Compressing pictures… ${i} of ${n}`));
+      extra = r.changed ? ` (text kept; ${r.changed} of ${r.images} picture${r.images > 1 ? "s" : ""} made smaller)` : " (text kept)";
+    }
+    const bytes = await out.save({ useObjectStreams: true });
+    if (bytes.length >= before && sources.length === 1) {
+      note(`Nothing to gain at the ${lvl.label} level — this PDF is already ${Math.round(before / 1024)} KB.` + (lvl.scale ? "" : " Try Strong or Extreme."));
+      return;
+    }
+    if (window.__cal2PdfSaveHook && await window.__cal2PdfSaveHook(bytes, "compressed.pdf")) return;
+    dl("compressed.pdf", new Blob([bytes], { type: "application/pdf" }));
+    const pct = Math.round((1 - bytes.length / before) * 100);
+    note(`Saved compressed.pdf — ${Math.round(before / 1024)} KB → ${Math.round(bytes.length / 1024)} KB (${pct}% smaller)${extra}.`);
   });
 }
 function openImg() {
@@ -528,7 +623,7 @@ function openImg() {
 const PAGE_SIZES = { letter: [612, 792], a4: [595.28, 841.89], legal: [612, 1008] };
 function imagesToPdf(files, opts = {}) {
   return withBusy("Building…", async () => {
-    const L = PDFLib(); const out = await L.PDFDocument.create();
+    const L = (await pdfLibReady()); const out = await L.PDFDocument.create();
     for (const f of files) {
       const u8 = new Uint8Array(await f.arrayBuffer());
       const isPng = /\.png$/i.test(f.name) || f.type === "image/png", isJpg = /\.jpe?g$/i.test(f.name) || f.type === "image/jpeg";
@@ -540,7 +635,7 @@ function imagesToPdf(files, opts = {}) {
         const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
         const c = document.createElement("canvas"); c.width = im.naturalWidth; c.height = im.naturalHeight;
         c.getContext("2d").drawImage(im, 0, 0); URL.revokeObjectURL(url);
-        img = await out.embedPng(dataURLtoU8(c.toDataURL("image/png")));
+        img = await out.embedPng((await canvasBytes(c, "image/png")));
       }
       if (!opts.size || opts.size === "fit") { const pg = out.addPage([img.width, img.height]); pg.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height }); continue; }
       // a fixed paper size: turned to match the picture, picture centred inside the margins
@@ -551,71 +646,212 @@ function imagesToPdf(files, opts = {}) {
     await save(out, "images.pdf"); note("Saved images.pdf (" + files.length + " pages).");
   });
 }
+// ---- OCR (searchable PDF) ------------------------------------------------------------------
+// Modelled on what PDF24's OCR offers (it runs OCRmyPDF on a server), done here in the browser:
+// many languages at once, Fast / Best models, page cleanup (ImageMagick for background + deskew),
+// turning sideways pages upright, force OCR, metadata, and a real text layer: Tesseract's own
+// text-only PDF (an invisible "glyphless" font that works for every script), laid over the ORIGINAL
+// page whenever the page itself didn't need to change, so nothing is re-compressed.
+const OCR_KEY = "cal2_ocr_opts";
+const OCR_ACC = {
+  fast: { scale: 2, langPath: "https://tessdata.projectnaptha.com/4.0.0_fast" },                          // 144 dpi, small models
+  // 300 dpi, accurate models: with no langPath, tesseract.js (LSTM engine) fetches each language from its own
+  // folder, https://cdn.jsdelivr.net/npm/@tesseract.js-data/<lang>/4.0.0_best_int, so several languages work
+  best: { scale: 300 / 72, langPath: null },
+};
+function ocrOpts() {
+  let o = {}; try { o = JSON.parse(localStorage.getItem(OCR_KEY) || "{}") || {}; } catch (_) {}
+  return { langs: ["eng"], acc: "fast", deskew: false, rotate: false, bg: false, clean: false, force: false, join: true, meta: {}, ...o };
+}
+function saveOcrOpts(o) { try { localStorage.setItem(OCR_KEY, JSON.stringify(o)); } catch (_) {} }
+const langName = (c) => (OCR_LANGS.find((l) => l[0] === c) || [c, c])[1];
+
 function openOcr() {
+  const o = ocrOpts();
+  const chk = (id, label, on, hint) => `<label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;margin:3px 0"><input type="checkbox" id="${id}"${on ? " checked" : ""} style="margin-top:2px"><span>${label}${hint ? `<span style="display:block;font-size:11px;color:var(--muted)">${hint}</span>` : ""}</span></label>`;
   panelShell("PDF OCR", `
-    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Adds a searchable text layer under each page (runs in your browser — the first run downloads the language model, ~5–15&nbsp;MB, and large PDFs take a while).</div>
-    <div class="row"><label>Language</label><select id="pe_oclang"><option value="eng">English</option><option value="spa">Spanish</option><option value="fra">French</option><option value="deu">German</option><option value="ita">Italian</option><option value="por">Portuguese</option></select></div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Adds searchable, selectable text to scanned pages — in your browser, nothing is uploaded. The first run downloads the language models (about 2–3&nbsp;MB each).</div>
+    <div style="font-weight:600;font-size:12.5px;margin:4px 0">Languages</div>
+    <div id="pe_oc_chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px"></div>
+    <input id="pe_oc_find" type="text" placeholder="Search ${OCR_LANGS.length} languages…" autocomplete="off" style="width:100%;height:30px;box-sizing:border-box">
+    <div id="pe_oc_list" style="max-height:150px;overflow:auto;border:1px solid var(--line,#8884);border-radius:6px;margin:4px 0 8px;font-size:12.5px"></div>
+    <div class="row"><label>Accuracy</label><select id="pe_oc_acc" style="flex:1"><option value="fast">Fast</option><option value="best">Best — slower, reads at 300 dpi</option></select></div>
+    <div style="font-weight:600;font-size:12.5px;margin:10px 0 2px">Page cleanup</div>
+    ${chk("pe_oc_deskew", "Straighten pages (deskew)", o.deskew, "")}
+    ${chk("pe_oc_rotate", "Turn sideways or upside-down pages upright", o.rotate, "")}
+    ${chk("pe_oc_bg", "Remove background", o.bg, "Grey or yellowed paper and uneven light become clean white.")}
+    ${chk("pe_oc_clean", "Clean specks and dark scanner borders", o.clean, "")}
+    <div style="font-size:11px;color:var(--muted);margin:2px 0 6px">Straighten and Remove background use ImageMagick (about 15&nbsp;MB, downloaded once).</div>
+    <div style="font-weight:600;font-size:12.5px;margin:8px 0 2px">Options</div>
+    ${chk("pe_oc_force", "Also read pages that already have text", o.force, "Those pages become pictures with a new text layer.")}
+    <div id="pe_oc_joinrow">${chk("pe_oc_join", "Combine files into one PDF", o.join, "Off: one searchable PDF per file, in a .zip.")}</div>
+    <details style="margin:6px 0;font-size:12.5px"><summary style="cursor:pointer;color:var(--muted)">PDF details (title, author…)</summary>
+      ${["title", "author", "subject", "keywords"].map((k) => `<div class="row"><label style="text-transform:capitalize">${k}</label><input type="text" id="pe_oc_m_${k}" style="flex:1" value="${String((o.meta || {})[k] || "").replace(/"/g, "&quot;")}"></div>`).join("")}
+    </details>
     <button class="btn" id="pe_ocr_go">OCR → searchable PDF</button>
     <div id="pe_ocr_prog" style="font-size:11px;color:var(--muted);margin-top:6px"></div>`);
-  $("pe_ocr_go").onclick = () => withBusy("Starting OCR…", async () => {
-    const lang = $("pe_oclang").value, prog = $("pe_ocr_prog"), t0 = performance.now();
-    const L = PDFLib(); const out = await L.PDFDocument.create();
-    const font = await out.embedFont(L.StandardFonts.Helvetica);
-    // pages that already carry real text are kept as they are; only scans are read
-    const need = [];
-    for (let i = 0; i < pages.length; i++) {
-      const e = pages[i], src = sources.find((q) => q.id === e.srcId);
-      let has = false;
-      try { const pg = await (await jsDoc(src)).getPage(e.srcIndex + 1); const tc = await pg.getTextContent(); has = tc.items.some((it) => (it.str || "").trim().length > 1) && !e.rot; } catch (_) {}
-      need.push(!has);
-    }
-    const todo = need.filter(Boolean).length;
-    let sched = null;
-    if (todo) {
-      prog.textContent = "Loading the text reader…";
-      sched = await ocrScheduler(lang, Math.min(todo, ocrPoolSize()));
-    }
-    // rasterize + read the scans in parallel (results kept in page order)
-    let done = 0;
-    const reads = pages.map((e, i) => need[i] ? (async () => {
-      const c = await rasterize(e, 2);
-      const r = await sched.addJob("recognize", c);
-      done++; prog.textContent = `Reading page ${done} of ${todo}…`;
-      return { c, words: (r.data && r.data.words) || [] };
-    })() : null);
-    for (let i = 0; i < pages.length; i++) {
-      if (!need[i]) {
-        const e = pages[i], src = sources.find((q) => q.id === e.srcId);
-        const lib = await L.PDFDocument.load(src.bytes, { ignoreEncryption: true });
-        const [cp] = await out.copyPages(lib, [e.srcIndex]); out.addPage(cp); continue;
-      }
-      const { c, words } = await reads[i];
-      const img = await out.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.85)));
-      const pg = out.addPage([c.width / 2, c.height / 2]);
-      pg.drawImage(img, { x: 0, y: 0, width: c.width / 2, height: c.height / 2 });
-      words.forEach((w) => {
-        if (!w.text.trim()) return;
-        const bb = w.bbox, h = (bb.y1 - bb.y0) / 2;
-        try {
-          const size = Math.max(3, h * 0.85), tw = font.widthOfTextAtSize(w.text, size), want = (bb.x1 - bb.x0) / 2;
-          pg.drawText(w.text, { x: bb.x0 / 2, y: (c.height - bb.y1) / 2 + h * 0.15, size: tw > 0 ? Math.max(3, size * Math.min(2, want / tw)) : size, font, opacity: 0 });
-        } catch (_) {}
-      });
-    }
-    await save(out, "ocr.pdf"); prog.textContent = "";
-    const secs = Math.round((performance.now() - t0) / 100) / 10;
-    note(`Saved ocr.pdf (searchable) — ${todo} scanned page${todo === 1 ? "" : "s"} read${pages.length - todo ? ", " + (pages.length - todo) + " already had text" : ""}, ${secs}s.`);
+  $("pe_oc_acc").value = o.acc;
+  $("pe_oc_joinrow").style.display = sources.length > 1 ? "" : "none";
+  // languages: chips for the chosen ones + a searchable list of all of them
+  const chosen = new Set(o.langs.filter((c) => OCR_LANGS.some((l) => l[0] === c)));
+  if (!chosen.size) chosen.add("eng");
+  const drawChips = () => {
+    $("pe_oc_chips").innerHTML = [...chosen].map((c) => `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--accent-soft,#3b82f622);border-radius:12px;padding:2px 8px;font-size:12px">${langName(c)}<button data-x="${c}" title="Remove" style="border:0;background:none;cursor:pointer;padding:0;font-size:13px;line-height:1;color:inherit">×</button></span>`).join("");
+    $("pe_oc_chips").querySelectorAll("[data-x]").forEach((b) => b.onclick = () => { if (chosen.size > 1) { chosen.delete(b.dataset.x); drawChips(); drawList(); persist(); } });
+  };
+  const drawList = () => {
+    const q = $("pe_oc_find").value.trim().toLowerCase();
+    $("pe_oc_list").innerHTML = OCR_LANGS.filter(([c, n]) => !q || n.toLowerCase().includes(q) || c.includes(q))
+      .map(([c, n]) => `<label style="display:flex;gap:8px;padding:3px 8px;cursor:pointer"><input type="checkbox" data-l="${c}"${chosen.has(c) ? " checked" : ""}>${n}<span style="margin-left:auto;color:var(--muted);font-size:11px">${c}</span></label>`).join("") || `<div style="padding:6px 8px;color:var(--muted)">No match.</div>`;
+    $("pe_oc_list").querySelectorAll("[data-l]").forEach((b) => b.onchange = () => {
+      if (b.checked) chosen.add(b.dataset.l); else if (chosen.size > 1) chosen.delete(b.dataset.l); else b.checked = true;
+      drawChips(); persist();
+    });
+  };
+  const read = () => ({ langs: [...chosen], acc: $("pe_oc_acc").value, deskew: $("pe_oc_deskew").checked, rotate: $("pe_oc_rotate").checked,
+    bg: $("pe_oc_bg").checked, clean: $("pe_oc_clean").checked, force: $("pe_oc_force").checked, join: $("pe_oc_join").checked,
+    meta: Object.fromEntries(["title", "author", "subject", "keywords"].map((k) => [k, $("pe_oc_m_" + k).value.trim()])) });
+  const persist = () => saveOcrOpts(read());
+  $("pe_oc_find").oninput = drawList;
+  ["pe_oc_acc", "pe_oc_deskew", "pe_oc_rotate", "pe_oc_bg", "pe_oc_clean", "pe_oc_force", "pe_oc_join"].forEach((id) => $(id).onchange = () => {
+    persist(); if ((id === "pe_oc_deskew" || id === "pe_oc_bg") && $(id).checked && scanWorkersSupported()) warmRealistic();
   });
+  ["title", "author", "subject", "keywords"].forEach((k) => $("pe_oc_m_" + k).oninput = persist);
+  drawChips(); drawList();
+  $("pe_ocr_go").onclick = () => withBusy("Starting OCR…", () => runOcr(read()));
 }
-// A pool of OCR workers using the small, fast models; kept warm for the next run.
+
+async function runOcr(o) {
+  if (!pages.length) return note("Open a PDF first.", true);
+  saveOcrOpts(o);
+  const prog = $("pe_ocr_prog"), t0 = performance.now(), acc = OCR_ACC[o.acc] || OCR_ACC.fast, scale = acc.scale;
+  const L = await pdfLibReady();
+  const prep = o.bg || o.deskew || o.clean;
+  if ((o.bg || o.deskew) && scanWorkersSupported()) prog.textContent = "Loading ImageMagick for page cleanup (first time only)…";
+  // which pages need reading: scans (no real text), or every page with "force"
+  const need = [];
+  for (const e of pages) {
+    let has = false;
+    try { const pg = await (await jsDoc(sources.find((q) => q.id === e.srcId))).getPage(e.srcIndex + 1); has = (await pg.getTextContent()).items.some((it) => (it.str || "").trim().length > 1); } catch (_) {}
+    need.push(o.force || !has);
+  }
+  const todo = need.filter(Boolean).length;
+  const sched = todo ? (prog.textContent = "Loading the text reader…", await ocrScheduler(o.langs, o.acc, Math.min(todo, ocrPoolSize()))) : null;
+  let done = 0, prepFailed = false, turned = 0, straightened = 0;
+  // read one page: render, (turn upright), (clean / flatten / straighten), recognise -> text-only PDF page
+  const readPage = async (e) => {
+    let c = await rasterize(e, scale);
+    let changed = false;
+    if (o.rotate) { const t = await uprightTurn(sched, c); if (t) { c = turnCanvas(c, t); changed = true; turned++; } }
+    if (prep) {
+      let r = null;
+      if (scanWorkersSupported()) { try { r = await ocrPrepOffThread(c, { background: o.bg, deskew: o.deskew, clean: o.clean }); } catch (_) { r = null; } }
+      if (r && r.magickOk) {
+        const k = document.createElement("canvas"); k.width = r.bmp.width; k.height = r.bmp.height; k.getContext("2d").drawImage(r.bmp, 0, 0); r.bmp.close();
+        c.width = c.height = 0; c = k; changed = true; if (Math.abs(r.angle) > 0.05) straightened++;
+      } else {
+        if (r && r.bmp) r.bmp.close();
+        prepFailed = prepFailed || o.bg || o.deskew;
+        if (o.deskew) {   // without ImageMagick: Tesseract measures the skew, the canvas turns it back
+          const a = await sched.addJob("recognize", c, { rotateAuto: true }, { text: false, blocks: false, hocr: false, tsv: false });
+          const rad = (a.data && a.data.rotateRadians) || 0;
+          if (Math.abs(rad) > 0.001) { c = tiltCanvas(c, -rad); changed = true; straightened++; }
+        }
+      }
+    }
+    const r = await sched.addJob("recognize", c, { pdfTitle: "", pdfTextOnly: true, user_defined_dpi: String(Math.round(scale * 72)) }, { text: false, pdf: true });
+    done++; prog.textContent = `Reading page ${done} of ${todo}…`;
+    return { c, changed, layer: new Uint8Array(r.data.pdf) };
+  };
+  // keep only a few pages in memory at once (each is ~35 MB of pixels at 300 dpi)
+  const results = new Array(pages.length), conc = Math.max(1, Math.min(ocrPoolSize(), o.acc === "best" ? 2 : 3));
+  let next = 0;
+  const runNext = async () => { while (next < pages.length) { const i = next++; if (need[i]) results[i] = await readPage(pages[i]); } };
+  // build the output: one PDF, or one per source file
+  const groups = o.join || sources.length < 2 ? [pages.map((_, i) => i)] : sources.map((s) => pages.map((e, i) => (e.srcId === s.id ? i : -1)).filter((i) => i >= 0)).filter((g) => g.length);
+  const builders = [];
+  await Promise.all(Array.from({ length: conc }, runNext));
+  for (const g of groups) {
+    const out = await L.PDFDocument.create();
+    for (const i of g) {
+      const e = pages[i], src = sources.find((q) => q.id === e.srcId), lib = await parsedSource(L, src);
+      const [cp] = await out.copyPages(lib, [e.srcIndex]);
+      const base = (cp.getRotation() && cp.getRotation().angle) || 0;
+      if (!need[i]) { cp.setRotation(L.degrees((base + e.rot) % 360)); out.addPage(cp); continue; }
+      const r = results[i]; results[i] = null;
+      const [layer] = await out.embedPdf(r.layer, [0]);
+      if (!r.changed && !o.force && (base + e.rot) % 360 === 0) {
+        // the page didn't need to change: keep it exactly as it is (sharp, nothing re-compressed) + text on top
+        out.addPage(cp);
+        const cb = cp.getCropBox();
+        cp.drawPage(layer, { x: cb.x, y: cb.y, width: cb.width, height: cb.height });
+      } else {
+        const pw = r.c.width / scale, ph = r.c.height / scale;
+        const img = await out.embedJpg(await canvasBytes(r.c, "image/jpeg", 0.85));
+        const pg = out.addPage([pw, ph]);
+        pg.drawImage(img, { x: 0, y: 0, width: pw, height: ph });
+        pg.drawPage(layer, { x: 0, y: 0, width: pw, height: ph });
+      }
+      r.c.width = r.c.height = 0;
+    }
+    applyOcrMeta(out, o.meta);
+    builders.push({ out, name: groups.length > 1 ? sources.find((s) => s.id === pages[g[0]].srcId).name.replace(/\.pdf$/i, "") + "-ocr.pdf" : "ocr.pdf" });
+  }
+  prog.textContent = "";
+  if (builders.length === 1) await save(builders[0].out, builders[0].name);
+  else { const zip = new (await ensureJsZip())(); for (const b of builders) zip.file(b.name, await b.out.save({ useObjectStreams: true })); dl("ocr.zip", await zip.generateAsync({ type: "blob" })); }
+  const secs = Math.round((performance.now() - t0) / 100) / 10;
+  const bits = [`${todo} page${todo === 1 ? "" : "s"} read`, pages.length - todo ? `${pages.length - todo} already had text` : "",
+    turned ? `${turned} turned upright` : "", straightened ? `${straightened} straightened` : "", `${o.langs.map(langName).join(" + ")}, ${o.acc === "best" ? "Best" : "Fast"}`].filter(Boolean);
+  note(`Saved ${builders.length === 1 ? builders[0].name : "ocr.zip (" + builders.length + " PDFs)"} — ${bits.join(", ")}, ${secs}s.` + (prepFailed ? " ImageMagick couldn't load, so background removal was skipped." : ""));
+}
+function applyOcrMeta(pdf, m = {}) {
+  try {
+    if (m.title) pdf.setTitle(m.title, { showInWindowTitleBar: true });
+    if (m.author) pdf.setAuthor(m.author);
+    if (m.subject) pdf.setSubject(m.subject);
+    if (m.keywords) pdf.setKeywords(m.keywords.split(",").map((s) => s.trim()).filter(Boolean));
+  } catch (_) {}
+}
+// Rotate a canvas by a multiple of 90°.
+function turnCanvas(c, deg) {
+  const k = document.createElement("canvas"), side = deg % 180 !== 0;
+  k.width = side ? c.height : c.width; k.height = side ? c.width : c.height;
+  const g = k.getContext("2d"); g.translate(k.width / 2, k.height / 2); g.rotate(deg * Math.PI / 180); g.drawImage(c, -c.width / 2, -c.height / 2);
+  c.width = c.height = 0; return k;
+}
+// Rotate a canvas by a small angle (radians), same size, white corners.
+function tiltCanvas(c, rad) {
+  const k = document.createElement("canvas"); k.width = c.width; k.height = c.height;
+  const g = k.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, k.width, k.height);
+  g.translate(k.width / 2, k.height / 2); g.rotate(rad); g.drawImage(c, -c.width / 2, -c.height / 2);
+  c.width = c.height = 0; return k;
+}
+// Which quarter-turn makes the page readable? Read a small copy upright; if Tesseract isn't
+// confident, try the other three orientations and keep the clear winner.
+async function uprightTurn(sched, c) {
+  const s = Math.min(1, 1000 / Math.max(c.width, c.height));
+  const small = document.createElement("canvas"); small.width = Math.round(c.width * s); small.height = Math.round(c.height * s);
+  small.getContext("2d").drawImage(c, 0, 0, small.width, small.height);
+  const conf = async (deg) => { const t = deg ? turnCanvas(cloneCanvas(small), deg) : small; const r = await sched.addJob("recognize", t, {}, { text: true }); return (r.data && r.data.confidence) || 0; };
+  let best = 0, bestConf = await conf(0);
+  if (bestConf >= 60) return 0;
+  for (const d of [180, 90, 270]) { const v = await conf(d); if (v > bestConf + 10) { bestConf = v; best = d; } }
+  return best;
+}
+function cloneCanvas(c) { const k = document.createElement("canvas"); k.width = c.width; k.height = c.height; k.getContext("2d").drawImage(c, 0, 0); return k; }
+
+// A pool of OCR workers, kept warm for the next run with the same languages and accuracy.
 let ocrPool = null;
 function ocrPoolSize() { return Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)); }
-async function ocrScheduler(lang, n) {
+async function ocrScheduler(langs, acc, n) {
   const T = await ensureTesseract();
-  if (ocrPool && ocrPool.lang !== lang) { try { await ocrPool.sched.terminate(); } catch (_) {} ocrPool = null; }
-  if (!ocrPool) ocrPool = { lang, sched: T.createScheduler(), n: 0 };
+  const key = langs.join("+") + "|" + acc;
+  if (ocrPool && ocrPool.key !== key) { try { await ocrPool.sched.terminate(); } catch (_) {} ocrPool = null; }
+  if (!ocrPool) ocrPool = { key, sched: T.createScheduler(), n: 0 };
+  const lp = (OCR_ACC[acc] || OCR_ACC.fast).langPath;
   while (ocrPool.n < n) {
-    const w = await T.createWorker(lang, 1, { langPath: "https://tessdata.projectnaptha.com/4.0.0_fast", cacheMethod: "write" });
+    const w = await T.createWorker(langs, 1, lp ? { langPath: lp, cacheMethod: "write" } : { cacheMethod: "write" });
     ocrPool.sched.addWorker(w); ocrPool.n++;
   }
   return ocrPool.sched;
@@ -629,15 +865,15 @@ function openUnlock() {
     const pw = $("pe_pw").value;
     const buf = new Uint8Array(await files[0].arrayBuffer());
     let d;
-    try { d = await pdfjs().getDocument({ data: buf.slice(), password: pw }).promise; }
+    try { d = await (await pdfjsReady()).getDocument({ data: buf.slice(), password: pw }).promise; }
     catch (e) { return note("Wrong password or unreadable PDF.", true); }
-    const L = PDFLib(); const out = await L.PDFDocument.create();
+    const L = (await pdfLibReady()); const out = await L.PDFDocument.create();
     for (let i = 1; i <= d.numPages; i++) {
       const page = await d.getPage(i);
       const vp = page.getViewport({ scale: 2 });
       const c = document.createElement("canvas"); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
       await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
-      const img = await out.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.92)));
+      const img = await out.embedJpg((await canvasBytes(c, "image/jpeg", 0.92)));
       const pg = out.addPage([c.width, c.height]); pg.drawImage(img, { x: 0, y: 0, width: c.width, height: c.height });
     }
     await save(out, "unlocked.pdf"); note("Saved unlocked.pdf.");
@@ -664,7 +900,7 @@ function openFillForm() {
     <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Fill the PDF's interactive form fields, then save. If it has none, use <b>Sign</b> to place text/checkmarks anywhere.</div>
     <div id="pe_ff_fields" style="display:flex;flex-direction:column;gap:9px"></div>`);
   withBusy("Reading form…", async () => {
-    const L = PDFLib();
+    const L = (await pdfLibReady());
     const src = sources[0];
     if (!src) return note("Open a PDF first.", true);
     const doc = await L.PDFDocument.load(src.bytes, { ignoreEncryption: true });
@@ -724,7 +960,7 @@ function openFillForm() {
 async function txtToPdf(file) {
   await withBusy("Building PDF…", async () => {
     const text = await file.text();
-    const L = PDFLib();
+    const L = (await pdfLibReady());
     const out = await L.PDFDocument.create();
     const isCsv = /\.csv$/i.test(file.name);
     const font = await out.embedFont(isCsv ? L.StandardFonts.Courier : L.StandardFonts.Helvetica);
@@ -883,7 +1119,7 @@ async function saveEditText() {
   if (!etSrc) return;
   flushEtPage();
   await withBusy("Rendering edited PDF…", async () => {
-    const L = PDFLib();
+    const L = (await pdfLibReady());
     const pdf = await L.PDFDocument.load(etSrc.bytes, { ignoreEncryption: true });
     const fontCache = new Map();
     const getFont = async (key) => { if (!fontCache.has(key)) fontCache.set(key, await pdf.embedFont(L.StandardFonts[key] || L.StandardFonts.Helvetica)); return fontCache.get(key); };
@@ -967,7 +1203,7 @@ async function pdfToDocx(entries, { mode, scans }, prog) {
     if (i) body.push(BR);
     const usable = (pageW - 108) * 12700;   // 0.75" margins, in EMU
     const putPicture = async () => {
-      const c = await rasterize(e, 2), u8 = dataURLtoU8(c.toDataURL("image/jpeg", 0.88)); img++;
+      const c = await rasterize(e, 2), u8 = (await canvasBytes(c, "image/jpeg", 0.88)); img++;
       zip.file(`word/media/page${img}.jpg`, u8); rels.push(`<Relationship Id="rImg${img}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/page${img}.jpg"/>`);
       const w = usable, h = Math.round(usable * c.height / c.width), maxH = (pageH - 108) * 12700, k = Math.min(1, maxH / h);
       body.push(docxPicture("rImg" + img, img, Math.round(w * k), Math.round(h * k)));
@@ -1144,9 +1380,9 @@ function openEnhance() {
       if (outs.length === 1) dl(outs[0].name + ".png", await new Promise((r) => outs[0].c.toBlob(r, "image/png")));
       else { const zip = new (await ensureJsZip())(); for (const o of outs) zip.file(o.name + ".png", await new Promise((r) => o.c.toBlob(r, "image/png"))); dl("enhanced.zip", await zip.generateAsync({ type: "blob" })); }
     } else {
-      const L = PDFLib(), out = await L.PDFDocument.create();
+      const L = (await pdfLibReady()), out = await L.PDFDocument.create();
       for (const o of outs) {
-        const img = opt.gray ? await out.embedPng(dataURLtoU8(o.c.toDataURL("image/png"))) : await out.embedJpg(dataURLtoU8(o.c.toDataURL("image/jpeg", 0.92)));
+        const img = opt.gray ? await out.embedPng((await canvasBytes(o.c, "image/png"))) : await out.embedJpg((await canvasBytes(o.c, "image/jpeg", 0.92)));
         const pg = out.addPage([o.wPt, o.hPt]); pg.drawImage(img, { x: 0, y: 0, width: o.wPt, height: o.hPt });
       }
       await save(out, "enhanced.pdf");
@@ -1170,8 +1406,8 @@ async function imageFileToPdf(f) {
   const g = c.getContext("2d"), png = /png|gif|webp/i.test(f.type) || /\.(png|gif|webp)$/i.test(f.name);
   if (!png) { g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); }
   g.drawImage(bmp, 0, 0, c.width, c.height);
-  const L = PDFLib(), out = await L.PDFDocument.create();
-  const img = png ? await out.embedPng(dataURLtoU8(c.toDataURL("image/png"))) : await out.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.93)));
+  const L = (await pdfLibReady()), out = await L.PDFDocument.create();
+  const img = png ? await out.embedPng((await canvasBytes(c, "image/png"))) : await out.embedJpg((await canvasBytes(c, "image/jpeg", 0.93)));
   const w = c.width * 0.75, h = c.height * 0.75;            // 96 pixels per inch
   out.addPage([w, h]).drawImage(img, { x: 0, y: 0, width: w, height: h });
   return { bytes: await out.save(), px: [c.width, c.height] };
@@ -1305,7 +1541,7 @@ function openPicPdf() {
     const size = $("pe_pp_size").value, margin = +$("pe_pp_mar").value, up = $("pe_pp_up").checked, prog = $("pe_pp_prog");
     const opt = { engine: $("pe_pp_eng").value, dpi: +$("pe_pp_dpi").value, sharpen: 0.6, whiten: $("pe_pp_wh").checked, despeckle: true, gray: false };
     if (up && opt.engine !== "classic") { prog.textContent = "Loading the AI model…"; await getUpscaler(opt.engine); }
-    const L = PDFLib(), out = await L.PDFDocument.create();
+    const L = (await pdfLibReady()), out = await L.PDFDocument.create();
     for (let i = 0; i < list.length; i++) {
       const e = list[i], src = sources.find((q) => q.id === e.srcId), pg = await (await jsDoc(src)).getPage(e.srcIndex + 1);
       const vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + e.rot) % 360 });
@@ -1315,7 +1551,7 @@ function openPicPdf() {
       let c = await rasterize(e, src.picture ? Math.min(4, 1 / 0.75) : 2);
       let dpi = src.picture ? 96 : 144;
       if (up) { c = await enhanceOne(c, { ...opt, inW: vp.width / 72 }, (r) => prog.textContent = `Enhancing page ${i + 1} of ${list.length}… ${Math.round(r * 100)}%`); dpi = opt.dpi; }
-      const img = await out.embedJpg(dataURLtoU8(c.toDataURL("image/jpeg", 0.92)));
+      const img = await out.embedJpg((await canvasBytes(c, "image/jpeg", 0.92)));
       if (size === "fit") { const w = c.width * 72 / dpi, h = c.height * 72 / dpi; out.addPage([w, h]).drawImage(img, { x: 0, y: 0, width: w, height: h }); continue; }
       let [pw, ph] = PAGE_SIZES[size]; if (c.width > c.height) [pw, ph] = [ph, pw];
       const k = Math.min((pw - 2 * margin) / c.width, (ph - 2 * margin) / c.height), w = c.width * k, h = c.height * k;
@@ -1585,9 +1821,6 @@ function openPageSort() {
 }
 
 export function initPdfEditor() {
-  const pj = pdfjs();
-  if (pj && pj.GlobalWorkerOptions && !pj.GlobalWorkerOptions.workerSrc)
-    pj.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
   const open = () => pickFiles("application/pdf,image/*", true, addFiles);
   $("pe_open") && ($("pe_open").onclick = open);
   $("pe_selall") && ($("pe_selall").onclick = () => {

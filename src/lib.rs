@@ -991,6 +991,65 @@ pub extern "C" fn result_ptr() -> *const u8 {
     unsafe { RES_PTR }
 }
 
+// Hand a byte buffer to JS through the shared result slot (same scheme as `generate`).
+fn set_result(bytes: Box<[u8]>) -> usize {
+    let len = bytes.len();
+    let ptr = Box::into_raw(bytes) as *const u8;
+    unsafe {
+        let old = RES_PTR;
+        let old_len = RES_LEN;
+        if !old.is_null() {
+            drop(Box::from_raw(core::slice::from_raw_parts_mut(old as *mut u8, old_len)));
+        }
+        RES_PTR = ptr;
+        RES_LEN = len;
+    }
+    len
+}
+
+// ---------------------------------------------------------------------------
+// Scanned-page look (see scan.rs). `ptr` is an RGBA buffer of w*h*4 bytes the caller
+// allocated with `alloc`; it is processed in place.
+// ---------------------------------------------------------------------------
+
+mod scan;
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn scan_pixels(
+    ptr: *mut u8,
+    w: u32,
+    h: u32,
+    blur: f32,
+    sharp: f32,
+    cspace: u32,
+    bright: f32,
+    contrast: f32,
+    sepia: f32,
+    tint: f32,
+    grain: f32,
+    specks: f32,
+    seed_lo: u32,
+    seed_hi: u32,
+) {
+    let (w, h) = (w as usize, h as usize);
+    let px = unsafe { core::slice::from_raw_parts_mut(ptr, w * h * 4) };
+    let o = scan::ScanOpts {
+        blur, sharp, cspace, bright, contrast, sepia, tint, grain, specks,
+        seed: ((seed_hi as u64) << 32) | seed_lo as u64,
+    };
+    scan::process(px, w, h, &o);
+}
+
+/// Pack an RGBA buffer into 1-bit black & white rows (see scan::pack_bilevel).
+/// Returns the byte length; read the bytes at `result_ptr()`.
+#[no_mangle]
+pub extern "C" fn pack_bilevel(ptr: *const u8, w: u32, h: u32, threshold: u32) -> usize {
+    let (w, h) = (w as usize, h as usize);
+    let px = unsafe { core::slice::from_raw_parts(ptr, w * h * 4) };
+    set_result(scan::pack_bilevel(px, w, h, threshold).into_boxed_slice())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

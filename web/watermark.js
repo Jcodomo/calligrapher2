@@ -7,7 +7,9 @@
 //    that repeat on most pages (DRAFT, CONFIDENTIAL, SAMPLE, logos…).
 // Only remove watermarks from documents you own or have the rights to change.
 
-const L = () => window.PDFLib;
+import { pdfLibReady } from "./libs.js?v=2";
+
+const L = () => window.PDFLib;   // loaded by the public entry points below before any helper runs
 const WM_NAME = /water|draft|confidential|sample|copy|proof|preview|specimen|do ?not|internal/i;
 
 // ---- bytes <-> latin1 ----------------------------------------------------------
@@ -147,7 +149,7 @@ function annotSub(pdf, ref) { const P = L(); try { const d = pdf.context.lookup(
 // ---- public: scan --------------------------------------------------------------------
 // Returns candidates: [{ id, label, detail, pages:[indexes], checked }]
 export async function scanPdfWatermarks(bytes, { rotatedLabels = [] } = {}) {
-  const P = L();
+  const P = await pdfLibReady();
   const pdf = await P.PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
   const pages = pdf.getPages(), N = pages.length, layers = wmLayers(pdf);
   const groups = new Map();
@@ -179,7 +181,7 @@ export async function scanPdfWatermarks(bytes, { rotatedLabels = [] } = {}) {
 
 // ---- public: remove ------------------------------------------------------------------
 export async function removePdfWatermarks(bytes, ids) {
-  const P = L();
+  const P = await pdfLibReady();
   const want = new Set(ids);
   const pdf = await P.PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
   const layers = wmLayers(pdf);
