@@ -226,7 +226,7 @@ function renderHome() {
     <h2 class="sec-h" id="all">All tools</h2>
     <p class="sec-sub">Pick a tool, then drop your file on its page.</p>
     <div class="allgrid">${menuHTML()}</div>
-    <div class="foot"><span>Ghost Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/write">Handwriting</a> · <a href="#/tool/edit">Edit PDF</a> · <a href="#/tool/organize">PDF tools</a> · <a href="#/recent">Recent files</a></span></div>
+    <div class="foot"><span>Ghost Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/write">Handwriting</a> · <a href="#/tool/edit">Edit PDF</a> · <a href="#/tool/organize">PDF tools</a> · <a href="#/recent">Recent files</a> · <a href="changelog.html">What's new</a></span></div>
   </div>`;
   wireDrop($("view_home"), (files) => intakeAny(files));
   $("view_home").querySelector("[data-pick-home]").onclick = () => pick(DOC_IN, true, intakeAny);
@@ -266,7 +266,7 @@ function renderTool(id) {
     </div>
     ${t.nofile ? "" : `<div class="steps">${(STEPS[t.mode] || STEPS.pdf).map((s, i) => `<div><b>${i + 1}</b><p>${esc(s)}</p></div>`).join("")}</div>`}
     ${related.length ? `<div class="related"><h2>More ${cat.toLowerCase()} tools</h2><div class="pop">${related.map(card).join("")}</div></div>` : ""}
-    <div class="foot"><span>Ghost Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/">All tools</a></span></div>
+    <div class="foot"><span>Ghost Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/">All tools</a> · <a href="changelog.html">What's new</a></span></div>
   </div>`;
   const view = $("view_tool");
   if (t.nofile) view.querySelector("[data-start]").onclick = () => startNoFile(id);
