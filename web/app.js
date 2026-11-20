@@ -2,7 +2,7 @@
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
 import { initPdfEditor } from "./pdfedit.js?v=46";
-import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=2";
+import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard, listMemory, saveMemory, forgetMemory } from "./recents.js?v=3";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
 import { scanPdfWatermarks, removePdfWatermarks, eraseColor, inpaint, pageBackground } from "./watermark.js?v=2";
@@ -381,6 +381,8 @@ const LOOKS = {
   // true 1-bit black & white, like an office scanner's "B&W document" mode: crisp and the smallest PDF
   // the pages as they are, in shades of grey (no tilt, grain or blur)
   gray:      { on: true, cspace: "gray", border: false, rotate: 0, rotvar: 0, bright: 1, contrast: 1, noise: 0, yellow: 0, blem: 0, blur: 0, sharp: 0 },
+  photo:     { on: true, cspace: "color", border: false, rotate: 0, rotvar: 0.4, bright: 1.03, contrast: 1.05, noise: 6, yellow: 0.04, blem: 0, blur: 0.35, sharp: 0.1, photo: "photo", perspective: 0.35, shadow: 0.55, light: 0.5, wrinkles: 0.05 },
+  counter:   { on: true, cspace: "color", border: false, rotate: 0, rotvar: 1.5, bright: 1.02, contrast: 1.06, noise: 6, yellow: 0.05, blem: 0, blur: 0.35, sharp: 0.1, photo: "counter", perspective: 0.45, shadow: 0.7, light: 0.55, wrinkles: 0.15, folds: 0 },
   bwscan:    { on: true, cspace: "bilevel", border: false, rotate: 0.3, rotvar: 0.6, bright: 1.06, contrast: 1.15, noise: 6, yellow: 0, blem: 0.1, blur: 0.3, sharp: 0.2 },
 };
 // scale: pixels per page unit (a page unit is half a point, so 2 = 288 dpi); overlay: the same for your edits laid on top
@@ -515,7 +517,12 @@ async function selectedDocumentBytes(idx) {
   const keep = new Set(idx); for (let i = pdf.getPageCount() - 1; i >= 0; i--) if (!keep.has(i)) pdf.removePage(i);
   return pdf.save();
 }
+// the Scan look section of the download panel: its own full set of settings (dlOpts.scan)
+const SCAN_DEFAULTS = { on: true, cspace: "color", border: false, rotate: 0, rotvar: 0.6, bright: 1.03, contrast: 1.12, noise: 12, yellow: 0.07, blem: 0.22, blur: 0.45, sharp: 0,
+  straighten: false, wrinkles: 0, folds: 0, photo: "none", perspective: 0, shadow: 0, light: 0, severity: 50, seed: 1 };
+const panelScan = () => Object.assign({}, SCAN_DEFAULTS, dlOpts.scan || {});
 function scanParams() {
+  if (exportLook === "panel") { const p = panelScan(); return { ...p, on: p.on !== false }; }
   if (exportLook && LOOKS[exportLook]) return { cspace: "color", border: false, rotate: 0, rotvar: 0, bright: 1, contrast: 1, noise: 0, yellow: 0, blem: 0, blur: 0, sharp: 0, ...LOOKS[exportLook] };
   return {
     on: toggles.scanned,
@@ -618,7 +625,9 @@ let curPage = 0, edZoom = 1, edTool = "select", selDraw = null, docName = "docum
 let pagesSig = "", loadToken = 0, pageKeySeq = 1, editingId = null, activePanelTool = null;
 const orgSel = new Set();
 const REF_W = 800;                 // thickness units are px on an 800-px-wide page
-const DRAW_TOOLS = new Set(["pen", "highlight", "line", "arrow", "underline", "strike"]);
+const DRAW_TOOLS = new Set(["pen", "highlight", "line", "arrow", "underline", "strike", "blur"]);
+const FREEHAND = (k) => k === "pen" || k === "highlight" || k === "blur";
+const UNDER = (k) => k === "highlight" || k === "blur";   // drawn under the objects on the page
 const CLICK_TOOLS = new Set(["text", "sig", "handwrite", "date", "check", "note", "field:text", "field:date", "field:check", "field:sig"]);
 const BOX_TOOLS = new Set(["shape:rect", "shape:ellipse", "whiteout", "redact"]);
 const STICKY_TOOLS = new Set(["check"]);
@@ -632,7 +641,7 @@ const TD = {
   shape: { fill: "none", stroke: "#e23b3b", width: 3 },
   pen: { color: "#1b1b1f", width: 3 }, line: { color: "#e23b3b", width: 3 }, arrow: { color: "#e23b3b", width: 3 },
   highlight: { color: "#ffd400", width: 4 }, underline: { color: "#398dff", width: 2 }, strike: { color: "#e23b3b", width: 2 },
-  note: { color: "#ffd54f" }, whiteout: { color: "#ffffff" },
+  note: { color: "#ffd54f" }, whiteout: { color: "#ffffff" }, blur: { color: "#7a8597", width: 24, strength: 8 },
 };
 const drawDefaults = (k) => TD[k] || TD.pen;
 const TOOL_HINTS = {
@@ -741,7 +750,9 @@ function isPdfFile(f) { return f.type === "application/pdf" || /\.pdf$/i.test(f.
 function isImgFile(f) { return /^image\//.test(f.type) || /\.(png|jpe?g|gif|bmp|webp)$/i.test(f.name || ""); }
 // Add files (PDFs or pictures) to the open document.
 async function addFilesToDoc(files, at) {
-  if (!doc) { if (files[0]) await openDocFile(files[0]); return; }
+  const other = files.filter((f) => !isPdfFile(f) && !(window.__cal2IsNativeFile ? window.__cal2IsNativeFile(f) : isImgFile(f)));
+  if (other.length && window.__cal2ImportAny) { files = files.filter((f) => !other.includes(f)); window.__cal2ImportAny(other, { open: (fs) => addFilesToDoc(fs, at) }); if (!files.length) return; }
+  if (!doc) { if (files[0]) { await openDocFile(files[0]); if (files.length > 1) await addFilesToDoc(files.slice(1)); } return; }
   let total = 0;
   for (const f of files) {
     if (!isPdfFile(f) && !isImgFile(f)) continue;
@@ -1912,6 +1923,13 @@ function drawGeom(d, W, H) {
 }
 function drawMarkup(d, W, H) {
   const sw = Math.max(0.5, d.size * W), col = d.color, op = d.opacity ?? 1;
+  if (d.kind === "blur") {   // the page picture, blurred, seen only through the brush strokes
+    const p = docPages[d.page || 0]; if (!d.pts || !d.pts.length || !p || !p.url) return "";
+    const id = "b" + String(d.id).replace(/\W/g, "") + Math.round(W), px = Math.max(0.6, (d.blur ?? 8 / REF_W) * W);
+    return `<defs><mask id="${id}m" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}"><path d="${drawGeom(d, W, H).path}" fill="none" stroke="#fff" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/></mask>` +
+      `<filter id="${id}f" x="0" y="0" width="100%" height="100%" filterUnits="userSpaceOnUse"><feGaussianBlur stdDeviation="${px.toFixed(2)}" edgeMode="duplicate"/></filter></defs>` +
+      `<g mask="url(#${id}m)" opacity="${op}"><image href="${p.url}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none" filter="url(#${id}f)"/></g>`;
+  }
   if (d.pts) {
     if (!d.pts.length) return "";
     const hl = d.kind === "highlight" ? ` stroke-opacity="${(0.4 * op).toFixed(3)}" style="mix-blend-mode:multiply"` : ` stroke-opacity="${op}"`;
@@ -1934,7 +1952,7 @@ function drawBounds(d) {
 }
 function shiftDraw(d, dx, dy) { if (d.pts) d.pts = d.pts.map((q) => [q[0] + dx, q[1] + dy]); else { d.x0 += dx; d.x1 += dx; d.y0 += dy; d.y1 += dy; } }
 function renderDraws(ov, dispW, dispH, pi, under) {
-  const list = docDraws.filter((d) => (d.page || 0) === pi && ((d.kind === "highlight") === under));
+  const list = docDraws.filter((d) => (d.page || 0) === pi && (UNDER(d.kind) === under));
   const svg = document.createElementNS(SVGNS, "svg");
   svg.classList.add(under ? "drawunder" : "drawlayer");
   svg.setAttribute("width", dispW); svg.setAttribute("height", dispH); svg.setAttribute("viewBox", `0 0 ${dispW} ${dispH}`);
@@ -1978,13 +1996,14 @@ function startDraw(e, ov, dispW, dispH, pi) {
   const pt = (ev) => [(ev.clientX - r.left) / dispW, (ev.clientY - r.top) / dispH];
   const kind = edTool, dd = drawDefaults(kind);
   const d = { id: "dr" + drawSeq++, kind, page: pi, color: dd.color, size: (kind === "highlight" ? dd.width * 5 : dd.width) / REF_W, opacity: 1 };
-  const layer = ov.querySelector(kind === "highlight" ? "svg.drawunder" : "svg.drawlayer") || renderDraws(ov, dispW, dispH, pi, kind === "highlight");
+  if (kind === "blur") d.blur = (dd.strength || 8) / REF_W;
+  const layer = ov.querySelector(UNDER(kind) ? "svg.drawunder" : "svg.drawlayer") || renderDraws(ov, dispW, dispH, pi, UNDER(kind));
   const g = document.createElementNS(SVGNS, "g"); layer.appendChild(g);
   const s = pt(e);
-  if (kind === "pen" || kind === "highlight") d.pts = [s]; else { d.x0 = s[0]; d.y0 = s[1]; d.x1 = s[0]; d.y1 = s[1]; }
+  if (FREEHAND(kind)) d.pts = [s]; else { d.x0 = s[0]; d.y0 = s[1]; d.x1 = s[0]; d.y1 = s[1]; }
   const redraw = () => { g.innerHTML = drawMarkup(d, dispW, dispH); };
   redraw();
-  const mv = (ev) => { const p = pt(ev); if (kind === "pen" || kind === "highlight") d.pts.push(p); else { d.x1 = p[0]; d.y1 = (kind === "underline" || kind === "strike") ? d.y0 : p[1]; } redraw(); };
+  const mv = (ev) => { const p = pt(ev); if (FREEHAND(kind)) d.pts.push(p); else { d.x1 = p[0]; d.y1 = (kind === "underline" || kind === "strike") ? d.y0 : p[1]; } redraw(); };
   const up = () => {
     ov.removeEventListener("pointermove", mv); ov.removeEventListener("pointerup", up);
     const trivial = d.pts ? d.pts.length < 2 : Math.hypot((d.x1 - d.x0) * dispW, (d.y1 - d.y0) * dispH) < 4;
@@ -2010,6 +2029,25 @@ function drawAnnToCanvas(ctx, W, H, kinds, pi) {
     ctx.restore();
   }
 }
+// blur brush strokes: the page so far, blurred, painted back through the strokes (the export flattens the page,
+// so what is under a blur is gone from the file, not just hidden)
+function applyBlurDraws(ctx, W, H, pi) {
+  const list = docDraws.filter((d) => d.kind === "blur" && (d.page || 0) === (pi || 0) && d.pts && d.pts.length);
+  if (!list.length) return;
+  const src = document.createElement("canvas"); src.width = W; src.height = H; src.getContext("2d").drawImage(ctx.canvas, 0, 0);
+  for (const d of list) {
+    const px = Math.max(1, (d.blur ?? 8 / REF_W) * W), b = document.createElement("canvas"); b.width = W; b.height = H; const g = b.getContext("2d");
+    if ("filter" in g) { g.filter = `blur(${px.toFixed(1)}px)`; g.drawImage(src, 0, 0); g.filter = "none"; }
+    if (!("filter" in g) || g.getImageData(Math.floor(W / 2), Math.floor(H / 2), 1, 1).data[3] === 0) {   // no canvas filters: shrink and grow back
+      const k = Math.max(2, px), sm = document.createElement("canvas"); sm.width = Math.max(1, Math.round(W / k)); sm.height = Math.max(1, Math.round(H / k));
+      const sg = sm.getContext("2d"); sg.imageSmoothingQuality = "high"; sg.drawImage(src, 0, 0, sm.width, sm.height); g.clearRect(0, 0, W, H); g.imageSmoothingQuality = "high"; g.drawImage(sm, 0, 0, W, H);
+    }
+    g.globalCompositeOperation = "destination-in"; g.lineCap = "round"; g.lineJoin = "round"; g.lineWidth = Math.max(1, d.size * W); g.strokeStyle = "#000";
+    g.beginPath(); g.moveTo(d.pts[0][0] * W, d.pts[0][1] * H); for (let i = 1; i < d.pts.length; i++) g.lineTo(d.pts[i][0] * W, d.pts[i][1] * H); if (d.pts.length === 1) g.lineTo(d.pts[0][0] * W + 0.1, d.pts[0][1] * H); g.stroke();
+    ctx.save(); ctx.globalAlpha = d.opacity ?? 1; ctx.drawImage(b, 0, 0); ctx.restore();
+  }
+}
+const pageNeedsFlatten = (i) => docItems.some((it) => (it.page || 0) === i && it.type === "redact") || docDraws.some((d) => (d.page || 0) === i && d.kind === "blur");
 function roundRectPath(ctx, x, y, w, h, r) { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h); }
 
 // ---- undo / redo: objects, drawings, form values AND the page list -----------------
@@ -2358,13 +2396,23 @@ function renderProps() {
   }
   if (it && it.type === "note") { add(pcell(colorBtn(it.color || "#ffd54f", false, (c) => { it.color = c; TD.note.color = c; render(); }, "Note colour"))); add(dupDel()); return; }
   if (it && it.type === "img") { add(opacityCell(() => it.opacity ?? 1, (v) => { it.opacity = v; })); add(dupDel()); return; }
+  if (d && d.kind === "blur") {
+    add(pcell(mk("span", { title: "Brush width" }, ICON_LW), numBox(Math.round(d.size * REF_W), 4, 120, 1, (v) => { d.size = v / REF_W; TD.blur.width = v; render(); }, "Brush width")));
+    add(pcell(mk("label", {}, "Blur"), numBox(Math.round((d.blur ?? 8 / REF_W) * REF_W), 1, 40, 1, (v) => { d.blur = v / REF_W; TD.blur.strength = v; render(); }, "Blur strength")));
+    add(mk("div", { className: "phint" }, "Blur — the area is blurred in the download and the page is flattened, so the text under it can't be copied back out."));
+    add(dupDel()); return;
+  }
   if (d) {
     add(pcell(colorBtn(d.color, false, (c) => { d.color = c; drawDefaults(d.kind).color = c; render(); }, "Colour")));
     add(pcell(mk("span", { title: "Width" }, ICON_LW), numBox(Math.round(d.size * REF_W / (d.kind === "highlight" ? 5 : 1)), 1, 40, 1, (v) => { d.size = (d.kind === "highlight" ? v * 5 : v) / REF_W; render(); }, "Width")));
     add(opacityCell(() => d.opacity ?? 1, (v) => { d.opacity = v; })); add(dupDel()); return;
   }
   // nothing selected: options for the active tool
-  if (DRAW_TOOLS.has(t)) {
+  if (t === "blur") {
+    add(pcell(mk("span", { title: "Brush width" }, ICON_LW), numBox(TD.blur.width, 4, 120, 1, (v) => { TD.blur.width = v; }, "Brush width")));
+    add(pcell(mk("label", {}, "Blur"), numBox(TD.blur.strength, 1, 40, 1, (v) => { TD.blur.strength = v; }, "Blur strength")));
+    add(mk("div", { className: "phint" }, "Paint over anything you want to blur — names, numbers, faces."));
+  } else if (DRAW_TOOLS.has(t)) {
     const dd = drawDefaults(t);
     add(pcell(colorBtn(dd.color, false, (c) => { dd.color = c; propsSig = ""; renderProps(); }, "Colour")));
     add(pcell(mk("span", { title: "Width" }, ICON_LW), numBox(dd.width, 1, 40, 1, (v) => { dd.width = v; }, "Width")));
@@ -2407,12 +2455,91 @@ async function openDocFile(f) {
   const kind = isPdfFile(f) ? "pdf" : "image";
   await openDocBytes(u8.slice(), f.name, kind);
   rememberCurrentDoc(f.name, kind === "pdf" ? "application/pdf" : (f.type || "image/png"), u8).catch(() => {});
+  recognizeDoc(loadToken).catch(() => {});
+}
+
+// ---- document recognition: a document that looks like one edited before (even a different file) is offered
+// the same edits. A fingerprint = the first page's layout (a small grey picture) + the words on it.
+let docFp = null;   // Promise<fingerprint> for the open document
+function fingerprintDoc() {
+  if (docFp) return docFp;
+  docFp = (async () => {
+    const p = await ensurePageImage(0); if (!p || !p.img) return null;
+    const GW = 24, GH = 32, c = document.createElement("canvas"); c.width = GW; c.height = GH;
+    const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, GW, GH); g.drawImage(p.img, 0, 0, GW, GH);
+    const px = g.getImageData(0, 0, GW, GH).data, gray = [];
+    for (let i = 0; i < px.length; i += 4) gray.push(Math.round(px[i] * 0.3 + px[i + 1] * 0.59 + px[i + 2] * 0.11));
+    let words = [];
+    try {
+      const src = docSources[docPages[0].src];
+      if (src && src.pdf) { const tc = await (await src.pdf.getPage(docPages[0].idx + 1)).getTextContent(); words = tc.items.map((t) => t.str).join(" ").toLowerCase().match(/[a-z][a-z'-]{2,}/g) || []; }
+    } catch (_) {}
+    return { gray, words: [...new Set(words)].slice(0, 400), aspect: +(p.w / p.h).toFixed(3), pages: docPages.length };
+  })();
+  return docFp;
+}
+function fpCorr(a, b) {   // layout likeness, -1..1
+  const n = Math.min(a.length, b.length); if (!n) return 0;
+  let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n;
+  let sab = 0, saa = 0, sbb = 0; for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; }
+  return saa && sbb ? sab / Math.sqrt(saa * sbb) : 0;
+}
+function fpMatch(a, b) {
+  if (!a || !b || Math.abs(a.aspect - b.aspect) > 0.04) return 0;
+  const corr = fpCorr(a.gray, b.gray);
+  if (a.words.length >= 15 && b.words.length >= 15) {
+    const B = new Set(b.words); let both = 0; for (const w of a.words) if (B.has(w)) both++;
+    const jac = both / (a.words.length + b.words.length - both);
+    return jac >= 0.7 ? Math.max(jac, corr) : jac >= 0.4 && corr >= 0.5 ? (jac + corr) / 2 : 0;
+  }
+  return corr >= 0.9 ? corr : 0;   // pictures / scans: the layout alone
+}
+async function recognizeDoc(token) {
+  const fp = await fingerprintDoc(); if (!fp || token !== loadToken) return;
+  const mem = await listMemory(); let best = null, score = 0;
+  for (const m of mem) { if (m.ignore || m.id === docRecentId) continue; const s = fpMatch(fp, m.fp); if (s > score) { score = s; best = m; } }
+  if (!best || token !== loadToken || docItems.length || docDraws.length) return;
+  showRecognized(best, token);
+}
+function showRecognized(m, token) {
+  document.getElementById("recog")?.remove();
+  const n = (m.items || []).length + (m.draws || []).length + Object.keys(m.fields || {}).length;
+  const when = new Date(m.ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  const bar = mk("div", { id: "recog", className: "recog" });
+  bar.innerHTML = `<div><b>This looks like “${escapeHTML(m.name)}”</b>, which you edited on ${when}. Apply the same ${n} edit${n === 1 ? "" : "s"}?</div>` +
+    `<div class="recog-b"><button class="btn primary" data-r="apply">Apply edits</button><button class="btn" data-r="no">Not now</button><button class="linkbtn" data-r="never" title="Don't suggest this one again">Don't suggest it</button></div>`;
+  bar.onclick = async (e) => {
+    const a = e.target.closest("[data-r]")?.dataset.r; if (!a) return; bar.remove();
+    if (a === "never") { m.ignore = true; await saveMemory(m); toast("It won't be suggested again."); }
+    if (a === "apply" && token === loadToken) applyRemembered(m);
+  };
+  document.body.appendChild(bar);
+  setTimeout(() => bar.classList.add("on"), 20);
+}
+function applyRemembered(m) {
+  const np = docPages.length, num = (s) => +String(s || "").replace(/\D+/g, "") || 0;
+  const items = (m.items || []).filter((it) => (it.page || 0) < np).map((it) => ({ ...JSON.parse(JSON.stringify(it)), id: "it" + itemSeq++ }));
+  const draws = (m.draws || []).filter((d) => (d.page || 0) < np).map((d) => ({ ...JSON.parse(JSON.stringify(d)), id: "dr" + drawSeq++ }));
+  const names = new Set(docPages.flatMap((p) => (p.fields || []).map((f) => f.name)));
+  let nf = 0; for (const [k, v] of Object.entries(m.fields || {})) if (!names.size || names.has(k)) { fieldValues[k] = v; nf++; }
+  docItems.push(...items); docDraws.push(...draws);
+  itemSeq = Math.max(itemSeq, ...docItems.map((it) => num(it.id) + 1)); drawSeq = Math.max(drawSeq, ...docDraws.map((d) => num(d.id) + 1));
+  render(); snapshotNow();
+  const tot = items.length + draws.length + nf; toast(`Applied ${tot} edit${tot === 1 ? "" : "s"} from ${m.name} - check them, Undo takes them all back.`);
+}
+// remember what was done to this document (called with the recent-file save)
+async function rememberEdits(work) {
+  if (!work) return;
+  const fp = await fingerprintDoc().catch(() => null); if (!fp) return;
+  const id = "m" + (docRecentId || docName);
+  const old = (await listMemory()).find((x) => x.id === id);
+  await saveMemory({ id, name: docName, ts: Date.now(), fp, items: work.items, draws: work.draws, fields: work.fields, ignore: old ? old.ignore : false });
 }
 async function openDocBytes(u8, name, kind) {
   errEl.textContent = "";
   toast("Opening " + (name || "document") + "…");
   const token = ++loadToken;
-  docName = name || "document"; docRecentId = null; clearTimeout(workTimer);
+  docName = name || "document"; docRecentId = null; clearTimeout(workTimer); docFp = null; document.getElementById("recog")?.remove();
   docSources = []; docPages = []; docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {};
   pagesSig = ""; curPage = 0; edZoom = 1; orgSel.clear(); textBlocks.clear(); ocrBlocks.clear(); closePanelTool();
   await addSource(u8, name, kind);
@@ -2500,6 +2627,7 @@ async function saveWorkNow() {
   const edited = work.items.length || work.draws.length || Object.keys(work.fields).length || work.sources.length > 1 ||
     work.pages.some((p, i) => p.src !== 0 || p.idx !== i || p.rot) || work.pages.length !== (docSources[0].pdf ? docSources[0].pdf.numPages : 1);
   await saveRecentWork(id, edited ? work : null);
+  if (edited && (work.items.length || work.draws.length || Object.keys(work.fields).length)) rememberEdits(work).catch(() => {});
   refreshRecentLists();
 }
 // Open a recent entry; when it holds saved work, put everything back the way it was left.
@@ -2628,6 +2756,100 @@ function scanNoise(ctx, w, h, amount) {
   ctx.restore();
 }
 // Rotate a canvas by `ang` radians, expanding the frame and filling white.
+// ---- looks beyond the scanner: straighten, wrinkles, folds, photographed, on a countertop ------------------
+const hasExtras = (sp) => !!(sp && (sp.straighten || sp.wrinkles > 0 || sp.folds > 0 || (sp.photo && sp.photo !== "none")));
+function seeded(seed) { let x = (seed >>> 0) || 1; return () => (x = (Math.imul(x, 1664525) + 1013904223) >>> 0) / 4294967296; }
+// The page as it will be saved with the chosen look, trimmed back to the page's own size.
+async function lookPage(i, res) {
+  const sp = scanParams();
+  let c = await composePage(i, res, "all", { sharp: true });
+  if (sp.straighten) c = straightenCanvas(c);
+  c = finishCanvas(c);
+  const W0 = Math.round(docPages[i].w * res), H0 = Math.round(docPages[i].h * res);
+  if (c.width !== W0 || c.height !== H0) { const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); c = t; }
+  return extraLook(c, sp, i);
+}
+// Straighten a tilted page: the angle whose rows of ink line up best (sharpest row profile), -7..7 degrees.
+function straightenCanvas(c) {
+  const sc = Math.min(1, 700 / c.width), w = Math.max(1, Math.round(c.width * sc)), h = Math.max(1, Math.round(c.height * sc));
+  const t = document.createElement("canvas"); t.width = w; t.height = h; const g = t.getContext("2d", { willReadFrequently: true });
+  g.fillStyle = "#fff"; g.fillRect(0, 0, w, h); g.drawImage(c, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data, pts = [];
+  for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) { const k = (y * w + x) * 4; if (d[k] * 0.3 + d[k + 1] * 0.59 + d[k + 2] * 0.11 < 140) pts.push(x - w / 2, y - h / 2); }
+  if (pts.length < 200) return c;
+  const step = Math.max(2, Math.floor(pts.length / 40000) * 2), score = (deg) => {
+    const a = deg * Math.PI / 180, sn = Math.sin(a), cs = Math.cos(a), rows = new Float32Array(h * 2);
+    for (let k = 0; k < pts.length; k += step) { const yy = Math.round(-pts[k] * sn + pts[k + 1] * cs + h); if (yy >= 0 && yy < rows.length) rows[yy]++; }
+    let s2 = 0; for (let k = 0; k < rows.length; k++) s2 += rows[k] * rows[k]; return s2;
+  };
+  let best = 0, bs = score(0);
+  for (let deg = -7; deg <= 7.001; deg += 0.5) { const v = score(deg); if (v > bs) { bs = v; best = deg; } }
+  for (let deg = best - 0.5; deg <= best + 0.5; deg += 0.1) { const v = score(deg); if (v > bs) { bs = v; best = deg; } }
+  if (Math.abs(best) < 0.1) return c;
+  const o = document.createElement("canvas"); o.width = c.width; o.height = c.height; const ox = o.getContext("2d");
+  ox.fillStyle = "#fff"; ox.fillRect(0, 0, o.width, o.height); ox.translate(o.width / 2, o.height / 2); ox.rotate(best * Math.PI / 180); ox.drawImage(c, -c.width / 2, -c.height / 2);
+  return o;
+}
+function extraLook(c, sp, pageIndex) {
+  if (!hasExtras(sp) || (!sp.wrinkles && !sp.folds && (!sp.photo || sp.photo === "none"))) return c;
+  const W = c.width, H = c.height, rnd = seeded((sp.seed || 1) * 7919 + pageIndex * 104729), g = c.getContext("2d");
+  // wrinkles and folds: a light map (grey = no change) laid over the page with "overlay"
+  if (sp.wrinkles > 0 || sp.folds > 0) {
+    const s = 0.25, lw = Math.max(8, Math.round(W * s)), lh = Math.max(8, Math.round(H * s));
+    const L = document.createElement("canvas"); L.width = lw; L.height = lh; const l = L.getContext("2d");
+    l.fillStyle = "rgb(128,128,128)"; l.fillRect(0, 0, lw, lh);
+    const wr = Math.min(1, sp.wrinkles || 0);
+    for (let k = 0; k < Math.round(4 + wr * 10); k++) {   // soft dents
+      const x = rnd() * lw, y = rnd() * lh, r = (0.08 + rnd() * 0.25) * lw, light = rnd() < 0.5, gr = l.createRadialGradient(x, y, 0, x, y, r);
+      gr.addColorStop(0, light ? `rgba(255,255,255,${0.35 * wr})` : `rgba(0,0,0,${0.35 * wr})`); gr.addColorStop(1, "rgba(128,128,128,0)");
+      l.fillStyle = gr; l.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    for (let k = 0; k < Math.round(wr * 26); k++) {   // creases: a highlight with a shadow beside it
+      let x = rnd() * lw, y = rnd() * lh, a = rnd() * Math.PI * 2; const len = (0.1 + rnd() * 0.45) * lw, segs = 8, pts = [[x, y]];
+      for (let j = 0; j < segs; j++) { a += (rnd() - 0.5) * 0.9; x += Math.cos(a) * len / segs; y += Math.sin(a) * len / segs; pts.push([x, y]); }
+      const wd = Math.max(1, lw * 0.003 * (0.6 + rnd()));
+      [["rgba(255,255,255,", 0], ["rgba(0,0,0,", wd * 1.4]].forEach(([col, off]) => {
+        l.beginPath(); pts.forEach(([px, py], j) => (j ? l.lineTo(px + off, py + off) : l.moveTo(px + off, py + off)));
+        l.strokeStyle = col + (0.55 * wr).toFixed(3) + ")"; l.lineWidth = wd; l.lineCap = "round"; l.lineJoin = "round"; l.stroke();
+      });
+    }
+    const nf = Math.round(sp.folds || 0);   // folds: like a letter folded in three, then in half
+    const lines = nf >= 1 ? [["h", 1 / 3]] : []; if (nf >= 2) lines.push(["h", 2 / 3]); if (nf >= 3) lines.push(["v", 1 / 2]);
+    lines.forEach(([dir, at]) => {
+      const p = dir === "h" ? at * lh : at * lw, band = (dir === "h" ? lh : lw) * 0.035, gr = dir === "h" ? l.createLinearGradient(0, p - band, 0, p + band) : l.createLinearGradient(p - band, 0, p + band, 0);
+      gr.addColorStop(0, "rgba(128,128,128,0)"); gr.addColorStop(0.45, "rgba(255,255,255,0.45)"); gr.addColorStop(0.5, "rgba(0,0,0,0.6)"); gr.addColorStop(0.6, "rgba(40,40,40,0.35)"); gr.addColorStop(1, "rgba(128,128,128,0)");
+      l.fillStyle = gr; if (dir === "h") l.fillRect(0, p - band, lw, band * 2); else l.fillRect(p - band, 0, band * 2, lh);
+    });
+    g.save(); g.globalCompositeOperation = "overlay"; g.imageSmoothingQuality = "high"; g.filter = "blur(" + (W * 0.0008).toFixed(2) + "px)"; g.drawImage(L, 0, 0, W, H); g.restore();
+  }
+  if (!sp.photo || sp.photo === "none") return c;
+  // photographed: the page seen by a phone camera - slightly keystoned, turned, shadowed and lit, on a desk or a countertop
+  const counter = sp.photo === "counter", O = document.createElement("canvas"); O.width = W; O.height = H; const o = O.getContext("2d");
+  if (counter) {
+    const tones = [[214, 206, 192], [176, 172, 165], [62, 60, 58], [232, 228, 222], [139, 112, 86]], t = tones[Math.floor(rnd() * tones.length)];
+    o.fillStyle = `rgb(${t[0]},${t[1]},${t[2]})`; o.fillRect(0, 0, W, H);
+    for (let k = 0; k < 2600; k++) { const v = rnd() < 0.5 ? 0 : 255; o.fillStyle = `rgba(${v},${v},${v},${(0.04 + rnd() * 0.12).toFixed(3)})`; const r = W * (0.001 + rnd() * 0.004); o.fillRect(rnd() * W, rnd() * H, r, r); }
+    for (let k = 0; k < 7; k++) { o.beginPath(); let x = rnd() * W, y = rnd() * H; o.moveTo(x, y); for (let j = 0; j < 4; j++) o.quadraticCurveTo(x + (rnd() - 0.5) * W * 0.6, y + (rnd() - 0.5) * H * 0.4, x += (rnd() - 0.5) * W * 0.5, y += (rnd() - 0.2) * H * 0.3); o.strokeStyle = `rgba(255,255,255,${(0.05 + rnd() * 0.08).toFixed(3)})`; o.lineWidth = W * (0.001 + rnd() * 0.004); o.stroke(); }
+  } else {
+    const gr = o.createLinearGradient(0, 0, W, H); gr.addColorStop(0, "#5a4d42"); gr.addColorStop(1, "#2e2823"); o.fillStyle = gr; o.fillRect(0, 0, W, H);
+  }
+  // keystone: the far edge of the page is a little narrower
+  const k = Math.min(0.2, (sp.perspective || 0) * 0.16), P = document.createElement("canvas"); P.width = W; P.height = H; const pctx = P.getContext("2d"), strips = 160;
+  for (let j = 0; j < strips; j++) { const sy = j * H / strips, sh = H / strips + 1, wj = W * (1 - k * (1 - j / strips)); pctx.drawImage(c, 0, sy, W, sh, (W - wj) / 2, sy, wj, sh); }
+  const scale = counter ? 0.8 : 0.93, ang = ((rnd() - 0.5) * (counter ? 7 : 2.5) + (sp.rotate || 0)) * Math.PI / 180;
+  o.save(); o.translate(W / 2 + (rnd() - 0.5) * W * (counter ? 0.05 : 0.01), H / 2 + (rnd() - 0.5) * H * (counter ? 0.04 : 0.01)); o.rotate(ang); o.scale(scale, scale);
+  const sh = Math.min(1, sp.shadow || 0); o.shadowColor = `rgba(0,0,0,${(0.25 + 0.45 * sh).toFixed(3)})`; o.shadowBlur = W * (0.01 + 0.03 * sh); o.shadowOffsetX = W * 0.008 * sh; o.shadowOffsetY = W * 0.014 * sh;
+  o.drawImage(P, -W / 2, -H / 2); o.restore();
+  // light: a brighter corner, darker edges (vignette), warm cast, a little softness
+  const lt = Math.min(1, sp.light || 0), lx = rnd() < 0.5 ? W * 0.15 : W * 0.85, ly = H * (0.1 + rnd() * 0.2);
+  const hi = o.createRadialGradient(lx, ly, 0, lx, ly, Math.max(W, H) * 0.9); hi.addColorStop(0, `rgba(255,250,240,${(0.18 * lt).toFixed(3)})`); hi.addColorStop(1, "rgba(255,250,240,0)");
+  o.save(); o.globalCompositeOperation = "soft-light"; o.fillStyle = hi; o.fillRect(0, 0, W, H); o.restore();
+  const vg = o.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75); vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, `rgba(0,0,0,${(0.12 + 0.3 * lt).toFixed(3)})`);
+  o.save(); o.globalCompositeOperation = "multiply"; o.fillStyle = vg; o.fillRect(0, 0, W, H); o.fillStyle = `rgba(255,236,210,${(0.06 + 0.1 * lt).toFixed(3)})`; o.fillRect(0, 0, W, H); o.restore();
+  const soft = document.createElement("canvas"); soft.width = W; soft.height = H; const sx = soft.getContext("2d"); sx.filter = `blur(${(W / 1600).toFixed(2)}px)`; sx.drawImage(O, 0, 0);
+  c.width = c.height = 0; P.width = P.height = 0;
+  return soft;
+}
 function rotateCanvas(c, ang) {
   const w = c.width, h = c.height, cos = Math.abs(Math.cos(ang)), sin = Math.abs(Math.sin(ang));
   const nw = Math.ceil(w * cos + h * sin), nh = Math.ceil(w * sin + h * cos);
@@ -2785,6 +3007,7 @@ async function composePage(pi, res, mode = "all", opts = {}) {
       else { ctx.font = `${Math.min(h * 0.72, 18 * res)}px system-ui, sans-serif`; ctx.textBaseline = "middle"; ctx.fillText(String(v), x + 3, y + h / 2); }
     }
   }
+  if (mode !== "overlay") applyBlurDraws(ctx, W, H, pi);
   drawAnnToCanvas(ctx, W, H, ["highlight"], pi);
   for (const it of docItems) {
     if ((it.page || 0) !== pi) continue;
@@ -2809,7 +3032,7 @@ async function composeCanvas() {
   const res = +$("resolution").value;
   try { await document.fonts.ready; } catch (_) {}
   if (workMode === "doc" && doc) {
-    const r2 = Math.max(res / 2, picScale()), c = finishCanvas(await composePage(curPage, r2, "all", { sharp: true })), W0 = Math.round(docPages[curPage].w * r2), H0 = Math.round(docPages[curPage].h * r2);
+    const r2 = Math.max(res / 2, picScale()), c = await lookPage(curPage, r2), W0 = Math.round(docPages[curPage].w * r2), H0 = Math.round(docPages[curPage].h * r2);
     if (c.width === W0 && c.height === H0) return c;
     const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d");   // trim the scanned look's tilt back to the page size
     g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); return t;
@@ -2911,7 +3134,7 @@ async function exportPDF() {
       const fname = outName(baseName() + "-edited", "pdf");
       try { await document.fonts.ready; } catch (_) {}
       const sp = scanParams(), Q = dlQuality();
-      if (!sp.on && !(sp.blur > 0) && !(sp.sharp > 0) && Q.keepPages) {
+      if (!sp.on && !(sp.blur > 0) && !(sp.sharp > 0) && !hasExtras(sp) && Q.keepPages) {
         // Default: the original pages stay as they are (sharp text, small file, no compression marks); your
         // edits are laid on top and form fields are filled in and fixed in place. Only pages that must be
         // pictures (redactions, rotated pages, pictures) are drawn as pictures.
@@ -2928,7 +3151,7 @@ async function exportPDF() {
       const jq = sp.on ? Math.min(Q.q, 0.85) : Q.q;
       let pdf = await L.PDFDocument.create();
       // Scanned look: pages rendered in parallel in background workers (fast Rust/WASM engine, or ImageMagick).
-      let viaWorkers = sp.on && scanWorkersSupported();
+      let viaWorkers = sp.on && scanWorkersSupported() && !hasExtras(sp);   // the photo / wrinkle looks are drawn here
       if (viaWorkers) {
         try {
           if (dlOpts.engine === "realistic") toast("Loading the realistic scan engine (about 15 MB, first time only)…");
@@ -2946,7 +3169,7 @@ async function exportPDF() {
       for (let k = 0; !viaWorkers && k < idx.length; k++) {
         const i = idx[k];
         toast(`Building PDF… page ${k + 1} of ${idx.length}`);
-        let c = finishCanvas(await composePage(i, res, "all", { sharp: true }));
+        let c = await lookPage(i, res);
         // the scanned look tilts the page, which grows the picture a little: trim back to the page's own size
         const W0 = Math.round(docPages[i].w * res), H0 = Math.round(docPages[i].h * res);
         if (c.width !== W0 || c.height !== H0) {
@@ -3014,7 +3237,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
     let page = pdf.getPage(i);
     const base = page.getRotation().angle % 360;
     const Q = dlQuality(), src = docSources[p.src], pw0 = p.w / 2, ph0 = p.h / 2;
-    const redact = docItems.some((it) => (it.page || 0) === i && it.type === "redact");
+    const redact = pageNeedsFlatten(i);   // redaction or blur: what's under it must leave the file
     const replace = (np) => { pdf.removePage(i + 1); page = np; };
     let laidOver = false;
     if (redact) {
@@ -3102,7 +3325,7 @@ async function exportAllImages() {
   const sp = scanParams(), Q = dlQuality(), S = picScale(), zip = new window.JSZip(), keep = curPage, zname = outName(baseName() + "-pages", "zip");
   const png = dlOpts.quality === "exact" && !sp.on;   // lossless PNG for clean pages; a scanned look's grain makes PNGs huge, so JPG
   const name = (i, ext) => `${baseName()}-page${String(i + 1).padStart(2, "0")}.${ext}`;
-  if (sp.on && scanWorkersSupported()) {
+  if (sp.on && scanWorkersSupported() && !hasExtras(sp)) {
     // scanned look: pages rendered in parallel in the worker pool; 1-bit pages saved as tiny 1-bit PNGs
     try {
       const bilevel = sp.cspace === "bilevel" && typeof CompressionStream !== "undefined";
@@ -3119,7 +3342,7 @@ async function exportAllImages() {
   for (let k = 0; k < idx.length; k++) {
     const i = idx[k];
     toast(`Saving page ${k + 1} of ${idx.length}…`);
-    let c = finishCanvas(await composePage(i, S, "all", { sharp: true }));
+    let c = await lookPage(i, S);
     const W0 = Math.round(docPages[i].w * S), H0 = Math.round(docPages[i].h * S);
     if (c.width !== W0 || c.height !== H0 || !png) { const t = document.createElement("canvas"); t.width = W0; t.height = H0; const g = t.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, W0, H0); g.drawImage(c, (W0 - c.width) / 2, (H0 - c.height) / 2); c = t; }
     zip.file(`${baseName()}-page${String(i + 1).padStart(2, "0")}.${png ? "png" : "jpg"}`, await new Promise((r) => c.toBlob(r, png ? "image/png" : "image/jpeg", Q.q)));
@@ -3634,12 +3857,24 @@ function lastHand() {
 }
 
 // ---- draw pad: signatures and handwriting samples (mouse, finger or stylus) -------
-const dp = { mode: "sig", strokes: [], cur: null, color: "#1b1b1f", size: 3, ctx: null, wired: false };
+const DP_KEY = "cal2_dp_opts";
+const dp = Object.assign({ mode: "sig", strokes: [], redo: [], cur: null, color: "#1b1b1f", size: 3, ctx: null, wired: false, pen: "ball", slant: 0, stretch: 100, flow: 100, guide: true, pressure: true },
+  (() => { try { const o = JSON.parse(localStorage.getItem(DP_KEY) || "{}"); return { color: o.color, size: o.size, pen: o.pen, slant: o.slant, stretch: o.stretch, flow: o.flow, guide: o.guide, pressure: o.pressure }; } catch (_) { return {}; } })());
+for (const k of Object.keys(dp)) if (dp[k] === undefined) delete dp[k];
+Object.assign(dp, Object.assign({ color: "#1b1b1f", size: 3, pen: "ball", slant: 0, stretch: 100, flow: 100, guide: true, pressure: true }, dp));
+const dpStore = () => { try { localStorage.setItem(DP_KEY, JSON.stringify({ color: dp.color, size: dp.size, pen: dp.pen, slant: dp.slant, stretch: dp.stretch, flow: dp.flow, guide: dp.guide, pressure: dp.pressure })); } catch (_) {} };
+// slant and width change the drawn shape (around the pad's centre), not the stroke data, so they can be changed afterwards
+function dpShape(strokes) {
+  if (dp.mode !== "sig" || (!dp.slant && dp.stretch === 100)) return strokes;
+  const c = $("dp_canvas").getBoundingClientRect(), cx = c.width / 2, cy = c.height / 2, k = Math.tan(-dp.slant * Math.PI / 180), sx = dp.stretch / 100;
+  return strokes.map((s) => s.map((p) => ({ ...p, x: cx + (p.x - cx) * sx + (p.y - cy) * k, y: p.y })));
+}
+const dpPen = () => dp.mode === "sig" ? { pen: dp.pen, pressure: dp.pressure } : null;
 const DP_INKS = ["#1b1b1f", "#1d3a8a", "#0b2a6b", "#6d1a36"];
 function openDrawPad(m) {
   const dlg = $("dpad"); if (!dlg) return;
   dpWire();
-  dp.strokes = []; dp.cur = null; dpSetMode(m || "sig");
+  dp.strokes = []; dp.redo = []; dp.cur = null; dpSetMode(m || "sig");
   $("dp_text").value = ""; $("dp_name").value = "";
   if (!dlg.open) dlg.showModal();
   requestAnimationFrame(() => { dpResize(); dpRedraw(); });
@@ -3668,15 +3903,16 @@ function dpRedraw() {
   $("dp_ph").style.display = all.length ? "none" : "";
   if (!x) return;
   x.clearRect(0, 0, c.width, c.height);
-  if (all.length) { x.fillStyle = dp.color; x.fill(new Path2D(inkPath(all, dp.size, dpFx()))); }
+  if (all.length) { x.globalAlpha = dp.mode === "sig" ? dp.flow / 100 : 1; x.fillStyle = dp.color; x.fill(new Path2D(inkPath(dpShape(all), dp.size, dpFx(), dpPen()))); x.globalAlpha = 1; }
 }
 // Smooth, pressure/speed-sensitive ink: each stroke becomes a filled outline.
 // fx: smoothness (averaging + corner rounding), exactness (how many of the original
 // points are kept), realism (pressure/speed width changes, tapered ends, ink wobble).
 const INK_NEUTRAL = { smooth: 30, exact: 100, real: 100 };
 const dpFx = () => (dp.mode === "sig" ? sigFx : INK_NEUTRAL);
-function inkPath(strokes, size, fx = INK_NEUTRAL) {
-  const R = fx.real / 100, eps = Math.pow(1 - fx.exact / 100, 2) * 6, avg = Math.round(fx.smooth / 100 * 6), passes = Math.round(fx.smooth / 100 * 3);
+// pen: { pen: "ball" | "fine" | "fountain" | "marker" | "brush", pressure } (the signature pad's pen; null = ballpoint)
+function inkPath(strokes, size, fx = INK_NEUTRAL, pen = null) {
+  const kind = pen ? pen.pen : "ball", R = (pen && pen.pressure === false ? 0 : fx.real / 100) * (kind === "marker" || kind === "fine" ? 0.25 : 1), eps = Math.pow(1 - fx.exact / 100, 2) * 6, avg = Math.round(fx.smooth / 100 * 6), passes = Math.round(fx.smooth / 100 * 3);
   let d = "";
   strokes.forEach((s0, si) => {
     if (!s0.length) return;
@@ -3693,11 +3929,14 @@ function inkPath(strokes, size, fx = INK_NEUTRAL) {
     for (let i = 0; i < n; i++) {
       const a = s[Math.max(0, i - 1)], b = s[Math.min(n - 1, i + 1)];
       const v = Math.hypot(b.x - a.x, b.y - a.y) / Math.max(1, (b.t - a.t) || 8);
-      const speed = Math.max(0.55, Math.min(1.2, 1.2 - v * 0.35));
-      const edge = Math.min(1, Math.min(i, n - 1 - i) / Math.max(2, n * 0.08));
+      const brush = kind === "brush", speed = brush ? Math.max(0.3, Math.min(1.7, 1.7 - v * 0.8)) : Math.max(0.55, Math.min(1.2, 1.2 - v * 0.35));
+      const edge = Math.min(1, Math.min(i, n - 1 - i) / Math.max(2, n * (brush ? 0.18 : 0.08)));
       const real = size * (0.55 + 0.9 * (s[i].p || 0.5)) * speed * (0.45 + 0.55 * edge);
       const flat = size * 0.95 * (0.8 + 0.2 * edge);
       w[i] = flat + (real - flat) * R;
+      if (kind === "fine") w[i] *= 0.55;
+      else if (kind === "marker") w[i] = size * 1.35 * (0.9 + 0.1 * edge);
+      else if (kind === "fountain") { const ang = Math.atan2(b.y - a.y, b.x - a.x), nib = -Math.PI / 4; w[i] *= 0.3 + 1.3 * Math.abs(Math.sin(ang - nib)); }
     }
     for (let i = 1; i < n - 1; i++) w[i] = (w[i - 1] + w[i] * 2 + w[i + 1]) / 4;
     const amp = R * Math.min(0.7, size * 0.1), L = [], Rt = [];
@@ -3715,9 +3954,12 @@ function inkPath(strokes, size, fx = INK_NEUTRAL) {
 function dpSvg() {
   let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
   for (const s of dp.strokes) for (const p of s) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  const shaped = dpShape(dp.strokes); x0 = 1e9; y0 = 1e9; x1 = -1e9; y1 = -1e9;
+  for (const s of shaped) for (const p of s) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
   const pad = dp.size * 2 + 4, w = Math.ceil(x1 - x0 + pad * 2), h = Math.ceil(y1 - y0 + pad * 2);
-  const moved = dp.strokes.map((s) => s.map((p) => ({ ...p, x: p.x - x0 + pad, y: p.y - y0 + pad })));
-  return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="currentColor" stroke="none"><g><path d="${inkPath(moved, dp.size, dpFx())}"/></g></svg>`, w, h };
+  const moved = shaped.map((s) => s.map((p) => ({ ...p, x: p.x - x0 + pad, y: p.y - y0 + pad })));
+  const op = dp.mode === "sig" && dp.flow < 100 ? ` fill-opacity="${(dp.flow / 100).toFixed(2)}"` : "";
+  return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="currentColor" stroke="none"><g${op}><path d="${inkPath(moved, dp.size, dpFx(), dpPen())}"/></g></svg>`, w, h };
 }
 function dpSave(use) {
   const warn = $("dp_warn");
@@ -3753,18 +3995,38 @@ function dpSave(use) {
 function dpWire() {
   if (dp.wired) return; dp.wired = true;
   const c = $("dp_canvas");
-  c.addEventListener("pointerdown", (e) => { e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch (_) {} dp.cur = [dpPt(e)]; $("dp_warn").textContent = ""; dpRedraw(); });
+  c.addEventListener("pointerdown", (e) => { e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch (_) {} dp.cur = [dpPt(e)]; dp.redo = []; $("dp_warn").textContent = ""; dpRedraw(); });
   c.addEventListener("pointermove", (e) => { if (!dp.cur) return; const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e]; for (const ev of (evs.length ? evs : [e])) dp.cur.push(dpPt(ev)); dpRedraw(); });
   const end = () => { if (dp.cur) { dp.strokes.push(dp.cur); dp.cur = null; dpRedraw(); } };
   c.addEventListener("pointerup", end); c.addEventListener("pointercancel", end);
   $("dp_mode").querySelectorAll("button").forEach((b) => b.onclick = () => dpSetMode(b.dataset.dp));
-  $("dp_undo").onclick = () => { dp.strokes.pop(); dpRedraw(); };
-  $("dp_clear").onclick = () => { dp.strokes = []; dpRedraw(); };
-  $("dp_size").oninput = () => { dp.size = +$("dp_size").value; dpRedraw(); };
+  $("dp_undo").onclick = () => { if (dp.strokes.length) dp.redo.push(dp.strokes.pop()); dpRedraw(); };
+  $("dp_redo").onclick = () => { if (dp.redo.length) dp.strokes.push(dp.redo.pop()); dpRedraw(); };
+  $("dp_clear").onclick = () => { if (dp.strokes.length) dp.redo = [...dp.strokes].reverse(); dp.strokes = []; dpRedraw(); };   // Redo brings it all back
+  $("dpad").addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.target.tagName === "INPUT" && e.target.type === "text") return;
+    const k = e.key.toLowerCase(); if (k === "z" && !e.shiftKey) { e.preventDefault(); $("dp_undo").click(); } else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); $("dp_redo").click(); }
+  });
+  $("dp_size").value = dp.size;
+  $("dp_size").oninput = () => { dp.size = +$("dp_size").value; dpStore(); dpRedraw(); };
+  // pen, colour, slant, width, ink flow, guide line, pressure - remembered for next time
+  const opt = (id, key, fmt) => { const el = $(id); if (el.type === "checkbox") el.checked = !!dp[key]; else el.value = dp[key]; const out = $(id + "_v"); if (out && fmt) out.textContent = fmt(dp[key]);
+    el.oninput = el.onchange = () => { dp[key] = el.type === "checkbox" ? el.checked : el.type === "range" ? +el.value : el.value; if (out && fmt) out.textContent = fmt(dp[key]); if (key === "guide") $("dpad").classList.toggle("noguide", !dp.guide); if (key === "color") inks.querySelectorAll(".sw").forEach((x) => x.classList.remove("sel")); dpStore(); dpRedraw(); }; };
+  const inks = $("dp_ink");
+  opt("dp_pen", "pen"); opt("dp_color", "color"); opt("dp_slant", "slant", (v) => v + "°"); opt("dp_stretch", "stretch", (v) => v + "%"); opt("dp_flow", "flow", (v) => v + "%"); opt("dp_guide", "guide"); opt("dp_pressure", "pressure");
+  $("dpad").classList.toggle("noguide", !dp.guide);
+  const dlSig = async (png) => {
+    if (!dp.strokes.length) { $("dp_warn").textContent = "Sign on the pad first."; return; }
+    const g = dpSvg(), svg = g.svg.replace('fill="currentColor"', `fill="${dp.color}"`), name = "signature." + (png ? "png" : "svg");
+    let blob = new Blob([svg], { type: "image/svg+xml" });
+    if (png) { const im = new Image(), u = URL.createObjectURL(blob); im.src = u; await im.decode(); const c2 = document.createElement("canvas"), k = 3; c2.width = g.w * k; c2.height = g.h * k; c2.getContext("2d").drawImage(im, 0, 0, c2.width, c2.height); URL.revokeObjectURL(u); blob = await new Promise((r) => c2.toBlob(r, "image/png")); }
+    const a = document.createElement("a"), u2 = URL.createObjectURL(blob); a.href = u2; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u2), 4000);
+  };
+  $("dp_png").onclick = () => dlSig(true); $("dp_svgdl").onclick = () => dlSig(false);
   fxSliders($("dp_fx"), ["smooth", "exact", "real"], () => dpRedraw());
   $("dp_fxreset").onclick = () => fxReset($("dp_fx"), dpRedraw);
-  const inks = $("dp_ink"); inks.innerHTML = "";
-  DP_INKS.forEach((col, i) => { const b = document.createElement("div"); b.className = "sw" + (i === 0 ? " sel" : ""); b.style.background = col; b.title = col; b.onclick = () => { dp.color = col; inks.querySelectorAll(".sw").forEach((x) => x.classList.toggle("sel", x === b)); dpRedraw(); }; inks.appendChild(b); });
+  inks.innerHTML = "";
+  DP_INKS.forEach((col) => { const b = document.createElement("div"); b.className = "sw" + (col === dp.color ? " sel" : ""); b.style.background = col; b.title = col; b.onclick = () => { dp.color = col; $("dp_color").value = col; inks.querySelectorAll(".sw").forEach((x) => x.classList.toggle("sel", x === b)); dpStore(); dpRedraw(); }; inks.appendChild(b); });
   $("dp_x").onclick = $("dp_cancel").onclick = () => $("dpad").close();
   $("dp_save").onclick = () => dpSave(false);
   $("dp_place").onclick = () => dpSave(true);
@@ -4861,6 +5123,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("upload_btn").onclick = () => $("file").click();
   $("file").onchange = async (e) => {
     const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+    if (!isPdfFile(f) && window.__cal2IsNativeFile && !window.__cal2IsNativeFile(f) && window.__cal2ImportAny) { window.__cal2ImportAny([f], { open: async (fs) => { await addFilesToDoc(fs); if (!location.hash.startsWith("#/edit")) location.hash = "#/edit"; } }); return; }
     try { await openDocFile(f); if (!location.hash.startsWith("#/edit")) location.hash = "#/edit"; }
     catch (err) { errEl.textContent = "Could not open that file: " + (err.message || err); }
   };
@@ -4923,7 +5186,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   $("dl_panel").addEventListener("click", (e) => e.stopPropagation());
   document.querySelector('[data-ddbtn="dl"]')?.addEventListener("click", () => dlSync());   // page-dependent hints (file name) stay current
   // ---- live preview: the first page exactly as it will be saved, rebuilt whenever a setting changes ----
-  let prevTok = 0, prevTimer = 0, prevRun = null, dlBusy = false;
+  let prevTok = 0, prevTimer = 0, prevRun = null, dlBusy = false, lastPrev = null;
   const panelOpen = () => !!document.querySelector('[data-dd="dl"].open');
   const runExport = async (f) => {
     exportLook = (f === "pdf" || f === "png" || f === "jpg" || f === "zip") ? dlOpts.look : null;
@@ -4949,6 +5212,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
     box.classList.remove("busy");
     if (!cap.blob) { meta.textContent = cap.msg || "Nothing to preview yet."; cv.width = cv.height = 0; return; }
     let src = cap.blob, pageW = 0, pageH = 0, rot = 0;
+    lastPrev = { blob: cap.blob, name: cap.name };
     if (/\.zip$/.test(cap.name) && window.JSZip) { const z = await window.JSZip.loadAsync(src), first = Object.keys(z.files).sort()[0]; if (first) src = await z.file(first).async("blob"); }
     const W = Math.round(box.clientWidth * (window.devicePixelRatio || 1)) || 300;
     if (src.type === "application/pdf" || /\.pdf$/.test(cap.name)) {
@@ -4977,11 +5241,63 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   ["dl_range", "dl_wmtext"].forEach((id) => $(id) && $(id).addEventListener("input", schedulePreview));
   $("dl_more_reset").addEventListener("click", schedulePreview);
   document.querySelector('[data-ddbtn="dl"]')?.addEventListener("click", () => setTimeout(schedulePreview, 30));
-  $("dl_prev").onclick = () => {   // a bigger look
-    const cv = $("dl_prev_c"); if (!cv.width) return;
-    const ov = mk("div", { className: "dl-prev-big" }); const im = mk("img", { src: cv.toDataURL("image/png"), alt: "Preview" }); ov.appendChild(im);
+  $("dl_prev_big").onclick = async (e) => {   // a bigger look, only when asked (the preview itself stays in the panel), drawn sharp at screen size
+    e.stopPropagation(); if (!lastPrev) return;
+    const ov = mk("div", { className: "dl-prev-big" }), cv = document.createElement("canvas"); ov.appendChild(cv);
     ov.onclick = () => ov.remove(); document.body.appendChild(ov);
+    const dpr = window.devicePixelRatio || 1, H = Math.round((innerHeight - 40) * dpr);
+    let src = lastPrev.blob;
+    if (/\.zip$/.test(lastPrev.name) && window.JSZip) { const z = await window.JSZip.loadAsync(src), first = Object.keys(z.files).sort()[0]; if (first) src = await z.file(first).async("blob"); }
+    if (src.type === "application/pdf" || /\.pdf$/.test(lastPrev.name)) {
+      const pj = await pdfjsReady(), d = await pj.getDocument({ data: new Uint8Array(await src.arrayBuffer()) }).promise, pg = await d.getPage(1);
+      const v1 = pg.getViewport({ scale: 1 }), vp = pg.getViewport({ scale: H / v1.height }); cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+      const g = cv.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, cv.width, cv.height); await pg.render({ canvasContext: g, viewport: vp }).promise; d.destroy();
+    } else { const bm = await createImageBitmap(src); cv.width = bm.width; cv.height = bm.height; cv.getContext("2d").drawImage(bm, 0, 0); bm.close(); }
+    cv.style.height = Math.min(innerHeight - 40, cv.height / dpr) + "px"; cv.style.width = "auto";
   };
+  // ---- Scan look: every style and setting, shown in the live preview (look "Custom" = these settings) ----
+  const STYLES = [["clean", "Clean"], ["light", "Slightly scanned"], ["scanned", "Scanned"], ["photocopy", "Photocopy"], ["bwscan", "B&W scan"], ["gray", "Grayscale"], ["photo", "Photographed"], ["counter", "On a countertop"]];
+  const SLIDERS = [["rotate", "Tilt", -3, 3, 0.1, (v) => v.toFixed(1) + "°"], ["rotvar", "Tilt varies", 0, 3, 0.1, (v) => "±" + v.toFixed(1) + "°"], ["bright", "Brightness", 0.8, 1.3, 0.01, (v) => Math.round(v * 100) + "%"],
+    ["contrast", "Contrast", 0.8, 1.6, 0.01, (v) => Math.round(v * 100) + "%"], ["blur", "Blur", 0, 2, 0.05, (v) => v.toFixed(2) + "px"], ["sharp", "Sharpness", 0, 1, 0.01, (v) => Math.round(v * 100) + "%"],
+    ["noise", "Noise", 0, 60, 1, (v) => Math.round(v) + "%"], ["yellow", "Yellowish", 0, 0.5, 0.01, (v) => Math.round(v * 100) + "%"], ["blem", "Blemish", 0, 1, 0.01, (v) => Math.round(v * 100) + "%"],
+    ["wrinkles", "Wrinkles", 0, 1, 0.01, (v) => Math.round(v * 100) + "%"], ["folds", "Folds", 0, 3, 1, (v) => ["None", "One", "Two (letter)", "Three"][Math.round(v)]],
+    ["perspective", "Perspective", 0, 1, 0.01, (v) => Math.round(v * 100) + "%"], ["shadow", "Shadow", 0, 1, 0.01, (v) => Math.round(v * 100) + "%"], ["light", "Lighting", 0, 1, 0.01, (v) => Math.round(v * 100) + "%"]];
+  const scanSave = () => { lsSet(DL_KEY, dlOpts); dlSync(); schedulePreview(); };
+  const useStyle = (key) => {   // a style fills the settings, which can then be fine-tuned
+    const base = key === "clean" ? { on: false, blur: 0, sharp: 0, noise: 0, yellow: 0, blem: 0, rotate: 0, rotvar: 0, bright: 1, contrast: 1 } : LOOKS[key] || {};
+    const keep = panelScan();
+    dlOpts.scan = Object.assign({}, SCAN_DEFAULTS, { wrinkles: 0, folds: 0, photo: "none", perspective: 0, shadow: 0, light: 0 }, base, { style: key, straighten: keep.straighten, severity: keep.severity, seed: keep.seed });
+    dlOpts.look = "panel"; scanSave();
+  };
+  const paintScan = () => {
+    const sc = panelScan();
+    $("dl_styles").innerHTML = STYLES.map(([k, n]) => `<button type="button" data-style="${k}" class="${dlOpts.look === "panel" && sc.style === k ? "on" : ""}">${n}</button>`).join("");
+    $("dl_sliders").innerHTML = `<label class="sl"><span>Colours</span><select data-sc="cspace"><option value="color">Colour</option><option value="gray">Grey</option><option value="bw">Black & white</option><option value="bilevel">1-bit</option></select><b></b></label>` +
+      SLIDERS.map(([k, n, mn, mx, st, fmt]) => `<label class="sl"><span>${n}</span><input type="range" min="${mn}" max="${mx}" step="${st}" data-sc="${k}" value="${sc[k] || 0}"><b>${fmt(+sc[k] || 0)}</b></label>`).join("") +
+      `<label class="dlchk"><input type="checkbox" data-sc="border" ${sc.border ? "checked" : ""}> Dark scanner border</label>`;
+    $("dl_scan").querySelector('[data-sc="cspace"]').value = sc.cspace || "color";
+    $("dl_scan").querySelector('[data-sc="straighten"]').checked = !!sc.straighten;
+    $("dl_scan").querySelector('[data-sc="severity"]').value = sc.severity;
+  };
+  $("dl_scan_btn").onclick = () => { const open = $("dl_scan").hidden; $("dl_scan").hidden = !open; $("dl_scan_btn").setAttribute("aria-expanded", String(open)); if (open) paintScan(); };
+  $("dl_scan").addEventListener("click", (e) => { const b = e.target.closest("[data-style]"); if (b) { useStyle(b.dataset.style); paintScan(); } });
+  $("dl_scan").addEventListener("input", (e) => {
+    const k = e.target.dataset.sc; if (!k) return;
+    const sc = panelScan(), v = e.target.type === "checkbox" ? e.target.checked : e.target.tagName === "SELECT" ? e.target.value : +e.target.value;
+    sc[k] = v; if (k !== "severity" && k !== "straighten") sc.on = true;
+    dlOpts.scan = sc; if (k !== "severity") dlOpts.look = "panel";
+    const row = SLIDERS.find((r) => r[0] === k); if (row) e.target.parentNode.querySelector("b").textContent = row[5](+v);
+    lsSet(DL_KEY, dlOpts); $("dl_look").value = dlOpts.look; schedulePreview();
+  });
+  $("dl_scan").addEventListener("change", (e) => { if (e.target.dataset.sc) paintScan(); });
+  $("dl_random").onclick = () => {   // random settings for the current style, as strong as the severity says
+    const sc = panelScan(), k = Math.max(0.05, (sc.severity ?? 50) / 100), r = () => Math.random(), photo = sc.photo && sc.photo !== "none";
+    Object.assign(sc, { on: true, seed: Math.floor(r() * 1e9), rotate: (r() - 0.5) * 2 * k, rotvar: r() * 1.5 * k, bright: 1 + (r() - 0.3) * 0.12 * k, contrast: 1 + r() * 0.3 * k, blur: r() * 0.8 * k,
+      noise: Math.round(r() * 30 * k), yellow: r() * 0.15 * k, blem: r() * 0.5 * k, wrinkles: r() < 0.5 ? r() * 0.7 * k : 0, folds: r() < 0.4 * k ? 1 + Math.floor(r() * 2) : 0 });
+    if (photo) Object.assign(sc, { perspective: (0.2 + r() * 0.8) * k, shadow: (0.3 + r() * 0.7) * k, light: (0.3 + r() * 0.7) * k });
+    dlOpts.scan = sc; dlOpts.look = "panel"; scanSave(); paintScan();
+  };
+  $("dl_look").addEventListener("change", () => { const v = $("dl_look").value; if (v !== "panel" && v !== "custom" && LOOKS[v]) { const keep = panelScan(); dlOpts.scan = Object.assign({}, SCAN_DEFAULTS, { wrinkles: 0, folds: 0, photo: "none", perspective: 0, shadow: 0, light: 0 }, LOOKS[v], { style: v, straighten: keep.straighten, severity: keep.severity, seed: keep.seed }); lsSet(DL_KEY, dlOpts); } if (!$("dl_scan").hidden) paintScan(); });
   $("dl_go").onclick = async () => {
     closeDropdowns(); const f = dlOpts.format;
     clearTimeout(prevTimer); prevTok++; dlBusy = true;

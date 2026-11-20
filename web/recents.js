@@ -71,3 +71,32 @@ export async function saveRecent({ name, type, bytes, thumb }) {
     return id;
   } catch (_) { return null; }
 }
+
+// ---- document memory: what was done to a document, kept apart from the 10 recent files, so a document that
+// looks like one edited before (even another file) can be given the same edits. 40 newest are kept.
+const MEM_DB = "cal2memory", MEM = "docs", MEM_MAX = 40;
+function openMem() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(MEM_DB, 1);
+    r.onupgradeneeded = () => { const db = r.result; if (!db.objectStoreNames.contains(MEM)) db.createObjectStore(MEM, { keyPath: "id" }); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+}
+export async function listMemory() {
+  try {
+    const db = await openMem();
+    return await new Promise((res) => { const out = [], cur = db.transaction(MEM, "readonly").objectStore(MEM).openCursor(); cur.onsuccess = (e) => { const c = e.target.result; if (c) { out.push(c.value); c.continue(); } else res(out.sort((a, b) => b.ts - a.ts)); }; cur.onerror = () => res(out); });
+  } catch (_) { return []; }
+}
+export async function saveMemory(rec) {
+  try {
+    const db = await openMem();
+    await new Promise((res, rej) => { const t = db.transaction(MEM, "readwrite"); t.objectStore(MEM).put(rec); t.oncomplete = res; t.onerror = () => rej(t.error); });
+    const all = await listMemory();
+    for (const r of all.slice(MEM_MAX)) await new Promise((res) => { const t = db.transaction(MEM, "readwrite"); t.objectStore(MEM).delete(r.id); t.oncomplete = res; t.onerror = res; });
+    return true;
+  } catch (_) { return false; }
+}
+export async function forgetMemory(id) {
+  try { const db = await openMem(); await new Promise((res) => { const t = db.transaction(MEM, "readwrite"); t.objectStore(MEM).delete(id); t.oncomplete = res; t.onerror = res; }); } catch (_) {}
+}

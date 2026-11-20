@@ -8,7 +8,13 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 ## 2026-11-20
 
 ### Downloads & exports
-- **Live download preview:** the Download panel shows the first page exactly as it will be saved - built by the real download, so the look, quality, watermark, page numbers, paper size, turn and page choice all show as you change them - with its size in inches or pixels and about how big the file is per page. Click it for a bigger look. Word and text downloads say there's no picture preview.
+- **Live download preview:** the Download panel shows the first page exactly as it will be saved - built by the real download, so the look, quality, watermark, page numbers, paper size, turn and page choice all show as you change them - with its size in inches or pixels and about how big the file is per page. Word and text downloads say there's no picture preview.
+- **The preview stays at the top of the Download panel** while you scroll its settings, so every change shows straight away; the ⤢ button opens a full-size, sharp view.
+- **Scan look:** a button in the Download panel opens every scan style - Clean, Slightly scanned, Scanned, Photocopy, B&W scan, Grayscale, Photographed and Photographed on a countertop - with fine-tuning for tilt, tilt variation, brightness, contrast, blur, sharpness, noise, yellowing, blemishes, colours and a dark scanner border. All of it shows in the live preview before you download.
+- **Photographed looks:** the page as a phone photo - perspective, shadow, uneven lighting and a slight warm cast - or lying on a countertop, with sliders for each.
+- **Wrinkles and folds:** crumpled-paper creases and one to three fold lines (two makes a letter fold).
+- **Straighten:** tilted pages (crooked scans and photos) are turned level before the look is applied.
+- **Randomize** with a **severity** slider: new random settings for the chosen style, as mild or as strong as the slider says.
 
 ### OCR & fonts
 - **Edit scanned text in a matching font.** With Edit text on a scanned page (or a page with an OCR text layer, or a PDF font with an unknown name), the page is read with OCR and each line opens as editable text in the closest matching font. The match compares the line's ink with 39 font families in regular, bold and italic; tested 32 of 32 on sharp text and 23 of 32 exact (28 in the top three) on small, blurry, noisy text.
@@ -17,12 +23,18 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 - **Letter spacing is matched** so an edited line keeps the original width.
 
 ### Editor
+- **Open almost any file:** drop or choose text, Markdown, CSV, JSON, XML, web pages, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), OpenDocument, RTF, emails (.eml), SVG, TIFF, BMP, ICO, AVIF or a ZIP of them. Each is read in the browser and you choose: open it in the editor, or save it as a PDF, a picture or a Word document. Files that can't be read (old .doc/.xls/.ppt, HEIC on most browsers, Pages, Photoshop, audio and video, programs, RAR) get a plain explanation and what to do instead.
+- **Blur brush** (Draw → Blur brush): paint over names, numbers or faces to blur them, with brush width and blur strength. In the download the page is flattened like a redaction, so the text under the blur is gone from the file, not just hidden.
+- **Document recognition:** when you open a document that looks like one you edited before - even a different file, such as the same form for another person - Ghost Calligrapher offers to apply the same edits (text, signatures, boxes, drawings, blurs and form entries). It compares the first page's layout and words; Undo takes the applied edits back, and "Don't suggest it" stops the offer for that document. The last 40 edited documents are remembered, only in your browser.
 - **Alignment guides:** while you drag an object, a faint line shows when its edges or centre line up with another object, a line of the page's text or the middle of the page, and the object snaps there. The line goes away when you let go; hold Alt to move freely.
 - **Recent documents keep your work:** the 10 most recent documents keep their edits, page order, turned pages and filled fields and reopen exactly as you left them (marked "Edited").
 
 ### Site & layout
 - **Free-form entry everywhere:** number boxes take 12.5pt, 1,200, 50%, 10+2 and the arrow keys; date and time boxes take Sep 15 2026, 9/15/26, today, +30, 3pm (with a calendar button); slider numbers can be clicked and typed; the handwriting seed takes any text; page-number boxes take "Page 7" or roman numerals.
 - **What's new page** (changelog.html, linked at the bottom of every page): every change day by day, each day split by section, with a button per section. Rebuilt from CHANGELOG.md with `node tools/changelog-page.mjs`.
+
+### Handwriting & signatures
+- **More signature pad settings:** pen style (ballpoint, fine liner, fountain pen, felt marker, brush pen), any ink colour, slant, width, ink flow, pressure & speed on or off, the signing line on or off, Redo (also Ctrl+Y) next to Undo, and PNG or SVG download of the signature. Your choices are remembered.
 
 ### Fixes
 - Duplicate-page detection and sort by page number used an old way of calling the OCR reader after the update merge and failed.

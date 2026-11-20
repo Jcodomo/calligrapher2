@@ -228,7 +228,7 @@ function renderHome() {
     <div class="allgrid">${menuHTML()}</div>
     <div class="foot"><span>Ghost Calligrapher · everything happens on your device — nothing is uploaded.</span><span><a href="#/write">Handwriting</a> · <a href="#/tool/edit">Edit PDF</a> · <a href="#/tool/organize">PDF tools</a> · <a href="#/recent">Recent files</a> · <a href="changelog.html">What's new</a></span></div>
   </div>`;
-  wireDrop($("view_home"), (files) => intakeAny(files));
+  wireDrop($("view_home"), (files) => intakeAny(files), "");   // any file: what isn't a PDF or picture is converted
   $("view_home").querySelector("[data-pick-home]").onclick = () => pick(DOC_IN, true, intakeAny);
   wireBuilderPanel($("view_home"));
   refreshHomeRecents();
@@ -299,7 +299,7 @@ async function renderRecent() {
     el.querySelector('[data-a="del"]').onclick = async () => { await delRecent(r.id); renderRecent(); refreshHomeRecents(); };
     host.appendChild(el);
   }
-  if (!list.length) wireDrop($("view_tool"), intakeAny);
+  if (!list.length) wireDrop($("view_tool"), intakeAny, "");
   wireBuilderPanel($("view_tool"));
 }
 async function openRecent(id, where) {
@@ -338,8 +338,16 @@ async function appReady() {
 }
 // Tools that work on the open document (everything except the pure converters / unlock).
 const ON_DOC = (id) => TOOLS[id] && !["img2pdf", "dupes", "pagesort"].includes(id) && id !== "txt2pdf" && id !== "unlock" && !(TOOLS[id].mode === "write" && !TOOLS[id].setup && id !== "write");
+// Files that aren't a PDF or a picture the browser shows: read them and offer PDF / picture / Word / open.
+const notNative = (f) => !(isPdf(f) || /\.(png|jpe?g|gif|webp)$/i.test(f.name || "") || /^image\/(png|jpeg|gif|webp)$/.test(f.type));
+async function convertFirst(files, open) {
+  await appReady();
+  if (!window.__cal2ImportAny) { toast("Choose a PDF or a picture."); return; }
+  await window.__cal2ImportAny(files, { open });
+}
 async function intakeAny(files) {
   files = [...files];
+  if (files.some(notNative)) return convertFirst(files, (fs) => intakeAny(fs));
   const pdfs = files.filter(isPdf), imgs = files.filter(isImage);
   if (pdfs.length > 1) return intakeTool("organize", pdfs);
   if (pdfs.length === 1) return intakeTool("edit", pdfs);
@@ -353,6 +361,7 @@ async function intakeTool(id, files) {
   await appReady();
   try {
     if (ON_DOC(id) && id !== "write" && id !== "signature" && id !== "sigimport") {
+      if (files.some(notNative)) return convertFirst(files, (fs) => intakeTool(id, fs));
       const docs = files.filter((x) => isPdf(x) || isImage(x));
       if (!docs.length) { toast("Choose a PDF or a picture."); return; }
       await window.__cal2OpenDocFile(docs[0]);
@@ -476,6 +485,12 @@ stage.addEventListener("drop", async (e) => {
   e.preventDefault();
   const files = [...(e.dataTransfer.files || [])]; if (!files.length) return;
   const mode = document.body.dataset.work;
+  if (files.some(notNative)) {   // other file types are read and converted first
+    const native = files.filter((x) => !notNative(x)), other = files.filter(notNative);
+    const into = async (fs) => { if (mode === "pdf") window.__cal2AddPdfFiles(fs); else if (mode === "doc") window.__cal2AddFilesToDoc(fs); else { await window.__cal2OpenDocFile(fs[0]); if (fs.length > 1) await window.__cal2AddFilesToDoc(fs.slice(1)); go("#/edit"); } };
+    if (native.length) await into(native);
+    return convertFirst(other, into);
+  }
   if (mode === "pdf") { const add = files.filter((x) => isPdf(x) || isImage(x)); if (add.length) window.__cal2AddPdfFiles(add); return; }
   if (mode === "doc") {
     // a picture dropped on a page goes on that page; PDFs are added to the document
