@@ -1,13 +1,13 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=46";
+import { initPdfEditor } from "./pdfedit.js?v=47";
 import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard, listMemory, saveMemory, forgetMemory } from "./recents.js?v=3";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
 import { scanPdfWatermarks, removePdfWatermarks, eraseColor, inpaint, pageBackground } from "./watermark.js?v=2";
 import { pdfjsReady, pdfLibReady, warmPdfLibs, prefetchOn, canvasBytes } from "./libs.js?v=2";
-import { scanWorkersSupported, scanOffThread, scanConcurrency, warmRealistic, bilevelPng } from "./scanpool.js?v=4";
+import { scanWorkersSupported, scanOffThread, scanConcurrency, warmRealistic, bilevelPng, overlayPng } from "./scanpool.js?v=5";
 
 const WASM_URL = "./calligrapher2.wasm";
 let wasm = null;
@@ -3256,7 +3256,7 @@ async function exportPDF() {
     }
     const c = await composeCanvas();
     let pdf = await L.PDFDocument.create(); const pw = c.width / 2, ph = c.height / 2;
-    const img = await pdf.embedPng(await canvasBytes(c, "image/png"));   // PNG keeps the ink edges and see-through background exact
+    const img = await pdf.embedPng(await overlayPng(c));   // PNG keeps the ink edges and see-through background exact
     pdf.addPage([pw, ph]).drawImage(img, { x: 0, y: 0, width: pw, height: ph });
     pdf = await finishPdf(pdf, L, null);
     download(outName("calligraphy", "pdf"), await pdfBlob(pdf)); toast("Saved PDF.");
@@ -3327,7 +3327,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
       if (box) {
         const crop = document.createElement("canvas"); crop.width = box.w; crop.height = box.h; crop.getContext("2d").drawImage(ann, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
         const { width: PW, height: PH } = page.getSize(), kx = PW / ann.width, ky = PH / ann.height;
-        page.drawImage(await pdf.embedPng((await canvasBytes(crop, "image/png"))), { x: box.x * kx, y: PH - (box.y + box.h) * ky, width: box.w * kx, height: box.h * ky });
+        page.drawImage(await pdf.embedPng(await overlayPng(crop)), { x: box.x * kx, y: PH - (box.y + box.h) * ky, width: box.w * kx, height: box.h * ky });
       }
     }
     const { width: pw, height: ph } = page.getSize();

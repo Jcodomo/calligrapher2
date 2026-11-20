@@ -9,7 +9,7 @@
 
 import { saveRecent, listRecents, getRecent, delRecent, makeRecentCard } from "./recents.js?v=1";
 import { OCR_LANGS } from "./ocr-langs.js?v=1";
-import { ocrPrepOffThread, scanWorkersSupported, warmRealistic } from "./scanpool.js?v=4";
+import { ocrPrepOffThread, scanWorkersSupported, warmRealistic } from "./scanpool.js?v=5";
 
 const $ = (id) => document.getElementById(id);
 

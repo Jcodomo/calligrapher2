@@ -75,6 +75,40 @@ export async function bilevelPng(bits, w, h) {
   return new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), ...chunk("IHDR", ihdr), ...chunk("IDAT", z), ...chunk("IEND", new Uint8Array(0))], { type: "image/png" });
 }
 
+// A see-through layer (your edits over the original page) as a PNG whose clear pixels carry the colour of the
+// nearest drawn pixel instead of black. Printers and PDF viewers scale an image's colour and its transparency
+// separately, so black under the clear parts bleeds into the edges: a grey frame around white boxes and a
+// dark fringe around text, signatures and highlights. The browser's own PNG encoder always writes black there.
+export async function overlayPng(canvas, reach = 8) {
+  const w = canvas.width, h = canvas.height, d = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  const n = w * h, done = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (d[i * 4 + 3]) done[i] = 1;
+  const nb = (i, f) => { const x = i % w; if (x > 0) f(i - 1); if (x < w - 1) f(i + 1); if (i >= w) f(i - w); if (i < n - w) f(i + w); };
+  let front = [];
+  for (let i = 0; i < n; i++) if (!done[i]) { let near = false; nb(i, (j) => { if (done[j] === 1) near = true; }); if (near) { front.push(i); done[i] = 2; } }
+  for (let pass = 0; pass < reach && front.length; pass++) {
+    for (const i of front) {   // average of the neighbours already coloured
+      let r = 0, g = 0, b = 0, c = 0;
+      nb(i, (j) => { if (done[j] === 1) { r += d[j * 4]; g += d[j * 4 + 1]; b += d[j * 4 + 2]; c++; } });
+      if (c) { d[i * 4] = r / c; d[i * 4 + 1] = g / c; d[i * 4 + 2] = b / c; }
+    }
+    for (const i of front) done[i] = 1;
+    const next = [];
+    for (const i of front) nb(i, (j) => { if (!done[j]) { done[j] = 2; next.push(j); } });
+    front = next;
+  }
+  // RGBA, 8 bit, each row with the "Sub" filter (left neighbour), which packs these layers well
+  const stride = w * 4, raw = new Uint8Array((stride + 1) * h);
+  for (let y = 0; y < h; y++) {
+    const o = y * (stride + 1), s = y * stride; raw[o] = 1;
+    for (let k = 0; k < stride; k++) raw[o + 1 + k] = (d[s + k] - (k >= 4 ? d[s + k - 4] : 0)) & 255;
+  }
+  const z = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate"))).arrayBuffer());
+  const ihdr = new Uint8Array(13), dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w); dv.setUint32(4, h); ihdr[8] = 8; ihdr[9] = 6;   // 8-bit RGBA
+  return new Uint8Array(await new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), ...chunk("IHDR", ihdr), ...chunk("IDAT", z), ...chunk("IEND", new Uint8Array(0))]).arrayBuffer());
+}
+
 // OCR page cleanup (remove background / clean / deskew) in the realistic worker, which holds ImageMagick.
 // Resolves to { bmp: ImageBitmap, angle, magickOk }.
 export async function ocrPrepOffThread(canvas, o) {
