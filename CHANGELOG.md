@@ -30,6 +30,7 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 - **Recent documents keep your work:** the 10 most recent documents keep their edits, page order, turned pages and filled fields and reopen exactly as you left them (marked "Edited").
 
 ### Site & layout
+- **Tab icon:** the pen-stroke icon is kept in a darker navy (mtgcalc uses the same icon in a lighter blue), and the What's new page shows it too.
 - **Free-form entry everywhere:** number boxes take 12.5pt, 1,200, 50%, 10+2 and the arrow keys; date and time boxes take Sep 15 2026, 9/15/26, today, +30, 3pm (with a calendar button); slider numbers can be clicked and typed; the handwriting seed takes any text; page-number boxes take "Page 7" or roman numerals.
 - **What's new page** (changelog.html, linked at the bottom of every page): every change day by day, each day split by section, with a button per section. Rebuilt from CHANGELOG.md with `node tools/changelog-page.mjs`.
 
