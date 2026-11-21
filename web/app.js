@@ -7,6 +7,7 @@ import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
 import { scanPdfWatermarks, removePdfWatermarks, eraseColor, inpaint, pageBackground } from "./watermark.js?v=2";
 import { pdfjsReady, pdfLibReady, warmPdfLibs, prefetchOn, canvasBytes } from "./libs.js?v=2";
+import { stripEditedText } from "./pdftext.js?v=1";
 import { scanWorkersSupported, scanOffThread, scanConcurrency, warmRealistic, bilevelPng, overlayPng } from "./scanpool.js?v=5";
 
 const WASM_URL = "./calligrapher2.wasm";
@@ -1957,8 +1958,13 @@ function fitTextBoxes() {
     const ovW = el.parentNode.clientWidth || 1;
     if (it.tedit && td.scrollWidth > el.clientWidth + 1) { el.style.width = td.scrollWidth + "px"; it.nw = td.scrollWidth / ovW; it.ar = el.clientHeight / td.scrollWidth; }
     if (td.scrollHeight > el.clientHeight + 1) { el.style.height = td.scrollHeight + "px"; it.ar = td.scrollHeight / el.clientWidth; }
+    // an edited line that now runs past the page edge is marked, and the first time you are told how to fix it
+    const over = it.tedit && it.nx + it.nw > 0.995;
+    el.classList.toggle("tover", over);
+    if (over && !overWarned.has(it.id)) { overWarned.add(it.id); toast("This line is now longer than the page. Press ⤢ Fit to size it to the original line, or shorten it."); }
   });
 }
+const overWarned = new Set();
 function onPagePointerDown(e, ov, pi, dispW, dispH) {
   if (e.button && e.button !== 0) return;
   closePops();
@@ -3600,6 +3606,32 @@ function exportSVG() {
 // flat picture so nothing hidden survives.
 // fields added in the editor have no border or background in the PDF (no lines around them once filled in)
 const NO_BOX = (L) => ({ borderWidth: 0, borderColor: undefined, backgroundColor: undefined, textColor: L.rgb(0.06, 0.09, 0.17) });
+// the lines changed with Edit Text on page i, in PDF user space, with their original words
+async function editedTextBoxes(i) {
+  const p = docPages[i], src = p && docSources[p.src];
+  const its = docItems.filter((it) => it.tedit && it.page === i && it.cover && it.orig != null && it.text !== it.orig);
+  if (!its.length || !src || !src.pdf) return null;
+  const pg = await src.pdf.getPage(p.idx + 1), vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + (p.rot || 0)) % 360 });
+  const boxes = its.map((it) => {
+    const c = it.cover, a = vp.convertToPdfPoint(c.nx * vp.width, c.ny * vp.height), b = vp.convertToPdfPoint((c.nx + c.nw) * vp.width, (c.ny + c.nh) * vp.height);
+    return { x0: Math.min(a[0], b[0]), y0: Math.min(a[1], b[1]), x1: Math.max(a[0], b[0]), y1: Math.max(a[1], b[1]), text: it.orig };
+  });
+  return { pg, boxes };
+}
+// The words of your text boxes and edited lines also go in as invisible real text over the picture of them, so the saved
+// PDF can be searched and copied like the original, and a Word download reads them.
+async function hiddenText(L, pdf, page, it, pw, ph, cache) {
+  const font = cache.f || (cache.f = await pdf.embedFont(L.StandardFonts.Helvetica)), ok = cache.cs || (cache.cs = new Set(font.getCharacterSet()));
+  const fsPt = (it.fs || 0.02) * pw, lines = String(it.text).split(/\n/);
+  const top = it.ny * ph, first = it.tedit ? (it.asc || 0.86) * fsPt : 1.06 * fsPt;
+  lines.forEach((ln, k) => {
+    const t = [...ln].map((ch) => (ok.has(ch.codePointAt(0)) ? ch : "?")).join("").replace(/\s+$/, ""); if (!t.trim()) return;
+    const want = Math.max(1, it.nw * pw - fsPt * 0.16), have = font.widthOfTextAtSize(t, fsPt) || want;
+    const y = ph - top - first - k * fsPt * 1.2, x = it.nx * pw + (it.tedit ? 0 : fsPt * 0.08);
+    page.pushOperators(L.beginText(), L.setFontAndSize(page.node.newFontDictionary(font.name, font.ref), fsPt), L.setTextRenderingMode(L.TextRenderingMode.Invisible),
+      L.setCharacterSqueeze(Math.max(40, Math.min(250, lines.length > 1 ? 100 : (want / have) * 100))), L.setTextMatrix(1, 0, 0, 1, x, y), L.showText(font.encodeText(t)), L.endText());
+  });
+}
 async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are written as plain text (no form fields, no boxes)
   const L = await pdfLibReady();
   try { await document.fonts.ready; } catch (_) {}
@@ -3618,7 +3650,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
     }
   }
   const form = pdf.getForm();
-  let nf = 0, nn = 0; const used = {};
+  let nf = 0, nn = 0; const used = {}, hiddenFonts = {};
   for (let i = 0; i < docPages.length; i++) {
     const p = docPages[i];
     let page = pdf.getPage(i);
@@ -3627,6 +3659,11 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
     const redact = pageNeedsFlatten(i);   // redaction or blur: what's under it must leave the file
     const replace = (np) => { pdf.removePage(i + 1); page = np; };
     let laidOver = false;
+    // Edit Text: the original words of lines you changed leave the file (not only covered), so they cannot be copied or found
+    if (!redact && src.kind === "pdf") {
+      try { const eb = await editedTextBoxes(i); if (eb && (await stripEditedText(L, pdf, page, eb.pg, eb.boxes)) < 0) console.warn("Edit Text: page " + (i + 1) + " keeps its original words under the edits (its text could not be read reliably)"); }
+      catch (e) { console.warn("Edit Text: ", e); }
+    }
     if (redact) {
       // a redaction must remove what's under it: the page becomes a picture, drawn fresh from the source (300 dpi)
       const c = await composePage(i, Q.scale, "nofields", { sharp: true });
@@ -3661,6 +3698,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
     for (const it of docItems) {
       if ((it.page || 0) !== i) continue;
       const wf = it.nw * pw, hf = it.nw * pw * it.ar * (pageAspect(i) * ph / pw), x = it.nx * pw;
+      if (it.type === "text" && !it.isField && !laidOver && String(it.text || "").trim()) { try { await hiddenText(L, pdf, page, it, pw, ph, hiddenFonts); } catch (_) {} }
       if (it.type === "note") {
         try {
           const s = Math.max(14, Math.min(wf, 24)), y = ph - it.ny * ph - s;

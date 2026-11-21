@@ -5,6 +5,20 @@ OCR & fonts, Handwriting & signatures, Forms & signing, Site & layout, and Fixes
 The same list is on the site at https://jcodomo.github.io/calligrapher2/changelog.html
 (rebuilt with `node tools/changelog-page.mjs`).
 
+## 2026-11-21
+
+### Editor
+- **Edited text is really gone from the saved file.** When you change a line with Edit text, the original words are now taken out of the PDF itself, not only covered with a white patch, so they can no longer be selected, copied or found by search in the download. Everything else on the page stays real text, and text after the edit on the same line stays exactly where it was.
+- **Your edits are real text too:** words in text boxes and edited lines are saved as searchable, copyable text under their picture, so the PDF can be searched and a Word download contains them.
+- **The page no longer jumps when you click a line:** the text toolbar stays on one row (it scrolls sideways on narrow screens) instead of wrapping onto a second row and pushing the page down.
+- **A line that grows past the page edge is marked** with a red dashed outline, and the first time you are told to press ⤢ Fit or shorten it.
+
+### Downloads & exports
+- **Word downloads keep your edits:** before, a Word file of an edited PDF had the old words and none of the new ones.
+
+### Fixes
+- **New stress test for editing** (tools/stress-edits.js): documents made from a seed in every standard font, lines edited and new text boxes typed in ten fonts, undo and redo, then the download checked page by page; every look, quality and format downloaded and checked; real documents checked line by line for a change of look when clicked.
+
 ## 2026-11-20
 
 ### PDF tools
