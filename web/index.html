@@ -16,7 +16,9 @@
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&family=Caveat:wght@500&family=Dancing+Script:wght@600&family=Great+Vibes&family=Homemade+Apple&display=swap" rel="stylesheet">
+<!-- fonts no longer hold up the first paint: the page draws at once in the system font and swaps when they arrive -->
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&family=Caveat:wght@500&family=Dancing+Script:wght@600&family=Great+Vibes&family=Homemade+Apple&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&family=Caveat:wght@500&family=Dancing+Script:wght@600&family=Great+Vibes&family=Homemade+Apple&display=swap"></noscript>
 <style>
   /* ---- themes: soft grey (editor reference) and Ghost Calligrapher dark ---- */
   :root,:root[data-theme=light]{
@@ -89,6 +91,15 @@
   .view,.work{display:none}
   body[data-route=home] #view_home,body[data-route=tool] #view_tool{display:block}
   body[data-route=work] #view_work{display:flex}
+  /* smooth: a screen that appears fades in (opacity only, nothing moves); going to What's new and back cross-fades */
+  @view-transition{navigation:auto}
+  ::view-transition-old(root){animation:gc-out .14s ease-out both}
+  ::view-transition-new(root){animation:gc-in .2s ease-out both}
+  @keyframes gc-out{to{opacity:0}}
+  @keyframes gc-in{from{opacity:0}}
+  #view_home,#view_tool,#view_work,#pw{animation:gc-in .2s ease-out}
+  @media (prefers-reduced-motion:reduce){#view_home,#view_tool,#view_work,#pw{animation:none}::view-transition-old(root),::view-transition-new(root){animation:none}}
+  @media print{#view_home,#view_tool,#view_work,#pw{animation:none}}
   .wrap{max-width:1200px;margin:0 auto;padding:0 24px}
   .hero{display:grid;grid-template-columns:1.05fr 1fr;gap:40px;align-items:center;padding:52px 0 26px}
   .hero h1{font-size:54px;line-height:1.08;margin:0 0 14px;letter-spacing:-.6px}

@@ -2,3 +2,6 @@
 **/*.rs.bk
 Cargo.lock
 .DS_Store
+
+# stress-test fixtures and copies of the test scripts (never committed)
+web/_t/

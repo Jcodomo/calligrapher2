@@ -35,6 +35,12 @@
   code{background:var(--chip);border-radius:4px;padding:0 4px;font-size:.92em}
   a{color:var(--accent)}
   .hidden{display:none}
+  @view-transition{navigation:auto}
+  ::view-transition-old(root){animation:gc-out .14s ease-out both}
+  ::view-transition-new(root){animation:gc-in .2s ease-out both}
+  @keyframes gc-out{to{opacity:0}}
+  @keyframes gc-in{from{opacity:0}}
+  @media (prefers-reduced-motion:reduce){::view-transition-old(root),::view-transition-new(root){animation:none}}
 </style>
 </head>
 <body>
