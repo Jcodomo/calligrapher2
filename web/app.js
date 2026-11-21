@@ -2927,6 +2927,7 @@ async function openDocBytes(u8, name, kind) {
   docName = name || "document"; docRecentId = null; clearTimeout(workTimer); docFp = null; document.getElementById("recog")?.remove();
   docSources = []; docPages = []; docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {};
   pagesSig = ""; curPage = 0; edZoom = 1; orgSel.clear(); textBlocks.clear(); ocrBlocks.clear(); closePanelTool();
+  pw.on = ""; pw.sel.clear(); pw.cuts.clear(); document.body.dataset.pw = "";   // a new document starts outside Merge / Split
   await addSource(u8, name, kind);
   await ensurePageImage(0);
   doc = docPages[0];
@@ -3635,6 +3636,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
       // a page that is a picture: your original picture file goes in untouched (only re-saved if it was turned)
       const b = src.bytes, isJpg = b && b[0] === 0xFF && b[1] === 0xD8, isPng = b && b[0] === 0x89 && b[1] === 0x50;
       let img;
+      if (p.rot && !p.img) await ensurePageImage(i);   // turning a page drops its picture until it is drawn again
       if (!p.rot && isJpg) img = await pdf.embedJpg(b);
       else if (!p.rot && isPng) img = await pdf.embedPng(b);
       else { const c = document.createElement("canvas"); c.width = p.img.naturalWidth || p.w; c.height = p.img.naturalHeight || p.h; c.getContext("2d").drawImage(p.img, 0, 0, c.width, c.height); img = isJpg ? await pdf.embedJpg((await canvasBytes(c, "image/jpeg", 0.97))) : await pdf.embedPng((await canvasBytes(c, "image/png"))); }
@@ -3645,7 +3647,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
       const np = pdf.insertPage(i, [pw0, ph0]);
       const at = r === 90 ? { x: 0, y: w0, rotate: L.degrees(-90) } : r === 180 ? { x: w0, y: h0, rotate: L.degrees(180) } : { x: h0, y: 0, rotate: L.degrees(90) };
       np.drawPage(emb, { ...at, width: w0, height: h0 }); replace(np);
-    }
+    } else if (base) page.setRotation(L.degrees(0));   // a page saved turned that you turned back upright
     if (!laidOver && (docItems.some((it) => (it.page || 0) === i && !it.isField && it.type !== "note") || docDraws.some((d) => (d.page || 0) === i))) {
       // your edits, drawn sharp (360 dpi) on a see-through layer, cropped to the area they cover
       const ann = await composePage(i, Q.overlay, "overlay"), box = inkBox(ann);
