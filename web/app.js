@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=49";
+import { initPdfEditor } from "./pdfedit.js?v=50";
 import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard, listMemory, saveMemory, forgetMemory } from "./recents.js?v=3";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
@@ -1406,13 +1406,16 @@ function hiResPage(pi) {           // the page drawn sharp for reading (~288 dpi
   if (!ocrBlocks.has(ck)) ocrBlocks.set(ck, sourceCanvas(pi, docSources[p.src].kind === "pdf" ? 2 : 1));
   return ocrBlocks.get(ck);
 }
+// A scanned page is read with Tesseract first; "Read again" on the progress bar reads it with RapidOCR (and back).
+const ocrEngine = new Map();
 function getOcrBlocks(pi) {
   const p = docPages[pi], ck = "ocr:" + p.key + ":" + p.rot;
   if (!ocrBlocks.has(ck)) ocrBlocks.set(ck, (async () => {
     const T = window.__cal2PageTools; if (!T || !T.recognize) return [];
-    const c = await hiResPage(pi);
-    toast("Reading the text on this scanned page… (first time: downloads the text reader)");
-    const data = await T.recognize(c), out = [];
+    const c = await hiResPage(pi), engine = ocrEngine.get(ck) || "tesseract";
+    toast(`Reading the text on this scanned page with ${engine === "rapid" ? "RapidOCR" : "Tesseract"}… (first time: downloads the text reader)`);
+    const again = () => { ocrEngine.set(ck, engine === "rapid" ? "tesseract" : "rapid"); ocrBlocks.delete(ck); render(); };
+    const data = await T.recognize(c, { engine, again }), out = [];
     for (const bl of data.blocks || []) for (const par of bl.paragraphs || []) for (const ln of par.lines || []) {
       const words = (ln.words || []).filter((w) => w.text && w.text.trim());   // every word: a dropped one would be covered over and lost
       if (!words.length || (ln.confidence || 0) < 20) continue;

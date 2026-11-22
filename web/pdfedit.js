@@ -736,7 +736,13 @@ async function runOcr(o) {
     need.push(o.force || !has);
   }
   const todo = need.filter(Boolean).length;
-  const sched = todo ? (prog.textContent = "Loading the text reader…", await ocrScheduler(o.langs, o.acc, Math.min(todo, ocrPoolSize()))) : null;
+  // the second run on the same files reads them with RapidOCR (English and figures), the third with Tesseract again
+  const runKey = sources.map((s) => s.name + ":" + ((s.bytes && s.bytes.length) || 0)).join("|") + "|" + pages.length + "|" + o.force;
+  const rapid = !!(todo && window.MTRapidOCR && ocrTimesRead(runKey) % 2 === 1);
+  const rjob = rapid && window.MTOcrBar ? MTOcrBar.job({ title: "PDF OCR", engine: "RapidOCR", pages: todo }) : null;
+  const sched = todo && (!rapid || o.rotate || o.deskew) ? (prog.textContent = "Loading the text reader…", ocrBar.title = "PDF OCR", await ocrScheduler(o.langs, o.acc, Math.min(todo, ocrPoolSize()))) : null;
+  let rapidDone = 0;
+  if (todo && !rapid) ocrBar.finish = { msg: `Read ${todo} page${todo === 1 ? "" : "s"} with Tesseract. Run OCR again on the same files to read them with RapidOCR.` };
   let done = 0, prepFailed = false, turned = 0, straightened = 0;
   // read one page: render, (turn upright), (clean / flatten / straighten), recognise -> text-only PDF page
   const readPage = async (e) => {
@@ -759,6 +765,11 @@ async function runOcr(o) {
         }
       }
     }
+    if (rapid) {
+      const R = await rapidRead(c, rjob || { progress() {} }, rapidDone, todo);
+      rapidDone++; prog.textContent = `Reading page ${rapidDone} of ${todo} with RapidOCR…`;
+      return { c, changed, lines: R.lines };
+    }
     const ropt = { pdfTitle: "", pdfTextOnly: true, user_defined_dpi: String(Math.round(scale * 72)) };
     let r = await sched.addJob("recognize", c, ropt, { text: true, pdf: true });
     // an unsure page (a photo, grey paper) is read again from a contrast-stretched copy and the surer reading is kept
@@ -776,27 +787,31 @@ async function runOcr(o) {
   // build the output: one PDF, or one per source file
   const groups = o.join || sources.length < 2 ? [pages.map((_, i) => i)] : sources.map((s) => pages.map((e, i) => (e.srcId === s.id ? i : -1)).filter((i) => i >= 0)).filter((g) => g.length);
   const builders = [];
-  await Promise.all(Array.from({ length: conc }, runNext));
+  try { await Promise.all(Array.from({ length: rapid ? 1 : conc }, runNext)); }
+  catch (e) { if (rjob) rjob.fail(String(e.message || e)); throw e; }
   for (const g of groups) {
     const out = await L.PDFDocument.create();
+    const font = rapid ? await out.embedFont(L.StandardFonts.Helvetica) : null;
     for (const i of g) {
       const e = pages[i], src = sources.find((q) => q.id === e.srcId), lib = await parsedSource(L, src);
       const [cp] = await out.copyPages(lib, [e.srcIndex]);
       const base = (cp.getRotation() && cp.getRotation().angle) || 0;
       if (!need[i]) { cp.setRotation(L.degrees((base + e.rot) % 360)); out.addPage(cp); continue; }
       const r = results[i]; results[i] = null;
-      const [layer] = await out.embedPdf(r.layer, [0]);
+      const layer = r.layer ? (await out.embedPdf(r.layer, [0]))[0] : null;
       if (!r.changed && !o.force && (base + e.rot) % 360 === 0) {
         // the page didn't need to change: keep it exactly as it is (sharp, nothing re-compressed) + text on top
         out.addPage(cp);
         const cb = cp.getCropBox();
-        cp.drawPage(layer, { x: cb.x, y: cb.y, width: cb.width, height: cb.height });
+        if (layer) cp.drawPage(layer, { x: cb.x, y: cb.y, width: cb.width, height: cb.height });
+        else drawOcrLines(cp, r.lines, cb.width / r.c.width, cb.x, cb.y, cb.height, font);
       } else {
         const pw = r.c.width / scale, ph = r.c.height / scale;
         const img = await out.embedJpg(await canvasBytes(r.c, "image/jpeg", 0.85));
         const pg = out.addPage([pw, ph]);
         pg.drawImage(img, { x: 0, y: 0, width: pw, height: ph });
-        pg.drawPage(layer, { x: 0, y: 0, width: pw, height: ph });
+        if (layer) pg.drawPage(layer, { x: 0, y: 0, width: pw, height: ph });
+        else drawOcrLines(pg, r.lines, 1 / scale, 0, 0, ph, font);
       }
       r.c.width = r.c.height = 0;
     }
@@ -809,7 +824,18 @@ async function runOcr(o) {
   const secs = Math.round((performance.now() - t0) / 100) / 10;
   const bits = [`${todo} page${todo === 1 ? "" : "s"} read`, pages.length - todo ? `${pages.length - todo} already had text` : "",
     turned ? `${turned} turned upright` : "", straightened ? `${straightened} straightened` : "", `${o.langs.map(langName).join(" + ")}, ${o.acc === "best" ? "Best" : "Fast"}`].filter(Boolean);
-  note(`Saved ${builders.length === 1 ? builders[0].name : "ocr.zip (" + builders.length + " PDFs)"} — ${bits.join(", ")}, ${secs}s.` + (prepFailed ? " ImageMagick couldn't load, so background removal was skipped." : ""));
+  note(`Saved ${builders.length === 1 ? builders[0].name : "ocr.zip (" + builders.length + " PDFs)"} — ${bits.join(", ")}${rapid ? ", RapidOCR" : ""}, ${secs}s.` + (prepFailed ? " ImageMagick couldn't load, so background removal was skipped." : ""));
+  const hint = rapid ? "Run OCR again to go back to Tesseract." : "Run OCR again on the same files to read them with RapidOCR.";
+  if (rjob) rjob.finish(`Read ${todo} page${todo === 1 ? "" : "s"} with RapidOCR in ${secs} s. ${hint}`);
+}
+// RapidOCR's lines as an invisible, searchable text layer: each line sized to its box (k = PDF points per canvas pixel)
+function drawOcrLines(pg, lines, k, ox, oy, ph, font) {
+  for (const ln of lines || []) {
+    const t = String(ln.text || "").replace(/[^\x20-\x7E\xA0-\xFF]/g, "").trim(); if (!t) continue;
+    const hPx = ln.box.y1 - ln.box.y0, wPx = ln.box.x1 - ln.box.x0, w1 = font.widthOfTextAtSize(t, 1);
+    const size = Math.min(hPx * k * 0.8, w1 > 0 ? wPx * k / w1 : hPx * k); if (!(size >= 1)) continue;
+    try { pg.drawText(t, { x: ox + ln.box.x0 * k, y: oy + ph - ln.box.y1 * k + hPx * k * 0.2, size, font, opacity: 0 }); } catch (_) {}
+  }
 }
 function applyOcrMeta(pdf, m = {}) {
   try {
@@ -878,6 +904,36 @@ function cloneCanvas(c) { const k = document.createElement("canvas"); k.width = 
 // A pool of OCR workers, kept warm for the next run with the same languages and accuracy.
 let ocrPool = null;
 function ocrPoolSize() { return Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)); }
+// The progress bar (rapid-ocr.js) for every OCR: each reading handed to the scheduler counts, and the workers report how far
+// along the current one is. A run ends when the queue has been empty for a moment.
+const ocrBar = { job: null, total: 0, done: 0, prog: {}, timer: 0, title: "", finish: null };
+function ocrBarPaint() {
+  const j = ocrBar.job; if (!j) return;
+  const busy = Object.values(ocrBar.prog).reduce((a, b) => a + b, 0);
+  j.pages(ocrBar.total); j.progress((ocrBar.done + Math.min(busy, ocrBar.total - ocrBar.done)) / Math.max(1, ocrBar.total), `${ocrBar.done} of ${ocrBar.total} read`);
+}
+function ocrBarAdd() {
+  clearTimeout(ocrBar.timer);
+  if (!ocrBar.job && window.MTOcrBar) { ocrBar.job = MTOcrBar.job({ title: ocrBar.title || "Reading text (OCR)", engine: "Tesseract", pages: 1 }); ocrBar.total = 0; ocrBar.done = 0; ocrBar.prog = {}; ocrBar.t0 = Date.now(); }
+  ocrBar.total++; ocrBarPaint();
+}
+function ocrBarDone() {
+  ocrBar.done++; ocrBarPaint();
+  if (ocrBar.done < ocrBar.total) return;
+  clearTimeout(ocrBar.timer);
+  ocrBar.timer = setTimeout(() => {
+    if (!ocrBar.job || ocrBar.done < ocrBar.total) return;
+    const f = ocrBar.finish || {}, n = ocrBar.done, s = Math.round((Date.now() - ocrBar.t0) / 100) / 10;
+    ocrBar.job.finish(f.msg || `Read ${n} page image${n === 1 ? "" : "s"} with Tesseract in ${s} s.`, f.action);
+    ocrBar.job = null; ocrBar.finish = null; ocrBar.title = "";
+  }, 500);
+}
+// "Pressed again": the same document read a second time uses RapidOCR, the third time Tesseract, and so on.
+function ocrTimesRead(key) {
+  let m = {}; try { m = JSON.parse(sessionStorage.getItem("cal2_ocr_seen") || "{}"); } catch (_) {}
+  const n = m[key] || 0; m[key] = n + 1; try { sessionStorage.setItem("cal2_ocr_seen", JSON.stringify(m)); } catch (_) {}
+  return n;
+}
 async function ocrScheduler(langs, acc, n) {
   if (typeof acc === "number") { n = acc; acc = "fast"; }          // older call shape: (langs, n)
   if (!Array.isArray(langs)) langs = String(langs || "eng").split("+").filter(Boolean);
@@ -885,13 +941,26 @@ async function ocrScheduler(langs, acc, n) {
   const T = await ensureTesseract();
   const key = langs.join("+") + "|" + acc;
   if (ocrPool && ocrPool.key !== key) { try { await ocrPool.sched.terminate(); } catch (_) {} ocrPool = null; }
-  if (!ocrPool) ocrPool = { key, sched: T.createScheduler(), n: 0 };
+  if (!ocrPool) {
+    const sched = T.createScheduler();
+    ocrPool = { key, sched, n: 0, wrap: {
+      addJob: (...a) => { ocrBarAdd(); return sched.addJob(...a).finally(ocrBarDone); },
+      terminate: () => sched.terminate(),
+      getNumWorkers: () => sched.getNumWorkers() } };
+  }
   const lp = (OCR_ACC[acc] || OCR_ACC.fast).langPath;
+  const logger = (m) => { if (m.status === "recognizing text") { ocrBar.prog[m.workerId] = m.progress >= 1 ? 0 : m.progress; ocrBarPaint(); } };
   while (ocrPool.n < n) {
-    const w = await T.createWorker(langs, 1, lp ? { langPath: lp, cacheMethod: "write" } : { cacheMethod: "write" });
+    const w = await T.createWorker(langs, 1, lp ? { langPath: lp, cacheMethod: "write", logger } : { cacheMethod: "write", logger });
     ocrPool.sched.addWorker(w); ocrPool.n++;
   }
-  return ocrPool.sched;
+  return ocrPool.wrap;
+}
+// RapidOCR (rapid-ocr.js): one page, with the bar showing the model download and the page's progress.
+async function rapidRead(canvas, job, i, n) {
+  if (!window.MTRapidOCR) throw new Error("RapidOCR is not loaded");
+  await MTRapidOCR.ready((f, label) => job.progress(i / n, label));
+  return MTRapidOCR.read(canvas, (f, label) => job.progress((i + f) / n, label), { turn: false });
 }
 function openUnlock() {
   panelShell("Unlock", `
@@ -1900,7 +1969,15 @@ export function initPdfEditor() {
   // the editor's Organize view uses the same duplicate check and page-number reader
   window.__cal2PageTools = { duplicates: (list, maxDist, onProg) => findDupPairs(list, maxDist, onProg), pageNumber: (ad, ocr) => pageNumberOf(ad, ocr), numbersLookReal,
     // read a picture's text with word positions (the editor's scanned-page text editing); languages from the OCR tool's choice
-    recognize: async (canvas) => { const langs = ocrOpts().langs || ["eng"]; const sch = await ocrScheduler(langs.length ? langs : ["eng"], "fast", 1); let r = await sch.addJob("recognize", canvas, {}, { text: true, blocks: true });
+    recognize: async (canvas, opt = {}) => {
+      if (opt.engine === "rapid" && window.MTRapidOCR) {   // the second reading: RapidOCR, in Tesseract's shape (lines of words with boxes)
+        const job = window.MTOcrBar ? MTOcrBar.job({ title: "Reading this scanned page", engine: "RapidOCR", pages: 1 }) : { progress() {}, finish() {}, fail() {} };
+        try { const R = await rapidRead(canvas, job, 0, 1); job.finish(`Read ${R.lines.length} lines with RapidOCR.`, opt.again ? [{ label: "Read again with Tesseract", fn: opt.again }] : null); return MTRapidOCR.asTesseract(R); }
+        catch (e) { job.fail("RapidOCR could not run (" + (e.message || e) + "); reading with Tesseract."); }
+      }
+      ocrBar.title = "Reading this scanned page";
+      ocrBar.finish = { msg: "Read the page with Tesseract.", action: opt.again ? [{ label: "Read again with RapidOCR", fn: opt.again }] : null };
+      const langs = ocrOpts().langs || ["eng"]; const sch = await ocrScheduler(langs.length ? langs : ["eng"], "fast", 1); let r = await sch.addJob("recognize", canvas, {}, { text: true, blocks: true });
       if ((r.data.confidence || 0) < OCR_UNSURE) { const r2 = await sch.addJob("recognize", ocrStretch(canvas), {}, { text: true, blocks: true }); if ((r2.data.confidence || 0) > (r.data.confidence || 0)) r = r2; }   // unsure: the cleaned copy too, the surer reading kept
       return r.data; },
     // figures fixed only when every OCR language is English
