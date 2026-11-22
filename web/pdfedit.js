@@ -759,7 +759,13 @@ async function runOcr(o) {
         }
       }
     }
-    const r = await sched.addJob("recognize", c, { pdfTitle: "", pdfTextOnly: true, user_defined_dpi: String(Math.round(scale * 72)) }, { text: false, pdf: true });
+    const ropt = { pdfTitle: "", pdfTextOnly: true, user_defined_dpi: String(Math.round(scale * 72)) };
+    let r = await sched.addJob("recognize", c, ropt, { text: true, pdf: true });
+    // an unsure page (a photo, grey paper) is read again from a contrast-stretched copy and the surer reading is kept
+    if ((r.data.confidence || 0) < OCR_UNSURE && !(changed && prep && !prepFailed)) {
+      const r2 = await sched.addJob("recognize", ocrStretch(c), ropt, { text: true, pdf: true });
+      if ((r2.data.confidence || 0) > (r.data.confidence || 0)) r = r2;
+    }
     done++; prog.textContent = `Reading page ${done} of ${todo}…`;
     return { c, changed, layer: new Uint8Array(r.data.pdf) };
   };
@@ -838,6 +844,34 @@ async function uprightTurn(sched, c) {
   if (bestConf >= 60) return 0;
   for (const d of [180, 90, 270]) { const v = await conf(d); if (v > bestConf + 10) { bestConf = v; best = d; } }
   return best;
+}
+// From the mortgage suite's reader (mtgcalc doc-center): before reading, the page is turned to greyscale with its contrast
+// stretched between the darkest and lightest 0.2-1% of pixels, and a dark page (light text) is flipped to dark on light.
+// Same size, so word positions and the text layer still line up with the original page.
+const OCR_UNSURE = 80;   // a reading below this confidence is tried again on the cleaned copy
+function ocrStretch(src) {
+  const w = src.width, h = src.height; if (!w || !h) return src;
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const g = c.getContext("2d", { willReadFrequently: true }); g.fillStyle = "#fff"; g.fillRect(0, 0, w, h); g.drawImage(src, 0, 0);
+  const d = g.getImageData(0, 0, w, h), p = d.data, n = p.length / 4, hist = new Uint32Array(256); let sum = 0;
+  for (let k = 0; k < p.length; k += 4) { const y = (0.299 * p[k] + 0.587 * p[k + 1] + 0.114 * p[k + 2]) | 0; p[k] = y; hist[y]++; sum += y; }
+  const pct = (fr, top) => { let a = 0; if (top) { for (let q = 255; q >= 0; q--) { a += hist[q]; if (a > n * fr) return q; } return 255; } for (let q = 0; q < 256; q++) { a += hist[q]; if (a > n * fr) return q; } return 0; };
+  const inv = sum / n < 110; let lo = pct(inv ? 0.01 : 0.002, false), hi = pct(inv ? 0.002 : 0.01, true);
+  if (hi - lo < 40) { lo = 0; hi = 255; }
+  const span = Math.max(1, hi - lo);
+  for (let k = 0; k < p.length; k += 4) { let y = Math.max(0, Math.min(255, (p[k] - lo) * 255 / span)); if (inv) y = 255 - y; p[k] = p[k + 1] = p[k + 2] = y; p[k + 3] = 255; }
+  g.putImageData(d, 0, 0); return c;
+}
+// Figures in English text read by OCR: letters read for digits inside an amount ("1,2O4.5O", "$l,000"), and a space after a
+// thousands comma ("1, 234.56"). Only tokens that are already amounts (two digits or more with a comma or point) change.
+function ocrFixNumbers(text) {
+  let s = String(text == null ? "" : text).replace(/(^|[^A-Za-z0-9])(\$?\s?[0-9OolIS|B][0-9OolIS|B,.]*[0-9OolIS|B])(?![A-Za-z0-9])/g, (m, p0, tk) => {
+    if ((tk.match(/[0-9]/g) || []).length < 2 || !/[,.]/.test(tk) || !/[OolIS|B]/.test(tk)) return m;
+    return p0 + tk.replace(/[Oo]/g, "0").replace(/[lI|]/g, "1").replace(/S/g, "5").replace(/B/g, "8"); });
+  for (let k = 0; k < 3; k++) s = s
+    .replace(/(\$ ?\d{1,3}(?:,\d{3})*), (\d{3})(?!\d)/g, "$1,$2")
+    .replace(/(^|[^\d,.$])(\d{1,3}(?:,\d{3})*), (\d{3}(?:,\d{3})*\.\d{2}|\d{3}(?:,\d{3})+)(?!\d)/gm, "$1$2,$3");
+  return s;
 }
 function cloneCanvas(c) { const k = document.createElement("canvas"); k.width = c.width; k.height = c.height; k.getContext("2d").drawImage(c, 0, 0); return k; }
 
@@ -1866,7 +1900,11 @@ export function initPdfEditor() {
   // the editor's Organize view uses the same duplicate check and page-number reader
   window.__cal2PageTools = { duplicates: (list, maxDist, onProg) => findDupPairs(list, maxDist, onProg), pageNumber: (ad, ocr) => pageNumberOf(ad, ocr), numbersLookReal,
     // read a picture's text with word positions (the editor's scanned-page text editing); languages from the OCR tool's choice
-    recognize: async (canvas) => { const langs = ocrOpts().langs || ["eng"]; const sch = await ocrScheduler(langs.length ? langs : ["eng"], "fast", 1); const r = await sch.addJob("recognize", canvas, {}, { text: true, blocks: true }); return r.data; } };
+    recognize: async (canvas) => { const langs = ocrOpts().langs || ["eng"]; const sch = await ocrScheduler(langs.length ? langs : ["eng"], "fast", 1); let r = await sch.addJob("recognize", canvas, {}, { text: true, blocks: true });
+      if ((r.data.confidence || 0) < OCR_UNSURE) { const r2 = await sch.addJob("recognize", ocrStretch(canvas), {}, { text: true, blocks: true }); if ((r2.data.confidence || 0) > (r.data.confidence || 0)) r = r2; }   // unsure: the cleaned copy too, the surer reading kept
+      return r.data; },
+    // figures fixed only when every OCR language is English
+    fixNumbers: (s) => ((ocrOpts().langs || ["eng"]).every((l) => l === "eng") ? ocrFixNumbers(s) : s) };
   window.__cal2ResetPdf = () => { resetAll(); backToGrid(); };
   window.__cal2PdfPageCount = () => pages.length;
   window.__cal2TxtToPdf = (f) => txtToPdf(f);

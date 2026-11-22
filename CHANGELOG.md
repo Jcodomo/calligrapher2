@@ -5,6 +5,13 @@ OCR & fonts, Handwriting & signatures, Forms & signing, Site & layout, and Fixes
 The same list is on the site at https://jcodomo.github.io/calligrapher2/changelog.html
 (rebuilt with `node tools/changelog-page.mjs`).
 
+## 2026-11-22
+
+### OCR & fonts
+- **Scanned pages read better when the page is hard to read:** when the reader is unsure of a page (a phone photo, grey or shadowed paper), it reads the page again from a cleaned copy (greyscale, contrast stretched between the darkest and lightest pixels, a dark page flipped to dark text on light) and keeps the surer reading. Same size as the page, so the text layer and the words you edit still line up. This is the same clean-up the mortgage suite's document reader uses. Used by PDF OCR (searchable PDF) and by Edit text on a scan.
+- **Figures read right in English text:** when you edit a scanned line, letters read for digits inside an amount are fixed ("$1, 2O4.5O" becomes "$1,204.50"), and a space after a thousands comma is closed. Only amounts change (two or more digits with a comma or point), and only when every OCR language is English.
+- **OCR stress test** (tools/stress-ocr.js): letters and invoices with known text and amounts drawn as printed, scanned, photographed, shadowed and dark-mode pages, read by the app and by plain Tesseract with the same model. 30 pages: photos 90.1% of words right (plain 89.0%), shadowed pages 94.7% (93.8%) with 40 of 42 amounts (39); printed, scanned and dark pages as before (99.4%, 97.3%, 99.7%).
+
 ## 2026-11-21
 
 ### Editor

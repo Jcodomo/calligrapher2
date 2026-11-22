@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=47";
+import { initPdfEditor } from "./pdfedit.js?v=49";
 import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard, listMemory, saveMemory, forgetMemory } from "./recents.js?v=3";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
@@ -1419,7 +1419,8 @@ function getOcrBlocks(pi) {
       const x0 = Math.min(...words.map((w) => w.bbox.x0)), x1 = Math.max(...words.map((w) => w.bbox.x1)), y0 = Math.min(...words.map((w) => w.bbox.y0)), y1 = Math.max(...words.map((w) => w.bbox.y1));
       if (x1 - x0 < 4 || y1 - y0 < 4) continue;
       const h = y1 - y0;
-      out.push({ str: words.map((w) => w.text).join(" "), ocr: true, conf: Math.round(ln.confidence || 0), asc: 0.9, nx: x0 / c.width, ny: y0 / c.height, nw: (x1 - x0) / c.width, nh: h / c.height, fsN: h / 1.15 / c.width });
+      const line = words.map((w) => w.text).join(" ");
+      out.push({ str: T.fixNumbers ? T.fixNumbers(line) : line, ocr: true, conf: Math.round(ln.confidence || 0), asc: 0.9, nx: x0 / c.width, ny: y0 / c.height, nw: (x1 - x0) / c.width, nh: h / c.height, fsN: h / 1.15 / c.width });
     }
     toast(out.length ? `Read ${out.length} line${out.length === 1 ? "" : "s"} from the scan — click one to edit it in the closest matching font.` : "No text found on this page. Use Add text to write on it.");
     return out;
