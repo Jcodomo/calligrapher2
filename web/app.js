@@ -1419,7 +1419,7 @@ function getOcrBlocks(pi) {
     for (const bl of data.blocks || []) for (const par of bl.paragraphs || []) for (const ln of par.lines || []) {
       const all = (ln.words || []).filter((w) => w.text && w.text.trim()).sort((a, b) => a.bbox.x0 - b.bbox.x0);   // every word: a dropped one would be covered over and lost
       if (!all.length || (ln.confidence || 0) < 20) continue;
-      // a form row ("Beneficiary Bank ABA Number      021407912") is read as one line: a wide gap starts a new
+      // a form row ("Bank ABA Number      011000015") is read as one line: a wide gap starts a new
       // box, so the label and the value are each edited on their own
       const lh = Math.max(...all.map((w) => w.bbox.y1)) - Math.min(...all.map((w) => w.bbox.y0));
       const segs = [[all[0]]];
@@ -1444,6 +1444,7 @@ function renderTextBlocks(ov, pi, dispW, dispH) {
     if (!ov.isConnected || edTool !== "edittext") return;
     if (!blocks.length && pi === curPage) blocks = await getOcrBlocks(pi);   // a scan: read it
     if (!ov.isConnected || edTool !== "edittext") return;
+    if (blocks.some(needsVisualMatch)) pageFontProfile(pi, blocks);   // learn and download this page's fonts in the background
     ov.querySelectorAll(".tblock").forEach((x) => x.remove());   // a second pass over the same page replaces the first
     blocks.forEach((b, bi) => {
       const bid = p.key + ":" + p.rot + ":" + bi;
@@ -1571,8 +1572,8 @@ function inkSlant(m, W, H) {
   return Math.round(best * 100) / 100;
 }
 // the metric twins of the fonts most documents are set in (Times, Arial, Calibri, Cambria, Courier): a near tie goes to them
-const CORE_FAMILIES = new Set(["Tinos", "Arimo", "Carlito", "Caladea", "Cousine"]);
-async function identifyFont(crop, text, families = MATCH_FAMILIES) {
+const CORE_FAMILIES = new Set(["Tinos", "Arimo", "Carlito", "Caladea", "Cousine", "Gelasio"]);
+async function identifyFont(crop, text, families = MATCH_FAMILIES, opts = {}) {
   text = String(text || "").trim(); if (!text) return [];
   const g0 = crop.getContext("2d", { willReadFrequently: true }), cd = g0.getImageData(0, 0, crop.width, crop.height).data, N = crop.width * crop.height;
   const hist = new Uint32Array(256); for (let i = 0; i < N; i++) hist[lumAt(cd, i * 4) | 0]++;
@@ -1614,6 +1615,8 @@ async function identifyFont(crop, text, families = MATCH_FAMILIES) {
   if (leans || unsure) for (const f of [...new Set(out.slice(0, leans ? 10 : 4).map((o) => o.family))]) { await tryOne(f, 400, "italic"); await tryOne(f, 700, "italic"); }
   out.forEach((o) => {
     if (CORE_FAMILIES.has(o.family)) o.score -= 0.15;
+    // the page's own fonts (see pageFontProfile): a few digits are not taken for a font the rest of the page is not set in
+    if (opts.prior) o.score -= 1.4 * (opts.prior.get(o.family + "|" + o.style) || 0);
     if (leans && o.style !== "italic") o.score += 0.25;
     if (!leans && o.style === "italic") o.score += 0.25;
   });
@@ -1624,15 +1627,72 @@ async function identifyFont(crop, text, families = MATCH_FAMILIES) {
   out.cropBox = cb; out.PX = PX;
   return out;
 }
-// Match the font of one text line of a page; returns the best font, the list, and where the text sits.
-async function matchLineFont(pi, b) {
+// The picture of one text line, cut from the sharp page with a little room around it.
+async function lineCrop(pi, b) {
   const page = await hiResPage(pi), W = page.width, H = page.height;
   const padX = Math.round(b.nh * H * 0.4), padY = Math.round(b.nh * H * 0.25);
   const bx = Math.max(0, Math.floor(b.nx * W) - padX), by = Math.max(0, Math.floor(b.ny * H) - padY);
   const bw = Math.min(W - bx, Math.ceil(b.nw * W) + padX * 2), bh = Math.min(H - by, Math.ceil(b.nh * H) + padY * 2);
   if (bw < 4 || bh < 4) return null;
   const crop = document.createElement("canvas"); crop.width = bw; crop.height = bh; crop.getContext("2d").drawImage(page, bx, by, bw, bh, 0, 0, bw, bh);
-  const list = await identifyFont(crop, b.str); if (!list.length) return null;
+  return { crop, bx, by, W, H };
+}
+// The fonts a page is set in. As soon as a scanned page (or a page whose fonts say nothing) has been read, its longest
+// lines are matched in the background and every font they point to is downloaded, so the first click is quick; each
+// line votes for its three closest fonts. A short box (a few digits, one word) is then matched with these votes
+// counted in, which is where matching one box on its own goes wrong most.
+const pageFonts = new Map();   // page key:rot -> Promise<{ votes: Map("family|style" -> 0..1), top: [...] } | null>
+const needsVisualMatch = (b) => b.ocr || !!(b.pfont && (pdfFonts.get(b.pfont) || {}).visual);
+function pageFontProfile(pi, blocks) {
+  const p = docPages[pi]; if (!p) return Promise.resolve(null);
+  const ck = p.key + ":" + p.rot;
+  if (!blocks && !pageFonts.has(ck)) return Promise.resolve(null);   // asked before the page was read
+  if (!pageFonts.has(ck)) pageFonts.set(ck, (async () => {
+    // the longest lines of each third of the page's width, so a form's label column and value column both vote
+    const cand = (blocks || []).filter((b) => needsVisualMatch(b) && String(b.str).replace(/\s/g, "").length >= 6).sort((a, b) => String(b.str).length - String(a.str).length);
+    const pick = [0, 1, 2].flatMap((c) => cand.filter((b) => Math.min(2, Math.floor((b.nx + b.nw / 2) * 3)) === c).slice(0, 4));
+    if (!pick.length) return null;
+    const votes = new Map(), lines = []; let n = 0;
+    for (const b of pick) {
+      const lc = await lineCrop(pi, b); if (!lc) continue;
+      const list = await identifyFont(lc.crop, b.str); if (!list.length) continue;
+      n++; const seen = new Set(), mine = new Map(); let w = 3;
+      for (const o of list) { const k = o.family + "|" + o.style; if (seen.has(k)) continue; seen.add(k); votes.set(k, (votes.get(k) || 0) + w); mine.set(k, w / 3); if (--w === 0) break; }
+      lines.push({ cx: b.nx + b.nw / 2, nx: b.nx, ny: b.ny, votes: mine });
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (!n) return null;
+    for (const [k, v] of votes) votes.set(k, v / (3 * n));   // 1 = every line's first choice
+    const top = [...votes].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => ({ family: k.split("|")[0], style: k.split("|")[1], share: v }));
+    top.forEach((t) => ensureFont(t.family));
+    if (pi === curPage && edTool === "edittext") toast(`Fonts on this page: ${[...new Set(top.map((t) => t.family))].join(", ")} - downloaded and ready to edit with.`);
+    return { votes, top, lines, n };
+  })().catch(() => null));
+  return pageFonts.get(ck);
+}
+// The page's votes as seen from one box: lines in the same column (same left edge or centre) count the most, so a page
+// with labels in one font and values in another keeps the two apart; a page in one font gives every box the same answer.
+function localPrior(prof, b) {
+  if (!prof || !prof.lines || !prof.lines.length) return prof && prof.votes;
+  const cx = b.nx + b.nw / 2, acc = new Map(); let tw = 0;
+  for (const L of prof.lines) {
+    const d = Math.min(Math.abs(L.nx - b.nx), Math.abs(L.cx - cx)), w = Math.exp(-d / 0.06) + 0.08;
+    tw += w; for (const [k, v] of L.votes) acc.set(k, (acc.get(k) || 0) + w * v);
+  }
+  for (const [k, v] of acc) acc.set(k, v / tw);
+  // blended with the whole page: a column of short boxes is not left to its own few votes
+  for (const [k, v] of prof.votes) acc.set(k, 0.6 * (acc.get(k) || 0) + 0.4 * v);
+  for (const k of acc.keys()) if (!prof.votes.has(k)) acc.set(k, 0.6 * acc.get(k));
+  return acc;
+}
+window.__cal2PageFonts = (pi) => { const p = docPages[pi || 0]; return p ? pageFonts.get(p.key + ":" + p.rot) || null : null; };   // for the tests
+// Match the font of one text line of a page; returns the best font, the list, and where the text sits.
+async function matchLineFont(pi, b) {
+  const lc = await lineCrop(pi, b); if (!lc) return null;
+  const { crop, bx, by, W, H } = lc;
+  // the page's fonts, when they are known in time (they are read in the background as soon as the page is)
+  let prof = null; try { prof = await Promise.race([pageFontProfile(pi, null), new Promise((r) => setTimeout(() => r(null), 8000))]); } catch (_) {}
+  const list = await identifyFont(crop, b.str, MATCH_FAMILIES, { prior: prof && localPrior(prof, b) }); if (!list.length) return null;
   const best = list[0], cb = list.cropBox, PX = list.PX;
   // page pixels: font size, baseline, left edge of the text
   const fsPx = PX * best.k, base = by + cb.y + best.inkTop * best.k, left = bx + cb.x - best.inkLeft * best.k;

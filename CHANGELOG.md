@@ -9,11 +9,14 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 
 ### Editor
 - **Clicking a line no longer changes it.** With Edit text, a line you click into stays exactly as it is on the page (no white cover, no font swap) until you actually type, or change its font, size, colour or place. A line you clicked and left alone is not redrawn in the download either.
-- **A label and its value are separate boxes on scans.** A form row read as one line ("Beneficiary Bank ABA Number      021407912") is split at the wide gap, so clicking the number edits only the number and the label next to it is untouched.
+- **A label and its value are separate boxes on scans.** A form row read as one line ("Beneficiary Bank ABA Number      011000015") is split at the wide gap, so clicking the number edits only the number and the label next to it is untouched.
 
 ### OCR & fonts
 - **Better font matching on scans:** the matcher now measures how far the letters lean, so upright text is never matched to an italic (before, a blurry scan of Times could come out as "Old Standard TT Italic"), and italics are tried across more families when the line does lean. A close call goes to the fonts most documents use (Times, Arial, Calibri, Cambria and Courier lookalikes). On a test set of blurred, speckled lines in nine fonts, 100 of 144 are matched to the right family and slant (was 71); Times New Roman 15 of 16 (was 11), upright text taken for italic 0 times (was 8).
 - Each box is matched on its own words only, so a value column no longer throws off the match for its label.
+- **The fonts of a scanned page are learned and downloaded as soon as it is read.** When Edit text reads a scan, its longest lines (from each column) are matched in the background and every font they point to is downloaded, so the first click is quick and a toast says which fonts the page uses. Each box you click is then matched with the votes of the lines in its own column and of the whole page, so a short box (a few digits, one word) gets the page's font instead of a guess, and a form with labels in one font and values in another keeps them apart. On scanned test forms (11 rows, every box clicked): Times, Arial, Calibri and Georgia 20 of 20 boxes each, a form with Arial labels and Times values 20 of 20; Courier and Cambria are often given a close lookalike (Courier Prime, Old Standard TT).
+- Georgia is matched to Gelasio, its metric twin.
+- New stress tests: tools/stress-scan-edit.js (scanned forms in seven fonts, every box clicked) and tools/stress-font-match.js (144 scan-like lines), plus tools/engine-matrix.mjs (16,000 checks of the handwriting engine, the scanned-look pixels and the 1-bit packer, run in Node).
 
 ## 2026-11-22
 
