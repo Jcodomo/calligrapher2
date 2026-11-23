@@ -1573,6 +1573,8 @@ function inkSlant(m, W, H) {
 }
 // the metric twins of the fonts most documents are set in (Times, Arial, Calibri, Cambria, Courier): a near tie goes to them
 const CORE_FAMILIES = new Set(["Tinos", "Arimo", "Carlito", "Caladea", "Cousine", "Gelasio"]);
+// display and decorative faces that are rare in business documents: they win a blurry close call only when clearly closer
+const RARE_IN_DOCS = new Set(["Playfair Display", "Old Standard TT", "Raleway", "Montserrat", "Oswald", "Poppins", "Courier Prime", "Bitter", "Roboto Slab", "Libre Baskerville"]);
 async function identifyFont(crop, text, families = MATCH_FAMILIES, opts = {}) {
   text = String(text || "").trim(); if (!text) return [];
   const g0 = crop.getContext("2d", { willReadFrequently: true }), cd = g0.getImageData(0, 0, crop.width, crop.height).data, N = crop.width * crop.height;
@@ -1615,6 +1617,7 @@ async function identifyFont(crop, text, families = MATCH_FAMILIES, opts = {}) {
   if (leans || unsure) for (const f of [...new Set(out.slice(0, leans ? 10 : 4).map((o) => o.family))]) { await tryOne(f, 400, "italic"); await tryOne(f, 700, "italic"); }
   out.forEach((o) => {
     if (CORE_FAMILIES.has(o.family)) o.score -= 0.15;
+    if (RARE_IN_DOCS.has(o.family)) o.score += 0.12;
     // the page's own fonts (see pageFontProfile): a few digits are not taken for a font the rest of the page is not set in
     if (opts.prior) o.score -= 1.4 * (opts.prior.get(o.family + "|" + o.style) || 0);
     if (leans && o.style !== "italic") o.score += 0.25;
@@ -1652,6 +1655,9 @@ function pageFontProfile(pi, blocks) {
     const cand = (blocks || []).filter((b) => needsVisualMatch(b) && String(b.str).replace(/\s/g, "").length >= 6).sort((a, b) => String(b.str).length - String(a.str).length);
     const pick = [0, 1, 2].flatMap((c) => cand.filter((b) => Math.min(2, Math.floor((b.nx + b.nw / 2) * 3)) === c).slice(0, 4));
     if (!pick.length) return null;
+    // every candidate font downloaded first: a font still on its way cannot win a vote (it runs in the background)
+    await Promise.race([Promise.all(MATCH_FAMILIES.map((f) => Promise.resolve(ensureFont(f)).catch(() => {}))), new Promise((r) => setTimeout(r, 30000))]);
+    await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 5000))]);
     const votes = new Map(), lines = []; let n = 0;
     for (const b of pick) {
       const lc = await lineCrop(pi, b); if (!lc) continue;
@@ -2080,6 +2086,7 @@ function fitTextBoxes() {
     el.classList.toggle("tover", over);
     if (over && !overWarned.has(it.id)) { overWarned.add(it.id); toast("This line is now longer than the page. Press ⤢ Fit to size it to the original line, or shorten it."); }
   });
+  absorbAutoFit();
 }
 const overWarned = new Set();
 function onPagePointerDown(e, ov, pi, dispW, dispH) {
@@ -2574,6 +2581,19 @@ function snapshotNow() {
   if (lastSnap) { undoStack.push(lastSnap); if (undoStack.length > 80) undoStack.shift(); redoStack = []; }
   lastSnap = takeSnap(); lastSnapSig = s; updateUndoButtons();
   scheduleWorkSave();
+}
+// Text boxes grow to fit their text once their font has drawn (a wide script font is wider than its stand-in). That is
+// layout, not an edit: when nothing but those sizes changed since the last step, the step takes them in, so it does not
+// count as a new edit (which would wipe out Redo right after an Undo).
+function sigNoFit(items, draws, fields, pages, sources) {
+  return JSON.stringify(items, (k, v) => (k === "svg" || k === "src") ? (v ? v.length + ":" + v.slice(-32) : v) : (v && typeof v === "object" && v.tbox) ? { ...v, nw: 0, ar: 0 } : v) + "|" + JSON.stringify(draws) + "|" + JSON.stringify(fields) +
+    "|" + pages.map((p) => p.key + "@" + p.rot).join(",") + "|" + sources.length;
+}
+function absorbAutoFit() {
+  if (!doc || !lastSnap || restoring) return;
+  const s = snapSig(); if (s === lastSnapSig) return;
+  if (sigNoFit(docItems, docDraws, fieldValues, docPages, docSources) !== sigNoFit(lastSnap.items, lastSnap.draws, lastSnap.fields, lastSnap.pages, lastSnap.sources)) return;
+  lastSnap = takeSnap(); lastSnapSig = s;
 }
 function resetHistory() { undoStack = []; redoStack = []; lastSnap = doc ? takeSnap() : null; lastSnapSig = doc ? snapSig() : ""; updateUndoButtons(); }
 function restoreSnap(s) {
