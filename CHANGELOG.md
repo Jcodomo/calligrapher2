@@ -19,7 +19,7 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 - New stress tests: tools/stress-scan-edit.js (scanned forms in seven fonts, every box clicked) and tools/stress-font-match.js (144 scan-like lines), plus tools/engine-matrix.mjs (16,000 checks of the handwriting engine, the scanned-look pixels and the 1-bit packer, run in Node).
 
 ### Fixes
-- **Redo works after Undo when a box is in a script font.** A text box grows to fit its font once the font has drawn (a wide script such as Great Vibes); that resize counted as a new edit, so Redo right after an Undo had nothing to bring back and the box was missing from the download. Resizes to fit are now part of the step they belong to. Found by the editing stress test (6 documents a run, 3 seeds: 1,451 of 1,451 checks after the fix).
+- **Redo works after Undo when a box is in a script font.** A text box grows to fit its font once the font has drawn (a wide script such as Great Vibes); that resize counted as a new edit, so Redo right after an Undo had nothing to bring back and the box was missing from the download. Resizes to fit are now part of the step they belong to. Found by the editing stress test; after the fix 4 runs of 6 documents pass 1,943 of 1,944 checks (the one left is two random boxes typed on top of each other, read in mixed order by Word).
 
 ## 2026-11-22
 
