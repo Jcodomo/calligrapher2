@@ -5,6 +5,16 @@ OCR & fonts, Handwriting & signatures, Forms & signing, Site & layout, and Fixes
 The same list is on the site at https://jcodomo.github.io/calligrapher2/changelog.html
 (rebuilt with `node tools/changelog-page.mjs`).
 
+## 2026-11-23
+
+### Editor
+- **Clicking a line no longer changes it.** With Edit text, a line you click into stays exactly as it is on the page (no white cover, no font swap) until you actually type, or change its font, size, colour or place. A line you clicked and left alone is not redrawn in the download either.
+- **A label and its value are separate boxes on scans.** A form row read as one line ("Beneficiary Bank ABA Number      021407912") is split at the wide gap, so clicking the number edits only the number and the label next to it is untouched.
+
+### OCR & fonts
+- **Better font matching on scans:** the matcher now measures how far the letters lean, so upright text is never matched to an italic (before, a blurry scan of Times could come out as "Old Standard TT Italic"), and italics are tried across more families when the line does lean. A close call goes to the fonts most documents use (Times, Arial, Calibri, Cambria and Courier lookalikes). On a test set of blurred, speckled lines in nine fonts, 100 of 144 are matched to the right family and slant (was 71); Times New Roman 15 of 16 (was 11), upright text taken for italic 0 times (was 8).
+- Each box is matched on its own words only, so a value column no longer throws off the match for its label.
+
 ## 2026-11-22
 
 ### OCR & fonts

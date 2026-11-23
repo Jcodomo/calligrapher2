@@ -1417,13 +1417,21 @@ function getOcrBlocks(pi) {
     const again = () => { ocrEngine.set(ck, engine === "rapid" ? "tesseract" : "rapid"); ocrBlocks.delete(ck); render(); };
     const data = await T.recognize(c, { engine, again }), out = [];
     for (const bl of data.blocks || []) for (const par of bl.paragraphs || []) for (const ln of par.lines || []) {
-      const words = (ln.words || []).filter((w) => w.text && w.text.trim());   // every word: a dropped one would be covered over and lost
-      if (!words.length || (ln.confidence || 0) < 20) continue;
-      const x0 = Math.min(...words.map((w) => w.bbox.x0)), x1 = Math.max(...words.map((w) => w.bbox.x1)), y0 = Math.min(...words.map((w) => w.bbox.y0)), y1 = Math.max(...words.map((w) => w.bbox.y1));
-      if (x1 - x0 < 4 || y1 - y0 < 4) continue;
-      const h = y1 - y0;
-      const line = words.map((w) => w.text).join(" ");
-      out.push({ str: T.fixNumbers ? T.fixNumbers(line) : line, ocr: true, conf: Math.round(ln.confidence || 0), asc: 0.9, nx: x0 / c.width, ny: y0 / c.height, nw: (x1 - x0) / c.width, nh: h / c.height, fsN: h / 1.15 / c.width });
+      const all = (ln.words || []).filter((w) => w.text && w.text.trim()).sort((a, b) => a.bbox.x0 - b.bbox.x0);   // every word: a dropped one would be covered over and lost
+      if (!all.length || (ln.confidence || 0) < 20) continue;
+      // a form row ("Beneficiary Bank ABA Number      021407912") is read as one line: a wide gap starts a new
+      // box, so the label and the value are each edited on their own
+      const lh = Math.max(...all.map((w) => w.bbox.y1)) - Math.min(...all.map((w) => w.bbox.y0));
+      const segs = [[all[0]]];
+      for (let k = 1; k < all.length; k++) { if (all[k].bbox.x0 - all[k - 1].bbox.x1 > Math.max(lh * 1.4, 12)) segs.push([]); segs[segs.length - 1].push(all[k]); }
+      for (const words of segs) {
+        const x0 = Math.min(...words.map((w) => w.bbox.x0)), x1 = Math.max(...words.map((w) => w.bbox.x1)), y0 = Math.min(...words.map((w) => w.bbox.y0)), y1 = Math.max(...words.map((w) => w.bbox.y1));
+        if (x1 - x0 < 4 || y1 - y0 < 4) continue;
+        const h = y1 - y0;
+        const line = words.map((w) => w.text).join(" ");
+        const conf = words.reduce((a, w) => a + (w.confidence || ln.confidence || 0), 0) / words.length;
+        out.push({ str: T.fixNumbers ? T.fixNumbers(line) : line, ocr: true, conf: Math.round(conf), asc: 0.9, nx: x0 / c.width, ny: y0 / c.height, nw: (x1 - x0) / c.width, nh: h / c.height, fsN: h / 1.15 / c.width });
+      }
     }
     toast(out.length ? `Read ${out.length} line${out.length === 1 ? "" : "s"} from the scan — click one to edit it in the closest matching font.` : "No text found on this page. Use Add text to write on it.");
     return out;
@@ -1447,6 +1455,25 @@ function renderTextBlocks(ov, pi, dispW, dispH) {
     });
 
   });
+}
+// A line you have clicked into but not changed stays exactly as it was on the page: no cover, no font swap,
+// nothing added to the saved file. It takes over only once its text, font, size, colour or place changes.
+const teditSig = (it) => [it.ff, !!it.bold, !!it.italic, (+it.fs || 0).toFixed(6), it.color || "", (+it.ls || 0).toFixed(4), it.align || "left", it.bg || "none", (+it.nx).toFixed(5), (+it.ny).toFixed(5), it.opacity ?? 1].join("|");
+const teditPristine = (it) => !!(it && it.tedit && it.sig0 != null && it.text === it.orig && teditSig(it) === it.sig0);
+function syncPristineEl(it, el, td) {
+  const pr = teditPristine(it);
+  if (el.classList.contains("pristine") === pr) return;
+  el.classList.toggle("pristine", pr);
+  if (td) td.style.color = pr ? "transparent" : itemColor(it);
+  const ov = el.parentNode; if (!ov) return;
+  const cv = ov.querySelector(`.tcover[data-for="${it.id}"]`);
+  if (pr) { if (cv) cv.remove(); return; }
+  if (!cv && it.cover) { const dw = ov.clientWidth || parseFloat(ov.style.width) || 1, dh = ov.clientHeight || parseFloat(ov.style.height) || 1; ov.insertBefore(coverEl(it, dw, dh), ov.firstChild); }
+}
+function coverEl(it, dispW, dispH) {
+  const c = it.cover, d = document.createElement("div"); d.className = "tcover"; d.dataset.for = it.id;
+  d.style.cssText = `left:${c.nx * dispW}px;top:${c.ny * dispH}px;width:${c.nw * dispW}px;height:${c.nh * dispH}px;background:${it.coverBg || "#fff"}`;
+  return d;
 }
 let textEditBusy = false;
 async function createTextEdit(pi, b, bid, cx, cy) {
@@ -1472,6 +1499,7 @@ async function createTextEdit(pi, b, bid, cx, cy) {
   };
   if (!it.pfont) delete it.pfont;
   if (vis) { if (b.ls) it.ls = b.ls; } else await matchLetterSpacing(it, b);
+  it.sig0 = teditSig(it);
   docItems.push(it); selId = it.id; selDraw = null;
   render();
   if (vis) toast(`Closest font: ${vis.best.family}${vis.best.weight >= 700 ? " Bold" : ""}${vis.best.style === "italic" ? " Italic" : ""} (${vis.best.pct}% match) — other close matches are at the top of the font list.`);
@@ -1479,7 +1507,9 @@ async function createTextEdit(pi, b, bid, cx, cy) {
   if (!vis && info && info.loadedName && !info.fallback.known) matchMissingGlyphs(info, b.str).then(async (best) => {
     if (!best) return;
     ensureFont(best.family);
+    const was = teditPristine(it);
     delete it.ls; await matchLetterSpacing(it, b);   // characters such as spaces are now drawn in the matched font
+    if (was) it.sig0 = teditSig(it);
     if (editingId !== it.id) { render(); return; }
     // being typed in: restyle the line in place, so the caret stays where it is
     const td = document.querySelector(`#ed_pages .ditem[data-id="${it.id}"] .tbtext`); if (!td) return;
@@ -1527,6 +1557,21 @@ function inkMass(src, box, W, H, paper, ink) {
   for (let y = 0; y < H * S; y++) { const row = ((y / S) | 0) * W; for (let x = 0; x < cw; x++) { const v = (paper - lumAt(d, (y * cw + x) * 4)) * r; if (v > 0) m[row + ((x / S) | 0)] += (v > 1 ? 1 : v) / (S * S); } }
   return m;
 }
+// How far the ink leans (x per y): the shear that stacks the upright strokes most tightly into columns.
+// Roman type comes out near 0, italics about 0.15 - 0.3.
+function inkSlant(m, W, H) {
+  let best = 0, bestV = -1;
+  const pad = Math.ceil(0.5 * H) + 2, col = new Float32Array(W + 2 * pad);
+  for (let s = -0.1; s <= 0.421; s += 0.02) {
+    col.fill(0);
+    for (let y = 0; y < H; y++) { const off = pad - Math.round(s * (H - 1 - y)); for (let x = 0; x < W; x++) col[x + off] += m[y * W + x]; }
+    let v = 0; for (let k = 0; k < col.length; k++) v += col[k] * col[k];
+    if (v > bestV * (Math.abs(s) < 0.011 ? 0.985 : 1)) { bestV = v; best = s; }   // upright wins a near tie
+  }
+  return Math.round(best * 100) / 100;
+}
+// the metric twins of the fonts most documents are set in (Times, Arial, Calibri, Cambria, Courier): a near tie goes to them
+const CORE_FAMILIES = new Set(["Tinos", "Arimo", "Carlito", "Caladea", "Cousine"]);
 async function identifyFont(crop, text, families = MATCH_FAMILIES) {
   text = String(text || "").trim(); if (!text) return [];
   const g0 = crop.getContext("2d", { willReadFrequently: true }), cd = g0.getImageData(0, 0, crop.width, crop.height).data, N = crop.width * crop.height;
@@ -1562,10 +1607,18 @@ async function identifyFont(crop, text, families = MATCH_FAMILIES) {
     out.push({ family, weight, style, score: shapeE + 1.5 * widthE + weightE + rowE,
       k: cb.h / b.h, inkW: b.w, inkLeft: b.x - PX / 2, inkTop: PX * 1.4 - b.y, asc: (fm.fontBoundingBoxAscent || PX * 0.9) / PX, desc: (fm.fontBoundingBoxDescent || PX * 0.22) / PX });
   };
+  // italics only when the scan leans: an upright line is never matched to an italic because of a blurry scan
+  const slant = inkSlant(T, WN, HN), leans = slant >= 0.1, unsure = !leans && slant >= 0.06;
   for (const f of families) { await tryOne(f, 400, "normal"); await tryOne(f, 700, "normal"); }
   out.sort((a, b) => a.score - b.score);
-  for (const f of [...new Set(out.slice(0, 6).map((o) => o.family))]) { await tryOne(f, 400, "italic"); await tryOne(f, 700, "italic"); }
+  if (leans || unsure) for (const f of [...new Set(out.slice(0, leans ? 10 : 4).map((o) => o.family))]) { await tryOne(f, 400, "italic"); await tryOne(f, 700, "italic"); }
+  out.forEach((o) => {
+    if (CORE_FAMILIES.has(o.family)) o.score -= 0.15;
+    if (leans && o.style !== "italic") o.score += 0.25;
+    if (!leans && o.style === "italic") o.score += 0.25;
+  });
   out.sort((a, b) => a.score - b.score);
+  out.slant = slant;
   // a match percentage people can read: the best possible score is 0, about 1.2 is a poor match
   out.forEach((o) => { o.pct = Math.max(1, Math.min(99, Math.round(100 * Math.exp(-0.6 * o.score)))); });
   out.cropBox = cb; out.PX = PX;
@@ -1921,7 +1974,7 @@ function renderDoc() {
     renderDraws(ov, dispW, dispH, i, true);
     renderFields(ov, dispW, dispH, p.fields || []);
     // covers for edited PDF text sit under everything else
-    docItems.forEach((it) => { if ((it.page || 0) === i && it.tedit && it.cover) { const c = it.cover, d = document.createElement("div"); d.className = "tcover"; d.style.cssText = `left:${c.nx * dispW}px;top:${c.ny * dispH}px;width:${c.nw * dispW}px;height:${c.nh * dispH}px;background:${it.coverBg || "#fff"}`; ov.appendChild(d); } });
+    docItems.forEach((it) => { if ((it.page || 0) === i && it.tedit && it.cover && !teditPristine(it)) ov.appendChild(coverEl(it, dispW, dispH)); });
     if (edTool === "edittext") renderTextBlocks(ov, i, dispW, dispH);
     docItems.forEach((it) => { if ((it.page || 0) === i) ov.appendChild(itemEl(it, dispW, dispH)); });
     renderDraws(ov, dispW, dispH, i, false);
@@ -2071,12 +2124,13 @@ const NOTE_ICON = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" st
 function itemEl(it, dispW, dispH) {
   const w = it.nw * dispW, h = it.nw * dispW * it.ar;
   const el = document.createElement("div");
-  el.className = "ditem" + (it.id === selId ? " sel" : "") + (it.tbox ? " tbox" : "");
+  const pristine = teditPristine(it);
+  el.className = "ditem" + (it.id === selId ? " sel" : "") + (it.tbox ? " tbox" : "") + (pristine ? " pristine" : "");
   el.dataset.id = it.id;
   el.style.cssText = `left:${it.nx * dispW}px;top:${it.ny * dispH}px;width:${w}px;height:${h}px;opacity:${it.opacity ?? 1};color:${itemColor(it)}`;
   if (it.tbox) {
     const f = tboxFont(it), fsPx = it.fs * dispW, pad = it.tedit ? 0 : Math.round(fsPx * 0.2), tl = it.tedit ? teditLine(it, f, fsPx) : null;
-    el.innerHTML = `<div class="tbtext" style="font-family:${f.css.replace(/"/g, "&quot;")};font-size:${fsPx}px;font-weight:${f.weight};font-style:${f.style};${f.synth ? "font-synthesis:none;" : ""}line-height:${tl ? tl.lh + "px" : it.lh || 1.2};${tl && Math.abs(tl.dy) > 0.05 ? `transform:translateY(${tl.dy}px);` : ""}letter-spacing:${it.ls || 0}em;color:${itemColor(it)};background:${it.bg && it.bg !== "none" ? it.bg : "transparent"};text-align:${it.align || "left"};padding:${pad}px;white-space:${it.tedit ? "pre" : "pre-wrap"}">${escapeHTML(tboxDisplay(it))}</div>`;
+    el.innerHTML = `<div class="tbtext" style="font-family:${f.css.replace(/"/g, "&quot;")};font-size:${fsPx}px;font-weight:${f.weight};font-style:${f.style};${f.synth ? "font-synthesis:none;" : ""}line-height:${tl ? tl.lh + "px" : it.lh || 1.2};${tl && Math.abs(tl.dy) > 0.05 ? `transform:translateY(${tl.dy}px);` : ""}letter-spacing:${it.ls || 0}em;color:${pristine ? "transparent" : itemColor(it)};caret-color:${itemColor(it)};background:${it.bg && it.bg !== "none" ? it.bg : "transparent"};text-align:${it.align || "left"};padding:${pad}px;white-space:${it.tedit ? "pre" : "pre-wrap"}">${escapeHTML(tboxDisplay(it))}</div>`;
   } else if (it.type === "sig") el.innerHTML = it.svg.replace("<svg ", '<svg preserveAspectRatio="none" style="width:100%;height:100%;display:block;pointer-events:none" ');
   else if (it.type === "img") el.innerHTML = `<img src="${it.src}" alt="" draggable="false" style="width:100%;height:100%;display:block;pointer-events:none">`;
   else if (it.type === "shape") el.innerHTML = shapeSVG(it, w, h);
@@ -2162,6 +2216,7 @@ function startTboxEdit(it, el, cx, cy) {
       if (disp !== td.textContent) { const off = caretOffset(td); td.textContent = disp; setCaret(td, off == null ? disp.length : off); }
       it.text = logical;
     } else it.text = td.innerText.replace(/\n$/, "");
+    if (it.tedit) syncPristineEl(it, el, td);
     const ovW = el.parentNode ? el.parentNode.clientWidth : 1;
     if (it.tedit && td.scrollWidth > el.clientWidth + 1) { el.style.width = td.scrollWidth + "px"; it.nw = td.scrollWidth / ovW; }
     if (td.scrollHeight > el.clientHeight + 1) { el.style.height = td.scrollHeight + "px"; }
@@ -3302,6 +3357,7 @@ function wrapLines(ctx, text, maxW) {
   return out;
 }
 async function drawDocItemToCtx(ctx, it, W, H, res) {
+  if (teditPristine(it)) return;   // clicked into but unchanged: the page keeps its own text
   const x = it.nx * W, y = it.ny * H, w = it.nw * W, h = it.nw * W * it.ar;
   ctx.save(); ctx.globalAlpha = it.opacity ?? 1;
   if (it.tbox) {
@@ -3689,7 +3745,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
       const at = r === 90 ? { x: 0, y: w0, rotate: L.degrees(-90) } : r === 180 ? { x: w0, y: h0, rotate: L.degrees(180) } : { x: h0, y: 0, rotate: L.degrees(90) };
       np.drawPage(emb, { ...at, width: w0, height: h0 }); replace(np);
     } else if (base) page.setRotation(L.degrees(0));   // a page saved turned that you turned back upright
-    if (!laidOver && (docItems.some((it) => (it.page || 0) === i && !it.isField && it.type !== "note") || docDraws.some((d) => (d.page || 0) === i))) {
+    if (!laidOver && (docItems.some((it) => (it.page || 0) === i && !it.isField && it.type !== "note" && !teditPristine(it)) || docDraws.some((d) => (d.page || 0) === i))) {
       // your edits, drawn sharp (360 dpi) on a see-through layer, cropped to the area they cover
       const ann = await composePage(i, Q.overlay, "overlay"), box = inkBox(ann);
       if (box) {
@@ -3700,7 +3756,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
     }
     const { width: pw, height: ph } = page.getSize();
     for (const it of docItems) {
-      if ((it.page || 0) !== i) continue;
+      if ((it.page || 0) !== i || teditPristine(it)) continue;
       const wf = it.nw * pw, hf = it.nw * pw * it.ar * (pageAspect(i) * ph / pw), x = it.nx * pw;
       if (it.type === "text" && !it.isField && !laidOver && String(it.text || "").trim()) { try { await hiddenText(L, pdf, page, it, pw, ph, hiddenFonts); } catch (_) {} }
       if (it.type === "note") {
@@ -5857,6 +5913,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   window.__cal2SetEdMode = (m) => { if (doc) setEdMode(m); };
   window.__cal2SetDocTool = (t) => { if (doc) setEdTool(t); };
   window.__cal2Toast = toast;
+window.__cal2IdentifyFont = (crop, text) => identifyFont(crop, text);   // used by the font-matching tests
   window.__cal2ApplyTier = applyTier;
   window.__cal2Rerender = () => render(false);
   window.__cal2PickSignatureImage = () => { applyTier("advanced"); $("sig_file").click(); };
