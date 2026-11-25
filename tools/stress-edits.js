@@ -119,6 +119,8 @@ export async function run({ docs = 4, seed = Math.floor(Math.random() * 1e9), ed
         const nt = NEW_TEXT[Math.floor(r() * NEW_TEXT.length)];
         t = performance.now(); typeInto(td, nt); await frame(); times.type.push(performance.now() - t);
         const item = cur() || td.closest(".ditem"); td = item.querySelector(".tbtext") || td;
+        // what you type must reach the line (a page drawn again while typing used to leave the box deaf to keys)
+        { const dbg = window.__cal2DebugItem && window.__cal2DebugItem(iid); ok(`${tag}: typing reaches the line`, dbg && dbg.text === nt, JSON.stringify({ dbg, editable: td.isContentEditable, shown: td.textContent.slice(0, 30), nt })); }
         const cs = getComputedStyle(td), fr = frac(item) || f0;
         if (line) {
           const [, re, bold, ital] = STD.find((s) => s[0] === line.font);

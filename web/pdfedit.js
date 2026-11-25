@@ -25,7 +25,7 @@ const etEdits = new Map(); // pageIndex -> { changes:[{idx,px,py,psize,pw,fontKe
 
 import { pdfjsReady, pdfLibReady, canvasBytes } from "./libs.js?v=2";
 import { protectedBytes } from "./pdfcrypt.js?v=1";
-import { putWordsBack } from "./pdftext.js?v=2";
+import { putWordsBack } from "./pdftext.js?v=3";
 const pdfjs = () => window.pdfjsLib;   // sync access, only after a PDF has been opened (pdfjsReady loaded it)
 
 // ---- small utilities -------------------------------------------------------
@@ -1329,11 +1329,15 @@ function xmlEsc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;",
 async function pageParagraphs(page) {
   const tc = await page.getTextContent(), vp = page.getViewport({ scale: 1 });
   const styles = tc.styles || {};
+  let spacePending = false;
   const runs = tc.items.filter((it) => it.str !== undefined).map((it) => {
     const fs = Math.hypot(it.transform[2], it.transform[3]) || 10, fn = ((styles[it.fontName] || {}).fontFamily || "") + " " + it.fontName;
     return { str: it.str, x: it.transform[4], y: vp.height - it.transform[5], w: it.width, fs, eol: it.hasEOL,
       bold: /bold|black|heavy|semibold/i.test(fn), italic: /italic|oblique/i.test(fn) };
-  }).filter((r) => r.str.trim().length);   // spaces are put back from the gaps
+  }).filter((r) => {   // spaces are put back from the gaps, and where the PDF has a space of its own (a squeezed line's gap can be tiny)
+    if (r.str.trim().length) { r.spBefore = spacePending || /^\s/.test(r.str); spacePending = /\s$/.test(r.str); return true; }
+    spacePending = true; return false;
+  });
   if (!runs.length) return null;
   // lines: same baseline (within 40% of the size), left to right
   runs.sort((a, b) => a.y - b.y || a.x - b.x);
@@ -1342,7 +1346,7 @@ async function pageParagraphs(page) {
     const L = lines[lines.length - 1];
     if (L && Math.abs(L.y - r.y) < Math.max(L.fs, r.fs) * 0.4) {
       const gap = r.x - (L.x1 || L.x);
-      if (gap > r.fs * 0.15 && !/\s$/.test(L.runs[L.runs.length - 1].str) && !/^\s/.test(r.str)) r.str = (gap > r.fs * 2.5 ? "\t" : " ") + r.str;
+      if ((gap > r.fs * 0.15 || (r.spBefore && gap > -r.fs * 0.1)) && !/\s$/.test(L.runs[L.runs.length - 1].str) && !/^\s/.test(r.str)) r.str = (gap > r.fs * 2.5 ? "\t" : " ") + r.str;
       L.runs.push(r); L.x1 = r.x + r.w; L.fs = Math.max(L.fs, r.fs);
     } else lines.push({ y: r.y, x: r.x, x1: r.x + r.w, fs: r.fs, runs: [r] });
   }

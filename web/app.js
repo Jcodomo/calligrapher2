@@ -1,13 +1,13 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=52";
+import { initPdfEditor } from "./pdfedit.js?v=53";
 import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard, listMemory, saveMemory, forgetMemory } from "./recents.js?v=3";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
 import { scanPdfWatermarks, removePdfWatermarks, eraseColor, inpaint, pageBackground } from "./watermark.js?v=2";
 import { pdfjsReady, pdfLibReady, warmPdfLibs, prefetchOn, canvasBytes } from "./libs.js?v=2";
-import { stripEditedText, putWordsBack } from "./pdftext.js?v=2";
+import { stripEditedText, putWordsBack } from "./pdftext.js?v=3";
 import { scanWorkersSupported, scanOffThread, scanConcurrency, warmRealistic, bilevelPng, overlayPng } from "./scanpool.js?v=5";
 
 const WASM_URL = "./calligrapher2.wasm";
@@ -589,7 +589,7 @@ function render(animate = false) {
   refreshLabels();
   try {
     if (workMode === "pdf") return;
-    if (workMode === "doc" && doc) { const r = renderDoc(); if (formColOn) setTimeout(renderFormCol, 0); return r; }
+    if (workMode === "doc" && doc) { const r = renderDoc(); resumeEditing(); if (formColOn) setTimeout(renderFormCol, 0); return r; }
     sheet.className = "sheet";
     const stage = sheet.parentElement.getBoundingClientRect();
     const width = Math.max(480, Math.min(1600, stage.width - 48));
@@ -2266,6 +2266,16 @@ function setCaret(td, off) {
   let node = td.firstChild; if (!node) { td.appendChild(document.createTextNode("")); node = td.firstChild; }
   r.setStart(node, Math.min(off, node.textContent.length)); r.collapse(true); s.removeAllRanges(); s.addRange(r);
 }
+// The page was drawn again while a text box was being typed in (a font arriving, a background font match): the old
+// box left the page without a blur, so the editor still thinks you are typing in it. Put the new box straight back
+// into typing mode (caret at the end), or stop editing if that box is gone, so a click or a key is never lost.
+function resumeEditing() {
+  if (!editingId) return;
+  if (selId !== editingId) { editingId = null; return; }   // another object was picked: typing in the old box is over
+  const it = docItems.find((x) => x.id === editingId), el = it && document.querySelector(`#ed_pages .ditem[data-id="${editingId}"]`), td = el && el.querySelector(".tbtext");
+  if (!td) { editingId = null; return; }
+  if (!td.isContentEditable) startTboxEdit(it, el);
+}
 function startTboxEdit(it, el, cx, cy) {
   const td = el.querySelector(".tbtext"); if (!td) return;
   editingId = it.id;
@@ -3540,13 +3550,15 @@ async function composePage(pi, res, mode = "all", opts = {}) {
     }
   }
   if (mode !== "overlay") applyBlurDraws(ctx, W, H, pi);
-  drawAnnToCanvas(ctx, W, H, ["highlight"], pi);
+  const asAnnots = !!opts.noAnnots;   // the editable download writes these as PDF comments instead
+  if (!asAnnots) drawAnnToCanvas(ctx, W, H, ["highlight"], pi);
   for (const it of docItems) {
     if ((it.page || 0) !== pi) continue;
     if (mode !== "all" && (it.isField || it.type === "note")) continue;
+    if (asAnnots && it.type === "shape") continue;
     await drawDocItemToCtx(ctx, it, W, H, res);
   }
-  drawAnnToCanvas(ctx, W, H, ["pen", "line", "arrow", "underline", "strike"], pi);
+  if (!asAnnots) drawAnnToCanvas(ctx, W, H, ["pen", "line", "arrow", "underline", "strike"], pi);
   return c;
 }
 // the area of a see-through canvas that has anything drawn on it (with a small margin), or null
@@ -3749,7 +3761,9 @@ const NO_BOX = (L) => ({ borderWidth: 0, borderColor: undefined, backgroundColor
 // the lines changed with Edit Text on page i, in PDF user space, with their original words
 async function editedTextBoxes(i) {
   const p = docPages[i], src = p && docSources[p.src];
-  const its = docItems.filter((it) => it.tedit && it.page === i && it.cover && it.orig != null && it.text !== it.orig);
+  const its = docItems.filter((it) => it.tedit && (it.page || 0) === i && it.cover && it.orig != null && it.text !== it.orig);
+  const odd = docItems.filter((it) => it.tedit && (it.page || 0) === i && it.text !== it.orig && !its.includes(it));
+  if (odd.length) console.warn("Edit Text: edited lines without what is needed to remove their old words", JSON.stringify(odd.map((it) => ({ page: it.page, cover: !!it.cover, orig: it.orig == null ? null : String(it.orig).slice(0, 30), text: String(it.text).slice(0, 30) }))));
   if (!its.length || !src || !src.pdf) return null;
   const pg = await src.pdf.getPage(p.idx + 1), vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + (p.rot || 0)) % 360 });
   const boxes = its.map((it) => {
@@ -3787,6 +3801,78 @@ function removedBoxes(i) {
     out.push({ x0: Math.min(...xs) - r, y0: Math.min(...ys) - r * asp, x1: Math.max(...xs) + r, y1: Math.max(...ys) + r * asp });
   }
   return out;
+}
+// ---- drawings and shapes as real PDF comments (the editable download) ------------------------------------------
+// Highlights, pen and highlighter strokes, lines, arrows, underlines, strike-throughs, rectangles and ellipses go in as
+// PDF annotations with their own drawn look (vector), so Acrobat, Preview, Edge or Chrome show them exactly as here
+// and list them as comments that can be selected, changed or deleted. A highlight dragged along a line of text is a
+// text Highlight; other strokes are Ink.
+const ANNOT_DRAWS = new Set(["highlight", "pen", "line", "arrow", "underline", "strike"]);
+let cssRgbCtx = null;
+function cssRgb(c) {
+  cssRgbCtx = cssRgbCtx || document.createElement("canvas").getContext("2d");
+  cssRgbCtx.fillStyle = "#000"; cssRgbCtx.fillStyle = String(c || "#000");
+  const v = cssRgbCtx.fillStyle;
+  if (v[0] === "#") return [1, 3, 5].map((k) => parseInt(v.slice(k, k + 2), 16) / 255);
+  const m = v.match(/[\d.]+/g) || [0, 0, 0]; return m.slice(0, 3).map((n) => +n / 255);
+}
+function writeAnnots(L, pdf, page, i, pw, ph) {
+  const N = (s) => L.PDFName.of(s), ctx = pdf.context;
+  const X = (nx) => nx * pw, Y = (ny) => ph - ny * ph;
+  const now = L.PDFString.of("D:" + new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14) + "Z");
+  let n = 0, seq = 0;
+  const add = (sub, rect, extra, ops, gs) => {
+    const [x0, y0, x1, y1] = rect, res = gs ? { ExtGState: { G0: gs } } : {};
+    const ap = ctx.register(ctx.formXObject(ops, { BBox: [x0, y0, x1, y1], Resources: res }));
+    const dict = ctx.obj({ Type: "Annot", Subtype: sub, Rect: [x0, y0, x1, y1], F: 4, NM: L.PDFHexString.fromText(`cal2-${i}-${++seq}-${Date.now().toString(36)}`), M: now, T: L.PDFHexString.fromText("Ghost Calligrapher"), Contents: L.PDFHexString.fromText(""), AP: { N: ap }, ...extra });
+    const ref = ctx.register(dict), annots = page.node.lookupMaybe(N("Annots"), L.PDFArray);
+    if (annots) annots.push(ref); else page.node.set(N("Annots"), ctx.obj([ref]));
+    n++;
+  };
+  const strokeOps = (rgb, w, paths, gs) => [L.pushGraphicsState(), ...(gs ? [L.setGraphicsState("G0")] : []), L.setStrokingRgbColor(...rgb), L.setLineWidth(w), L.setLineCap(L.LineCapStyle.Round), L.setLineJoin(L.LineJoinStyle.Round),
+    ...paths.flatMap((pts) => [L.moveTo(pts[0][0], pts[0][1]), ...(pts.length === 1 ? [L.lineTo(pts[0][0] + 0.01, pts[0][1])] : pts.slice(1).map((p) => L.lineTo(p[0], p[1])))]), L.stroke(), L.popGraphicsState()];
+  const box = (pts, r) => { const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]); return [Math.min(...xs) - r - 1, Math.min(...ys) - r - 1, Math.max(...xs) + r + 1, Math.max(...ys) + r + 1]; };
+  for (const d of docDraws) {
+    if ((d.page || 0) !== i || !ANNOT_DRAWS.has(d.kind)) continue;
+    const rgb = cssRgb(d.color), w = Math.max(0.25, d.size * pw), op = d.opacity ?? 1;
+    const gs = d.kind === "highlight" ? { CA: op * 0.4, ca: op * 0.4, BM: "Multiply" } : op < 1 ? { CA: op, ca: op } : null;
+    if (d.pts && d.pts.length) {
+      const pts = d.pts.map((p) => [X(p[0]), Y(p[1])]), rect = box(pts, w / 2);
+      const ys = pts.map((p) => p[1]), flat = Math.max(...ys) - Math.min(...ys) <= w * 0.6;
+      const common = { C: rgb, CA: gs ? gs.CA : 1, BS: { W: w, S: "S" } };
+      if (d.kind === "highlight" && flat) {
+        // along a line of text: a text highlight over the band the stroke painted
+        const xa = Math.min(...pts.map((p) => p[0])) - w / 2, xb = Math.max(...pts.map((p) => p[0])) + w / 2, yt = Math.max(...ys) + w / 2, yb = Math.min(...ys) - w / 2;
+        add("Highlight", rect, { ...common, QuadPoints: [xa, yt, xb, yt, xa, yb, xb, yb] }, strokeOps(rgb, w, [pts], gs), gs);
+      } else add("Ink", rect, { ...common, InkList: [pts.flat()] }, strokeOps(rgb, w, [pts], gs), gs);
+    } else if (d.x0 != null) {
+      const a = [X(d.x0), Y(d.y0)], b = [X(d.x1), Y(d.y1)], paths = [[a, b]];
+      if (d.kind === "arrow") {
+        const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), Ln = Math.max(pw / 100, w * 3.2), s = 0.5;
+        paths.push([[b[0] - Ln * Math.cos(ang - s), b[1] - Ln * Math.sin(ang - s)], b, [b[0] - Ln * Math.cos(ang + s), b[1] - Ln * Math.sin(ang + s)]]);
+      }
+      const rect = box(paths.flat(), w / 2 + (d.kind === "arrow" ? w * 3.2 : 0));
+      add("Line", rect, { L: [a[0], a[1], b[0], b[1]], LE: [N("None"), N(d.kind === "arrow" ? "OpenArrow" : "None")], C: rgb, CA: gs ? gs.CA : 1, BS: { W: w, S: "S" },
+        Subj: L.PDFHexString.fromText({ underline: "Underline", strike: "Strikethrough", arrow: "Arrow", line: "Line" }[d.kind]) }, strokeOps(rgb, w, paths, gs), gs);
+    }
+  }
+  for (const it of docItems) {
+    if ((it.page || 0) !== i || it.type !== "shape") continue;
+    const x = X(it.nx), wPt = it.nw * pw, hPt = it.nw * pw * it.ar * (pageAspect(i) * ph / pw), yTop = Y(it.ny), y = yTop - hPt;
+    const sw = it.color === "none" ? 0 : Math.max(0.75, (it.sw || 3 / REF_W) * pw), op = it.opacity ?? 1, gs = op < 1 ? { CA: op, ca: op } : null;
+    const fill = it.fill && it.fill !== "none" ? cssRgb(it.fill) : null, stroke = sw ? cssRgb(itemColor(it)) : null;
+    const ops = [L.pushGraphicsState(), ...(gs ? [L.setGraphicsState("G0")] : [])];
+    if (fill) ops.push(L.setFillingRgbColor(...fill));
+    if (stroke) ops.push(L.setStrokingRgbColor(...stroke), L.setLineWidth(sw));
+    if (it.shape === "ellipse") {
+      const cx = x + wPt / 2, cy = y + hPt / 2, rx = Math.max(0.5, wPt / 2 - sw / 2), ry = Math.max(0.5, hPt / 2 - sw / 2), k = 0.5523;
+      ops.push(L.moveTo(cx + rx, cy), L.appendBezierCurve(cx + rx, cy + ry * k, cx + rx * k, cy + ry, cx, cy + ry), L.appendBezierCurve(cx - rx * k, cy + ry, cx - rx, cy + ry * k, cx - rx, cy),
+        L.appendBezierCurve(cx - rx, cy - ry * k, cx - rx * k, cy - ry, cx, cy - ry), L.appendBezierCurve(cx + rx * k, cy - ry, cx + rx, cy - ry * k, cx + rx, cy), L.closePath());
+    } else ops.push(L.rectangle(x + sw / 2, y + sw / 2, Math.max(0.5, wPt - sw), Math.max(0.5, hPt - sw)));
+    ops.push(fill && stroke ? L.fillAndStroke() : fill ? L.fill() : L.stroke(), L.popGraphicsState());
+    add(it.shape === "ellipse" ? "Circle" : "Square", [x - 1, y - 1, x + wPt + 1, yTop + 1], { C: stroke || [], ...(fill ? { IC: fill } : {}), CA: op, BS: { W: sw, S: "S" }, RD: [sw / 2 + 1, sw / 2 + 1, sw / 2 + 1, sw / 2 + 1] }, ops, gs);
+  }
+  return n;
 }
 // a text box that a redaction or blur covers (even partly): its words stay out of the saved file's text
 function underRedaction(it, i) {
@@ -3859,7 +3945,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
     } else if (base) page.setRotation(L.degrees(0));   // a page saved turned that you turned back upright
     if (!laidOver && (docItems.some((it) => (it.page || 0) === i && !it.isField && it.type !== "note" && !teditPristine(it)) || docDraws.some((d) => (d.page || 0) === i))) {
       // your edits, drawn sharp (360 dpi) on a see-through layer, cropped to the area they cover
-      const ann = await composePage(i, Q.overlay, "overlay"), box = inkBox(ann);
+      const ann = await composePage(i, Q.overlay, "overlay", { noAnnots: !opts.flat }), box = inkBox(ann);
       if (box) {
         const crop = document.createElement("canvas"); crop.width = box.w; crop.height = box.h; crop.getContext("2d").drawImage(ann, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
         const { width: PW, height: PH } = page.getSize(), kx = PW / ann.width, ky = PH / ann.height;
@@ -3867,6 +3953,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
       }
     }
     const { width: pw, height: ph } = page.getSize();
+    if (!opts.flat && !laidOver) { try { nn += writeAnnots(L, pdf, page, i, pw, ph); } catch (e) { console.warn("Comments: page " + (i + 1), e); } }
     for (const it of docItems) {
       if ((it.page || 0) !== i || teditPristine(it)) continue;
       const wf = it.nw * pw, hf = it.nw * pw * it.ar * (pageAspect(i) * ph / pw), x = it.nx * pw;
@@ -6039,7 +6126,8 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   window.__cal2SetEdMode = (m) => { if (doc) setEdMode(m); };
   window.__cal2SetDocTool = (t) => { if (doc) setEdTool(t); };
   window.__cal2Toast = toast;
-window.__cal2IdentifyFont = (crop, text) => identifyFont(crop, text);   // used by the font-matching tests
+window.__cal2IdentifyFont = (crop, text) => identifyFont(crop, text);
+  window.__cal2DebugItem = (id) => { const it = docItems.find((q) => q.id === id); return it && { text: it.text, orig: it.orig, editing: editingId === id }; };   // used by the editing stress test
   window.__cal2ApplyTier = applyTier;
   window.__cal2Rerender = () => render(false);
   window.__cal2PickSignatureImage = () => { applyTier("advanced"); $("sig_file").click(); };

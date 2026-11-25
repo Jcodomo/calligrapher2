@@ -382,3 +382,34 @@ export async function runTools() {
 
 // the sample documents, for other checks
 export const __makeDigital = makeDigital, __makeScan = makeScan, __makeFillable = makeFillable;
+
+// Editable PDF: drawings and shapes are real PDF comments (annotations with their own drawn look), not part of a
+// picture layer; the plain PDF still has them fixed on the page.
+export async function runComments() {
+  const out = [], ok = (name, cond, info = "") => { out.push({ name, pass: !!cond, info: String(info).slice(0, 260) }); return !!cond; };
+  const digital = await makeDigital(), orig = await renderAll(digital), L3 = lineBoxes[3], mid = (L3.y0 + L3.y1) / 2;
+  const cases = [
+    ["highlight", "Highlight", L3, () => drag([[L3.x0, mid], [L3.x1, mid]])],
+    ["pen", "Ink", { x0: 0.18, y0: 0.6, x1: 0.52, y1: 0.7 }, () => drag([[0.2, 0.62], [0.3, 0.68], [0.4, 0.62], [0.5, 0.68]])],
+    ["line", "Line", { x0: 0.18, y0: 0.73, x1: 0.62, y1: 0.77 }, () => drag([[0.2, 0.75], [0.6, 0.75]])],
+    ["arrow", "Line", { x0: 0.18, y0: 0.78, x1: 0.62, y1: 0.87 }, () => drag([[0.2, 0.8], [0.6, 0.85]])],
+    ["underline", "Line", { ...L3, y0: L3.y1 - 0.01, y1: L3.y1 + 0.012 }, () => drag([[L3.x0, L3.y1], [L3.x1, L3.y1]])],
+    ["strike", "Line", L3, () => drag([[L3.x0, mid], [L3.x1, mid]])],
+    ["shape:rect", "Square", { x0: 0.55, y0: 0.6, x1: 0.86, y1: 0.7 }, () => drag([[0.55, 0.6], [0.85, 0.7]])],
+    ["shape:ellipse", "Circle", { x0: 0.55, y0: 0.72, x1: 0.86, y1: 0.83 }, () => drag([[0.55, 0.72], [0.85, 0.82]])],
+  ];
+  const all = [];
+  for (const [tool, sub, box, act] of cases) {
+    await openDoc(digital, "comments.pdf"); window.__cal2SetDocTool(tool); await frame(); await act(); await deselect(); await sleep(120);
+    const e = await download("fill"), b = new Uint8Array(await e.file.blob.arrayBuffer()), R = await renderAll(b), anns = R.pages[0].ann.filter((a) => a.subtype !== "Link");
+    ok(`${tool}: a real "${sub}" comment`, anns.length === 1 && anns[0].subtype === sub, anns.map((a) => a.subtype).join(",") || "none");
+    const d = diff(orig.pages[0], R.pages[0], box);
+    ok(`${tool}: drawn where it was made`, d.inside > 0.004 && d.outside < 0.0025, `in ${(d.inside * 100).toFixed(1)}%, outside ${(d.outside * 100).toFixed(2)}%`);
+    ok(`${tool}: the page's own words untouched`, LINES1.every((l) => R.pages[0].text.includes(l)), "");
+    const f = await download("pdf"), Rf = await renderAll(new Uint8Array(await f.file.blob.arrayBuffer()));
+    ok(`${tool}: the plain PDF still has it fixed on the page`, Rf.pages[0].ann.length === 0 && diff(orig.pages[0], Rf.pages[0], box).inside > 0.004, Rf.pages[0].ann.map((a) => a.subtype).join(","));
+    all.push([tool, b]);
+  }
+  const pass = out.filter((o) => o.pass).length;
+  return { summary: `${pass}/${out.length} passed`, fails: out.filter((o) => !o.pass), files: all };
+}

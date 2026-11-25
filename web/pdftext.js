@@ -102,7 +102,7 @@ export async function stripEditedText(L, pdf, page, srcPage, boxes) {
   let ctm = ID.slice(), tm = ID.slice(), tlm = ID.slice();
   let st = { fs: 0, font: null, tc: 0, tw: 0, th: 1, tl: 0 };
   const stack = [];
-  const edits = [];   // { start, end, text }
+  const edits = [], dbg = [];   // { start, end, text }; what did not match (for the warning)
   let si = 0;
   const num = (a, k) => (a[k] && a[k].t === "num" ? a[k].v : 0);
   for (const o of ops) {
@@ -141,6 +141,7 @@ export async function stripEditedText(L, pdf, page, srcPage, boxes) {
     const trm = mul(tm, ctm), p0 = apply(trm, 0, 0), p1 = apply(trm, x * st.th, 0);
     const mx = (p0[0] + p1[0]) / 2, my = (p0[1] + p1[1]) / 2, nt = norm(text);
     const hit = nt && wanted.find((b) => mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1 && b.t.includes(nt));
+    if (!hit && nt && dbg.length < 12) dbg.push([nt.slice(0, 30), +mx.toFixed(1), +my.toFixed(1)]);
     if (hit && st.fs) {
       const m = -x * 1000 / st.fs, keep = `[${+m.toFixed(3)}] TJ`;
       const rep = o.op === "'" ? `T* ${keep}` : o.op === '"' ? `${num(a, 0)} Tw ${num(a, 1)} Tc T* ${keep}` : keep;
@@ -148,7 +149,7 @@ export async function stripEditedText(L, pdf, page, srcPage, boxes) {
     }
     tm = mul([1, 0, 0, 1, x * st.th, 0], tm);
   }
-  if (!edits.length) return 0;
+  if (!edits.length) { console.warn("Edit Text: none of the page's text matched the edited lines", JSON.stringify({ boxes: wanted.map((b) => [b.t.slice(0, 40), +b.x0.toFixed(1), +b.y0.toFixed(1), +b.x1.toFixed(1), +b.y1.toFixed(1)]), seen: dbg.slice(0, 6) })); return 0; }
   // 4. write the page's content back as one stream
   let outS = "", at = 0;
   for (const e of edits) { outS += s.slice(at, e.start) + e.text; at = e.end; }
