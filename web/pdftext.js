@@ -159,3 +159,39 @@ export async function stripEditedText(L, pdf, page, srcPage, boxes) {
   node.set(L.PDFName.of("Contents"), pdf.context.register(stream));
   return edits.length;
 }
+
+// Puts a page's words back as invisible real text on a page that had to become a picture (a redaction, a blur,
+// Unlock), so the saved page can still be searched, selected and copied. Each run of characters goes at its place,
+// squeezed to its original width; characters whose middle lies in one of `boxes` (page fractions, as shown) stay out.
+// srcPage: the original page in pdf.js, vp: its viewport as shown (any rotation), pw x ph: the new page in points.
+export async function putWordsBack(L, pdf, page, srcPage, vp, pw, ph, boxes = [], cache = {}) {
+  const tc = await srcPage.getTextContent();
+  const font = cache.f || (cache.f = await pdf.embedFont(L.StandardFonts.Helvetica)), okc = cache.cs || (cache.cs = new Set(font.getCharacterSet()));
+  const fontRef = page.node.newFontDictionary(font.name, font.ref);
+  const norm = (x, y) => { const v = vp.convertToViewportPoint(x, y); return [v[0] / vp.width, v[1] / vp.height]; };
+  const inside = (q) => boxes.some((b) => q[0] >= b.x0 && q[0] <= b.x1 && q[1] >= b.y0 && q[1] <= b.y1);
+  let n = 0;
+  for (const t of tc.items) {
+    const s = t.str || ""; if (!s.trim() || !t.transform) continue;
+    const tr = t.transform, fs = Math.hypot(tr[2], tr[3]) || Math.hypot(tr[0], tr[1]); if (!(fs > 0.5)) continue;
+    const dl = Math.hypot(tr[0], tr[1]) || 1, dx = tr[0] / dl, dy = tr[1] / dl, ux = -dy, uy = dx;
+    const chars = [...s].map((ch) => (okc.has(ch.codePointAt(0)) ? ch : "?"));
+    const cum = [0]; for (const ch of chars) cum.push(cum[cum.length - 1] + (font.widthOfTextAtSize(ch, 10) || 5));
+    const k = (t.width > 0 ? t.width : font.widthOfTextAtSize(chars.join(""), fs)) / (cum[cum.length - 1] || 1);
+    const pt = (u, h) => [tr[4] + dx * u + ux * h, tr[5] + dy * u + uy * h];
+    const keep = chars.map((ch, c) => !inside(norm(...pt((cum[c] + cum[c + 1]) / 2 * k, fs * 0.35))));
+    for (let a = 0; a < chars.length;) {
+      if (!keep[a] || /\s/.test(chars[a])) { a++; continue; }
+      let b = a; while (b < chars.length && keep[b]) b++;
+      let e = b; while (e > a && /\s/.test(chars[e - 1])) e--;
+      const run = chars.slice(a, e).join("");
+      const s0 = norm(...pt(cum[a] * k, 0)), s1 = norm(...pt(cum[e] * k, 0));
+      const X0 = s0[0] * pw, Y0 = ph - s0[1] * ph, X1 = s1[0] * pw, Y1 = ph - s1[1] * ph, len = Math.hypot(X1 - X0, Y1 - Y0);
+      const fsOut = fs * pw / vp.width, have = font.widthOfTextAtSize(run, fsOut) || len, cs = (X1 - X0) / (len || 1), sn = (Y1 - Y0) / (len || 1);
+      page.pushOperators(L.beginText(), L.setFontAndSize(fontRef, fsOut), L.setTextRenderingMode(L.TextRenderingMode.Invisible),
+        L.setCharacterSqueeze(Math.max(20, Math.min(400, (len / have) * 100))), L.setTextMatrix(cs, sn, -sn, cs, X0, Y0), L.showText(font.encodeText(run)), L.endText());
+      n++; a = b;
+    }
+  }
+  return n;
+}

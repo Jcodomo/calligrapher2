@@ -24,6 +24,8 @@ let etSrc = null, etPageNum = 1, etScale = 1, etBgCtx = null, etCanvasH = 0, etA
 const etEdits = new Map(); // pageIndex -> { changes:[{idx,px,py,psize,pw,fontKey,bg,fg,text}], adds:[{pdfX,pdfYbaseline,pdfSize,fontKey,fg,text}] }
 
 import { pdfjsReady, pdfLibReady, canvasBytes } from "./libs.js?v=2";
+import { protectedBytes } from "./pdfcrypt.js?v=1";
+import { putWordsBack } from "./pdftext.js?v=2";
 const pdfjs = () => window.pdfjsLib;   // sync access, only after a PDF has been opened (pdfjsReady loaded it)
 
 // ---- small utilities -------------------------------------------------------
@@ -400,11 +402,11 @@ const TOOLS = [
   { id: "rotate", name: "Rotate", icon: "⟳", color: "#7c5cff", kind: "action", run: () => { selEntries().forEach((e) => e.rot = (e.rot + 90) % 360); thumbCache.clear(); renderGrid(); note("Rotated " + (selected.size ? "selected" : "all") + " 90°."); } },
   { id: "crop", name: "Crop", icon: "⛶", color: "#00c2a8", kind: "panel" },
   { id: "extract", name: "Extract Pages", icon: "⿻", color: "#3aa0ff", kind: "panel" },
-  { id: "protect", name: "Protect", icon: "🔒", color: "#e8554e", kind: "server" },
+  { id: "protect", name: "Protect", icon: "🔒", color: "#e8554e", kind: "panel" },
   { id: "number", name: "Number Pages", icon: "№", color: "#00c2a8", kind: "panel" },
   { id: "redact", name: "Redact", icon: "▮", color: "#00c2a8", kind: "panel" },
   { id: "watermark", name: "Watermark", icon: "💧", color: "#00c2a8", kind: "panel" },
-  { id: "flatten", name: "Flatten", icon: "▤", color: "#e8554e", kind: "action", run: async () => { await withBusy("Flattening…", async () => { const out = await rasterizeToPdf(pages, 2, 0.92); await save(out, "flattened.pdf"); }); note("Saved flattened.pdf."); } },
+  { id: "flatten", name: "Flatten", icon: "▤", color: "#e8554e", kind: "action", run: async () => { await withBusy("Flattening…", async () => { const r = await flattenKeepText(pages); await save(r.out, "flattened.pdf"); note("Saved flattened.pdf" + (r.how ? " - " + r.how : "") + "."); }); } },
 ];
 
 function openInSign() {
@@ -463,6 +465,7 @@ function openTool(t) {
   else if (t.id === "dupes") openDupes();
   else if (t.id === "pagesort") openPageSort();
   else if (t.id === "unlock") openUnlock();
+  else if (t.id === "protect") openProtect();
   else if (t.id === "redact") openRedact();
   else if (t.id === "fillform") openFillForm();
 }
@@ -973,17 +976,86 @@ function openUnlock() {
     let d;
     try { d = await (await pdfjsReady()).getDocument({ data: buf.slice(), password: pw }).promise; }
     catch (e) { return note("Wrong password or unreadable PDF.", true); }
-    const L = (await pdfLibReady()); const out = await L.PDFDocument.create();
+    const L = (await pdfLibReady()); const out = await L.PDFDocument.create(), cache = {};
     for (let i = 1; i <= d.numPages; i++) {
       const page = await d.getPage(i);
       const vp = page.getViewport({ scale: 2 });
       const c = document.createElement("canvas"); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
       await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
       const img = await out.embedJpg((await canvasBytes(c, "image/jpeg", 0.92)));
-      const pg = out.addPage([c.width, c.height]); pg.drawImage(img, { x: 0, y: 0, width: c.width, height: c.height });
+      const pw0 = vp.width / 2, ph0 = vp.height / 2, pg = out.addPage([pw0, ph0]); pg.drawImage(img, { x: 0, y: 0, width: pw0, height: ph0 });
+      try { await putWordsBack(L, out, pg, page, page.getViewport({ scale: 1 }), pw0, ph0, [], cache); } catch (_) {}   // its words stay selectable and searchable
     }
     await save(out, "unlocked.pdf"); note("Saved unlocked.pdf.");
   }));
+}
+// Protect: a password to open the PDF (AES-256, made in the browser), and what readers may do with it.
+function openProtect() {
+  panelShell("Protect", `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.45">Lock the PDF with a password. It is encrypted with AES-256 right here in your browser, and Acrobat, Chrome, Edge, Preview and phone readers ask for the password to open it. Keep the password safe: it can't be recovered.</div>
+    <div class="row"><label>Password</label><input id="pe_pr_pw" type="password" autocomplete="new-password" style="flex:1"></div>
+    <div class="row"><label>Repeat</label><input id="pe_pr_pw2" type="password" autocomplete="new-password" style="flex:1"></div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin:4px 0"><input type="checkbox" id="pe_pr_print" checked> Allow printing</label>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin:4px 0"><input type="checkbox" id="pe_pr_copy" checked> Allow copying text</label>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin:4px 0"><input type="checkbox" id="pe_pr_edit" checked> Allow changes, comments and form filling</label>
+    <button class="btn" id="pe_pr_go">Protect &amp; download</button>`);
+  $("pe_pr_go").onclick = () => {
+    const pw = $("pe_pr_pw").value, pw2 = $("pe_pr_pw2").value;
+    if (!pw) return note("Type a password first.", true);
+    if (pw !== pw2) return note("The two passwords are different - type the same one twice.", true);
+    const ed = $("pe_pr_edit").checked, perms = { print: $("pe_pr_print").checked, copy: $("pe_pr_copy").checked, modify: ed, annotate: ed, fill: ed, assemble: ed };
+    withBusy("Encrypting…", async () => {
+      const L = await pdfLibReady();
+      const out = pages.some((e) => e.red && e.red.length) ? await rasterizeToPdf(pages, 300 / 72, 0.92) : await buildPdf(pages);
+      const bytes = await protectedBytes(L, out, { user: pw, perms });
+      const base = ((sources[0] && sources[0].name) || "document.pdf").replace(/\.pdf$/i, "");
+      dl(base + "-protected.pdf", new Blob([bytes], { type: "application/pdf" }));
+      note("Saved " + base + "-protected.pdf - it opens with your password.");
+    });
+  };
+}
+// Flatten: form fields and the drawn look of comments and markups become part of the page, which stays as it was
+// (sharp text that can be selected and found). Links keep working; notes without a drawn look stay notes. If a page
+// can't be done that way, the document is flattened to pictures as before.
+async function flattenKeepText(entries) {
+  const L = await pdfLibReady(), N = (x) => L.PDFName.of(x);
+  try {
+    const out = await buildPdf(entries);
+    let fields = 0, baked = 0;
+    try { const f = out.getForm(); fields = f.getFields().length; if (fields) { f.updateFieldAppearances(); f.flatten(); } } catch (_) {}
+    for (const page of out.getPages()) {
+      const annots = page.node.lookupMaybe(N("Annots"), L.PDFArray); if (!annots) continue;
+      const keep = [];
+      for (let k = 0; k < annots.size(); k++) {
+        const ref = annots.get(k), a = out.context.lookup(ref);
+        if (!(a instanceof L.PDFDict)) continue;
+        const st = a.lookup(N("Subtype")), sub = st ? st.asString() : "", fl = a.lookup(N("F")), F = fl ? fl.asNumber() : 0;
+        if (sub === "/Link") { keep.push(ref); continue; }
+        if (sub === "/Popup" || (F & 2)) continue;   // popups go with their note; hidden ones are dropped
+        const ap = a.lookup(N("AP")); let nref = ap && ap.get(N("N"));
+        let nobj = nref && out.context.lookup(nref);
+        if (nobj instanceof L.PDFDict && !(nobj instanceof L.PDFStream)) { const as = a.lookup(N("AS")); nref = as ? nobj.get(as) : null; nobj = nref && out.context.lookup(nref); }
+        const rect = a.lookupMaybe(N("Rect"), L.PDFArray);
+        if (!(nobj instanceof L.PDFStream) || !(nref instanceof L.PDFRef) || !rect) { if (sub === "/Text" || sub === "/FreeText" || !ap) keep.push(ref); continue; }
+        const R = rect.asArray().map((v) => v.asNumber()), bb = nobj.dict.lookupMaybe(N("BBox"), L.PDFArray), mx = nobj.dict.lookupMaybe(N("Matrix"), L.PDFArray);
+        const B = bb ? bb.asArray().map((v) => v.asNumber()) : [0, 0, R[2] - R[0], R[3] - R[1]], M = mx ? mx.asArray().map((v) => v.asNumber()) : [1, 0, 0, 1, 0, 0];
+        const cs = [[B[0], B[1]], [B[2], B[1]], [B[0], B[3]], [B[2], B[3]]].map(([x, y]) => [M[0] * x + M[2] * y + M[4], M[1] * x + M[3] * y + M[5]]);
+        const bx0 = Math.min(...cs.map((c) => c[0])), bx1 = Math.max(...cs.map((c) => c[0])), by0 = Math.min(...cs.map((c) => c[1])), by1 = Math.max(...cs.map((c) => c[1]));
+        const rx0 = Math.min(R[0], R[2]), rx1 = Math.max(R[0], R[2]), ry0 = Math.min(R[1], R[3]), ry1 = Math.max(R[1], R[3]);
+        if (!(bx1 - bx0 > 0) || !(by1 - by0 > 0)) continue;
+        const sx = (rx1 - rx0) / (bx1 - bx0), sy = (ry1 - ry0) / (by1 - by0);
+        const name = page.node.newXObject("Flat", nref);
+        page.pushOperators(L.pushGraphicsState(), L.concatTransformationMatrix(sx, 0, 0, sy, rx0 - bx0 * sx, ry0 - by0 * sy), L.drawObject(name), L.popGraphicsState());
+        baked++;
+      }
+      if (keep.length) page.node.set(N("Annots"), out.context.obj(keep)); else page.node.delete(N("Annots"));
+    }
+    const bits = [fields ? fields + " form field" + (fields > 1 ? "s" : "") : "", baked ? baked + " markup" + (baked > 1 ? "s" : "") : ""].filter(Boolean);
+    return { out, how: bits.length ? bits.join(" and ") + " fixed in place, text kept" : "nothing to flatten, text kept" };
+  } catch (e) {
+    console.warn("Flatten: keeping text failed, flattening to pictures", e);
+    return { out: await rasterizeToPdf(entries, 2, 0.92), how: "as pictures" };
+  }
 }
 function openRedact() {
   redactMode = true; renderGrid();

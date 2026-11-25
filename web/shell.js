@@ -148,6 +148,7 @@ const TOOLS = {
   pagesort:  { name: "Sort Pages by Number", desc: "Read each page's printed page number (OCR for scans) and put the pages in order.", c: C.org, i: "OCR", mode: "pdf", tool: "pagesort", multiple: true, images: true, accept: "application/pdf,.pdf,image/*" },
   txt2pdf:   { name: "Text to PDF", desc: "Turn a .txt, .md or .csv file into a tidy PDF.", c: C.conv, i: "TXT", mode: "convert", accept: ".txt,.md,.csv,.log,text/plain" },
   ocr:       { name: "PDF OCR", desc: "Make a scanned PDF searchable, right in your browser.", c: C.opt, i: "OCR", mode: "pdf", tool: "ocr", accept: PDF_IN },
+  protect:   { name: "Protect PDF", desc: "Lock a PDF with a password (AES-256), and choose whether it can be printed, copied or changed.", c: C.prot, i: "lock", mode: "pdf", tool: "protect", accept: PDF_IN },
   unlock:    { name: "Unlock PDF", desc: "Remove a password you know from a PDF.", c: C.prot, i: "lock", mode: "pdf", tool: "unlock", nofile: true },
   redact:    { name: "Redact PDF", desc: "Black out sensitive content so it's gone for good.", c: "#3d3d3d", i: "redact", mode: "pdf", tool: "redact", accept: PDF_IN },
   flatten:   { name: "Flatten PDF", desc: "Bake forms and annotations into the page.", c: C.prot, i: "flatten", mode: "pdf", tool: "", accept: PDF_IN, arrive: "Pick Flatten in Tools to download a flattened copy." },
@@ -164,7 +165,7 @@ const MENU = [
   ["Organize", ["merge", "split", "rotate", "delete", "extract", "organize", "dupes", "pagesort"]],
   ["Optimize", ["compress", "number", "crop", "watermark"]],
   ["Convert", ["pdf2img", "img2pdf", "pdf2word", "enhance", "txt2pdf", "ocr"]],
-  ["Protect", ["unlock", "redact", "flatten"]],
+  ["Protect", ["protect", "unlock", "redact", "flatten"]],
   ["Handwriting", ["write", "signature", "drawsig", "drawhand", "sigimport", "scanlook"]],
   ["Mortgage", ["builder"]],
 ];

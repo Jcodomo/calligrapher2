@@ -1,13 +1,13 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=50";
+import { initPdfEditor } from "./pdfedit.js?v=51";
 import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard, listMemory, saveMemory, forgetMemory } from "./recents.js?v=3";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
 import { scanPdfWatermarks, removePdfWatermarks, eraseColor, inpaint, pageBackground } from "./watermark.js?v=2";
 import { pdfjsReady, pdfLibReady, warmPdfLibs, prefetchOn, canvasBytes } from "./libs.js?v=2";
-import { stripEditedText } from "./pdftext.js?v=1";
+import { stripEditedText, putWordsBack } from "./pdftext.js?v=2";
 import { scanWorkersSupported, scanOffThread, scanConcurrency, warmRealistic, bilevelPng, overlayPng } from "./scanpool.js?v=5";
 
 const WASM_URL = "./calligrapher2.wasm";
@@ -2653,7 +2653,7 @@ const TOOL_MAP = {
   write: ["sign", "handwrite"], handwrite: ["sign", "handwrite"], signature: ["sign", "sig", "signature"], sigimport: ["sign", "sig", "sigimport"],
   merge: ["organize", "pw:merge"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "pw:split"], extract: ["organize", "pw:extract"], number: ["organize", "panel:number"],
   unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"], pdffonts: ["edit", "fonts"],
-  compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], pdf2word: ["convert", "panel:pdfword"], fillweb: ["sign", "fillweb"], enhance: ["convert", "panel:enhance"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"],
+  compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], pdf2word: ["convert", "panel:pdfword"], fillweb: ["sign", "fillweb"], enhance: ["convert", "panel:enhance"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"], protect: ["convert", "panel:protect"],
 };
 function applyTool(id) {
   const m = TOOL_MAP[id]; if (!m || !doc) return false;
@@ -3772,6 +3772,37 @@ async function hiddenText(L, pdf, page, it, pw, ph, cache) {
       L.setCharacterSqueeze(Math.max(40, Math.min(250, lines.length > 1 ? 100 : (want / have) * 100))), L.setTextMatrix(1, 0, 0, 1, x, y), L.showText(font.encodeText(t)), L.endText());
   });
 }
+// The boxes (page fractions, as shown) that took words off page i: redactions, blur strokes and lines changed
+// with Edit Text (their old words).
+function removedBoxes(i) {
+  const asp = pageAspect(i), out = [];
+  for (const it of docItems) {
+    if ((it.page || 0) !== i) continue;
+    if (it.type === "redact") out.push({ x0: it.nx, y0: it.ny, x1: it.nx + it.nw, y1: it.ny + it.nw * it.ar * asp });
+    else if (it.tedit && it.cover && !teditPristine(it)) { const c = it.cover; out.push({ x0: c.nx, y0: c.ny, x1: c.nx + c.nw, y1: c.ny + c.nh }); }
+  }
+  for (const d of docDraws) {
+    if ((d.page || 0) !== i || d.kind !== "blur" || !d.pts || !d.pts.length) continue;
+    const r = (d.size || 0) * 0.5, xs = d.pts.map((p) => p[0]), ys = d.pts.map((p) => p[1]);
+    out.push({ x0: Math.min(...xs) - r, y0: Math.min(...ys) - r * asp, x1: Math.max(...xs) + r, y1: Math.max(...ys) + r * asp });
+  }
+  return out;
+}
+// a text box that a redaction or blur covers (even partly): its words stay out of the saved file's text
+function underRedaction(it, i) {
+  const asp = pageAspect(i), a = { x0: it.nx, y0: it.ny, x1: it.nx + it.nw, y1: it.ny + it.nw * it.ar * asp };
+  return removedBoxes(i).filter((b, k, all) => !(it.tedit && it.cover && b.x0 === it.cover.nx && b.y0 === it.cover.ny))
+    .some((b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0);
+}
+// A page that had to become a picture (a redaction or blur on it) keeps the rest of its words: every word of the
+// original page outside the removed boxes goes back on as invisible real text at its place, so it can still be
+// selected, copied and searched. Words under a redaction, a blur or an edited line are not put back.
+async function keepWordsOutside(L, pdf, page, i, pw, ph, cache) {
+  const p = docPages[i], src = p && docSources[p.src];
+  if (!src || src.kind !== "pdf" || !src.pdf) return 0;
+  const pg = await src.pdf.getPage(p.idx + 1), vp = pg.getViewport({ scale: 1, rotation: ((pg.rotate || 0) + (p.rot || 0)) % 360 });
+  return putWordsBack(L, pdf, page, pg, vp, pw, ph, removedBoxes(i), cache);
+}
 async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are written as plain text (no form fields, no boxes)
   const L = await pdfLibReady();
   try { await document.fonts.ready; } catch (_) {}
@@ -3809,6 +3840,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
       const c = await composePage(i, Q.scale, "nofields", { sharp: true });
       const img = await pdf.embedJpg((await canvasBytes(c, "image/jpeg", Q.q)));
       const np = pdf.insertPage(i, [pw0, ph0]); np.drawImage(img, { x: 0, y: 0, width: pw0, height: ph0 }); replace(np); laidOver = true;
+      try { await keepWordsOutside(L, pdf, np, i, pw0, ph0, hiddenFonts); } catch (e) { console.warn("Redact: page " + (i + 1) + " could not keep its other words selectable", e); }
     } else if (src.kind !== "pdf") {
       // a page that is a picture: your original picture file goes in untouched (only re-saved if it was turned)
       const b = src.bytes, isJpg = b && b[0] === 0xFF && b[1] === 0xD8, isPng = b && b[0] === 0x89 && b[1] === 0x50;
@@ -3838,7 +3870,7 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
     for (const it of docItems) {
       if ((it.page || 0) !== i || teditPristine(it)) continue;
       const wf = it.nw * pw, hf = it.nw * pw * it.ar * (pageAspect(i) * ph / pw), x = it.nx * pw;
-      if (it.type === "text" && !it.isField && !laidOver && String(it.text || "").trim()) { try { await hiddenText(L, pdf, page, it, pw, ph, hiddenFonts); } catch (_) {} }
+      if (it.type === "text" && !it.isField && (!laidOver || !underRedaction(it, i)) && String(it.text || "").trim()) { try { await hiddenText(L, pdf, page, it, pw, ph, hiddenFonts); } catch (_) {} }
       if (it.type === "note") {
         try {
           const s = Math.max(14, Math.min(wf, 24)), y = ph - it.ny * ph - s;
