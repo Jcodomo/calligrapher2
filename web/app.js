@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=51";
+import { initPdfEditor } from "./pdfedit.js?v=52";
 import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard, listMemory, saveMemory, forgetMemory } from "./recents.js?v=3";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
@@ -2653,7 +2653,7 @@ const TOOL_MAP = {
   write: ["sign", "handwrite"], handwrite: ["sign", "handwrite"], signature: ["sign", "sig", "signature"], sigimport: ["sign", "sig", "sigimport"],
   merge: ["organize", "pw:merge"], organize: ["organize"], rotate: ["organize"], delete: ["organize"], split: ["organize", "pw:split"], extract: ["organize", "pw:extract"], number: ["organize", "panel:number"],
   unwatermark: ["edit", "wm"], drawsig: ["sign", "drawsig"], pdffonts: ["edit", "fonts"],
-  compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], pdf2word: ["convert", "panel:pdfword"], fillweb: ["sign", "fillweb"], enhance: ["convert", "panel:enhance"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"], protect: ["convert", "panel:protect"],
+  compress: ["convert", "panel:compress"], pdf2img: ["convert", "panel:img"], pdf2word: ["convert", "panel:pdfword"], fillweb: ["sign", "fillweb"], enhance: ["convert", "panel:enhance"], ocr: ["convert", "panel:ocr"], flatten: ["convert", "panel:flatten"], protect: ["convert", "panel:protect"], pdf2excel: ["convert", "panel:pdfexcel"], pdf2ppt: ["convert", "panel:pdfppt"],
 };
 function applyTool(id) {
   const m = TOOL_MAP[id]; if (!m || !doc) return false;
@@ -3971,6 +3971,17 @@ async function exportWord() {
     const fname = outName(baseName(), "docx");
     download(fname, blob); toast("Saved " + fname + ".");
   } catch (e) { toast("Word export failed: " + (e.message || e)); }
+}
+// Excel / PowerPoint from the document as you see it
+async function exportOffice(kind) {
+  if (!doc || !window.__cal2OfficeFromBytes) return;
+  try {
+    snapshotNow(); const idx = await exportPageList(); if (!idx.length) return;
+    toast(kind === "xlsx" ? "Building the Excel workbook…" : "Building the PowerPoint deck…");
+    const blob = await window.__cal2OfficeFromBytes(kind, await selectedDocumentBytes(idx), baseName(), (m) => toast(m));
+    const fname = outName(baseName(), kind);
+    download(fname, blob); toast("Saved " + fname + ".");
+  } catch (e) { toast((kind === "xlsx" ? "Excel" : "PowerPoint") + " export failed: " + (e.message || e)); }
 }
 async function exportFillablePDF() {
   if (!doc) { errEl.textContent = "Open a document first."; return; }
@@ -5744,7 +5755,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
     ["dl_format", "dl_look", "dl_quality", "dl_engine"].forEach((id) => { $(id).value = dlOpts[id.slice(3)]; });
     const f = dlOpts.format, pictureish = f === "pdf" || f === "png" || f === "jpg" || f === "zip";
     $("dl_look_row").style.display = pictureish ? "" : "none";
-    $("dl_quality_row").style.display = f === "fill" || f === "docx" || f === "txt" ? "none" : "";
+    $("dl_quality_row").style.display = f === "fill" || f === "docx" || f === "txt" || f === "xlsx" || f === "pptx" ? "none" : "";
     // the engine only matters when pages get a scanned look in the worker pool (multi-page PDF / zip)
     $("dl_engine_row").style.display = (f === "pdf" || f === "zip") && dlOpts.look !== "clean" && scanWorkersSupported() ? "" : "none";
     $("dl_meta_row").style.display = f === "pdf" || f === "fill" ? "" : "none";
@@ -5759,7 +5770,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
     show("dl_pages_row", docLike && inDoc); show("dl_range_row", docLike && inDoc && mo.pages === "custom"); show("dl_skipblank_row", docLike && inDoc && mo.pages !== "cur");
     show("dl_paper_row", f === "pdf"); show("dl_turn_row", isPdf); show("dl_num_row", isPdf); show("dl_wm_row", isPdf); show("dl_wmtext_row", isPdf && mo.wm === "custom");
     show("dl_dpi_row", f === "png" || f === "jpg" || f === "zip");
-    const ext = { pdf: "pdf", fill: "pdf", docx: "docx", png: "png", jpg: "jpg", zip: "zip", txt: "txt" }[f];
+    const ext = { pdf: "pdf", fill: "pdf", docx: "docx", xlsx: "xlsx", pptx: "pptx", png: "png", jpg: "jpg", zip: "zip", txt: "txt" }[f];
     $("dl_name").placeholder = (inDoc ? baseName() + ({ pdf: "-edited", fill: "-editable", zip: "-pages", png: `-page${curPage + 1}`, jpg: `-page${curPage + 1}` }[f] || "") : "calligraphy") + "." + ext;
     const changed = Object.keys(DL_MORE).filter((k) => String(mo[k]) !== String(DL_MORE[k]) && k !== "range" && k !== "wmtext").length;
     $("dl_more_count").textContent = changed ? ` · ${changed} set` : "";
@@ -5769,6 +5780,8 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
       txt: "The document's text, page by page (scanned pages are read with OCR).",
       fill: "Real text kept; form fields and comments stay editable.",
       docx: "An editable Word document; scanned pages are read with OCR.",
+      xlsx: "An Excel workbook, one sheet per page: tables in rows and columns, amounts and dates as real numbers; scanned pages are read with OCR.",
+      pptx: "A PowerPoint deck, one slide per page that looks like it, with the text in editable text boxes; scanned pages are read with OCR.",
       png: "The current page as a picture, sharp (300 dpi, lossless).",
       jpg: "The current page as a picture (smaller than PNG).",
     }[f];
@@ -5792,6 +5805,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
       if (f === "pdf") await exportPDF();
       else if (f === "fill") await exportFillablePDF();
       else if (f === "docx") await exportWord();
+      else if (f === "xlsx" || f === "pptx") await exportOffice(f);
       else if (f === "zip") await exportAllImages();
       else if (f === "txt") await exportText();
       else await exportPNG(f);
@@ -5799,7 +5813,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   };
   const drawPreview = async (tok) => {
     const box = $("dl_prev"), cv = $("dl_prev_c"), meta = $("dl_prev_meta"), f = dlOpts.format;
-    if (f === "docx" || f === "txt") { box.classList.add("none"); meta.textContent = f === "docx" ? "Word files open in Word - no picture preview." : "A text file - no picture preview."; return; }
+    if (f === "docx" || f === "txt" || f === "xlsx" || f === "pptx") { box.classList.add("none"); meta.textContent = { docx: "Word files open in Word", xlsx: "Excel files open in Excel", pptx: "PowerPoint files open in PowerPoint", txt: "A text file" }[f] + " - no picture preview."; return; }
     box.classList.remove("none"); box.classList.add("busy"); meta.textContent = "Building the preview…";
     const cap = dlCapture = { blob: null, name: "", msg: "", total: 0 };
     try {

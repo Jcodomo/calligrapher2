@@ -757,7 +757,7 @@
         <div class="ddm right dl-panel" id="dl_panel">
           <div class="dl-prevwrap"><div class="dl-prev" id="dl_prev"><canvas id="dl_prev_c"></canvas><button type="button" class="dl-big" id="dl_prev_big" title="Bigger preview">⤢</button></div>
           <div class="dl-prev-meta" id="dl_prev_meta"></div></div>
-          <label class="dlr"><span>Format</span><select id="dl_format"><option value="pdf">PDF</option><option value="fill">PDF — keep it editable</option><option value="docx">Word (.docx)</option><option value="png">PNG image (this page)</option><option value="jpg">JPG image (this page)</option><option value="zip">All pages as pictures (.zip)</option><option value="txt">Text only (.txt)</option></select></label>
+          <label class="dlr"><span>Format</span><select id="dl_format"><option value="pdf">PDF</option><option value="fill">PDF — keep it editable</option><option value="docx">Word (.docx)</option><option value="xlsx">Excel (.xlsx)</option><option value="pptx">PowerPoint (.pptx)</option><option value="png">PNG image (this page)</option><option value="jpg">JPG image (this page)</option><option value="zip">All pages as pictures (.zip)</option><option value="txt">Text only (.txt)</option></select></label>
           <label class="dlr" id="dl_look_row"><span>Look</span><select id="dl_look"><option value="clean">Clean (as is)</option><option value="light">Slightly scanned</option><option value="scanned">Scanned</option><option value="gray">Grayscale (as is, in grey)</option><option value="photo">Photographed</option><option value="counter">Photographed on a countertop</option><option value="photocopy">Photocopy (black &amp; white)</option><option value="bwscan">Black &amp; white scan (smallest file)</option><option value="panel">Custom (Scan look below)</option><option value="custom">My scan settings (side panel)</option></select></label>
           <button type="button" class="dl-scanbtn" id="dl_scan_btn" aria-expanded="false">Scan look <span>▸</span></button>
           <div class="dl-scan" id="dl_scan" hidden>
@@ -857,6 +857,8 @@
       <button class="tb" data-tool="panel:ocr"><svg class="i" viewBox="0 0 20 20"><path d="M3 6V3h3M14 3h3v3M17 14v3h-3M6 17H3v-3"/><path d="M7 10h6"/></svg><span class="tl">OCR (searchable)</span></button>
       <button class="tb" data-tool="panel:pdfword"><svg class="i" viewBox="0 0 20 20"><path d="M5 2.5h7l3.5 3.5v11.5H5z"/><path d="M7 9l1.2 5 1.8-4 1.8 4L13 9"/></svg><span class="tl">PDF to Word</span></button>
       <button class="tb" data-tool="panel:enhance"><svg class="i" viewBox="0 0 20 20"><path d="M10 2.5l1.6 4.4 4.4 1.6-4.4 1.6L10 14.5l-1.6-4.4L4 8.5l4.4-1.6z"/><path d="M15.5 13l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></svg><span class="tl">Clean up &amp; upscale</span></button>
+      <button class="tb" data-tool="panel:pdfexcel"><svg class="i" viewBox="0 0 20 20"><path d="M5 2.5h7l3.5 3.5v11.5H5z"/><path d="M7.5 9l4 5M11.5 9l-4 5"/></svg><span class="tl">PDF to Excel</span></button>
+      <button class="tb" data-tool="panel:pdfppt"><svg class="i" viewBox="0 0 20 20"><path d="M5 2.5h7l3.5 3.5v11.5H5z"/><path d="M8 14V9h2.2a1.6 1.6 0 010 3.2H8"/></svg><span class="tl">PDF to PowerPoint</span></button>
       <button class="tb" data-tool="panel:protect"><svg class="i" viewBox="0 0 20 20"><rect x="4.5" y="9" width="11" height="8.5" rx="1.5"/><path d="M7 9V6.5a3 3 0 016 0V9"/></svg><span class="tl">Protect</span></button>
       <button class="tb" data-tool="panel:flatten"><svg class="i" viewBox="0 0 20 20"><path d="M3 7l7-3.5L17 7l-7 3.5z"/><path d="M3 10.5L10 14l7-3.5M3 14l7 3.5 7-3.5"/></svg><span class="tl">Flatten</span></button>
       <button class="tb" data-tool="panel:split"><svg class="i" viewBox="0 0 20 20"><rect x="4" y="3" width="12" height="14" rx="1"/><path d="M2 10h16" stroke-dasharray="2 1.8"/></svg><span class="tl">Split</span></button>
@@ -1246,8 +1248,8 @@ jumps over the lazy dog</textarea>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="./rapid-ocr.js?v=2"></script>
-<script type="module" src="./app.js?v=99"></script>
+<script type="module" src="./app.js?v=100"></script>
 <script type="module" src="./convert.js?v=1"></script>
-<script type="module" src="./shell.js?v=16"></script>
+<script type="module" src="./shell.js?v=17"></script>
 </body>
 </html>

@@ -395,10 +395,10 @@ const TOOLS = [
   { id: "fillform", name: "Fill Form", icon: "▭", color: "#1f9d55", kind: "panel" },
   { id: "txt2pdf", name: "Text → PDF", icon: "≡", color: "#f0a500", kind: "action", run: () => pickFiles(".txt,.md,.csv,.log,text/plain", false, (f) => txtToPdf(f[0])) },
   { id: "convert", name: "PDF Converter", icon: "⇄", color: "#e8554e", kind: "server" },
-  { id: "pdfexcel", name: "PDF ↔ Excel", icon: "X", color: "#1f9d55", kind: "server" },
+  { id: "pdfexcel", name: "PDF → Excel", icon: "X", color: "#1f9d55", kind: "panel" },
   { id: "delete", name: "Delete Pages", icon: "🗑", color: "#7c5cff", kind: "action", run: () => { if (!selected.size) return note("Tick pages to delete first.", true); pages = pages.filter((_, i) => !selected.has(i)); selected.clear(); renderGrid(); note("Deleted selected pages."); } },
   { id: "unlock", name: "Unlock", icon: "🔓", color: "#e8554e", kind: "panel" },
-  { id: "pdfppt", name: "PDF ↔ PowerPoint", icon: "P", color: "#e8720a", kind: "server" },
+  { id: "pdfppt", name: "PDF → PowerPoint", icon: "P", color: "#e8720a", kind: "panel" },
   { id: "rotate", name: "Rotate", icon: "⟳", color: "#7c5cff", kind: "action", run: () => { selEntries().forEach((e) => e.rot = (e.rot + 90) % 360); thumbCache.clear(); renderGrid(); note("Rotated " + (selected.size ? "selected" : "all") + " 90°."); } },
   { id: "crop", name: "Crop", icon: "⛶", color: "#00c2a8", kind: "panel" },
   { id: "extract", name: "Extract Pages", icon: "⿻", color: "#3aa0ff", kind: "panel" },
@@ -466,6 +466,8 @@ function openTool(t) {
   else if (t.id === "pagesort") openPageSort();
   else if (t.id === "unlock") openUnlock();
   else if (t.id === "protect") openProtect();
+  else if (t.id === "pdfexcel") officePanel("xlsx");
+  else if (t.id === "pdfppt") officePanel("pptx");
   else if (t.id === "redact") openRedact();
   else if (t.id === "fillform") openFillForm();
 }
@@ -1413,6 +1415,132 @@ async function pdfToDocx(entries, { mode, scans }, prog) {
     body.join("") + `<w:sectPr><w:pgSz w:w="${W}" w:h="${H}"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`);
   return zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
 }
+
+// ---- PDF to Excel and PDF to PowerPoint (office.js) ----------------------------------------------------------------
+const PPTX_URL = "https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js";
+const PPTX_SRI = "sha384-Cck14aA9cifjYolcnjebXRfWGkz5ltHMBiG4px/j8GS+xQcb7OhNQWZYyWjQ+UwQ";
+const officeLib = () => import("./office.js?v=2");
+// a scanned page's words, read with OCR (same languages and second try as PDF OCR)
+async function ocrWords(canvas) {
+  const langs = ocrOpts().langs || ["eng"], sch = await ocrScheduler(langs.length ? langs : ["eng"], "fast", ocrPoolSize());
+  let r = await sch.addJob("recognize", canvas, {}, { text: true, blocks: true });
+  if ((r.data.confidence || 0) < OCR_UNSURE) { const r2 = await sch.addJob("recognize", ocrStretch(canvas), {}, { text: true, blocks: true }); if ((r2.data.confidence || 0) > (r.data.confidence || 0)) r = r2; }
+  return r.data;
+}
+const fixNums = (s) => ((ocrOpts().langs || ["eng"]).every((l) => l === "eng") ? ocrFixNumbers(s) : s);
+async function entryPage(e) {
+  const src = sources.find((q) => q.id === e.srcId), page = await (await jsDoc(src)).getPage(e.srcIndex + 1);
+  return { page, rotation: ((page.rotate || 0) + e.rot) % 360 };
+}
+async function pdfToXlsx(entries, { layout = "pages", scans = "ocr" } = {}, prog = () => {}) {
+  const O = await officeLib(), JSZip = await ensureJsZip(), sheets = [], all = [];
+  let scanned = 0, tables = 0;
+  for (let i = 0; i < entries.length; i++) {
+    prog(`Reading page ${i + 1} of ${entries.length}…`);
+    const { page, rotation } = await entryPage(entries[i]), vp = page.getViewport({ scale: 1, rotation });
+    let pieces = await O.pdfPieces(page, vp, { fonts: true }), scannedPage = false;
+    if (!pieces.length && scans === "ocr") { const c = await rasterize(entries[i], 2); pieces = O.ocrPieces(await ocrWords(c), 2, fixNums); scanned++; scannedPage = true; }
+    let rules = []; if (!scannedPage) { try { rules = await O.pdfRules(page, vp); } catch (_) {} }
+    const rows = O.pageTable(O.toLines(pieces, 0.3), rules);
+    tables += rows.filter((r) => r.cells.length > 1).length ? 1 : 0;
+    if (layout === "one") { if (all.length) all.push({ gap: true, cells: [] }); all.push(...rows); }
+    else sheets.push({ name: "Page " + (i + 1), rows });
+  }
+  if (layout === "one") sheets.push({ name: "Document", rows: all });
+  const blob = await O.writeXlsx(JSZip, sheets, { title: (sources[0] && sources[0].name) || "" });
+  return { blob, scanned, tables };
+}
+async function pdfToPptx(entries, { scans = "ocr", quality = 2 } = {}, prog = () => {}) {
+  const O = await officeLib();
+  await loadScriptSri(PPTX_URL, PPTX_SRI);
+  const pptx = new window.PptxGenJS();
+  const f0 = await entryPage(entries[0]), v0 = f0.page.getViewport({ scale: 1, rotation: f0.rotation });
+  // PowerPoint slides are 1 to 56 inches a side
+  const fit = Math.min(1, 56 * 72 / Math.max(v0.width, v0.height)), SW = Math.max(1, v0.width * fit / 72), SH = Math.max(1, v0.height * fit / 72);
+  pptx.defineLayout({ name: "PDF", width: SW, height: SH }); pptx.layout = "PDF";
+  pptx.title = (sources[0] && sources[0].name) || ""; pptx.company = ""; pptx.author = "";
+  let boxes = 0, scanned = 0;
+  for (let i = 0; i < entries.length; i++) {
+    prog(`Building slide ${i + 1} of ${entries.length}…`);
+    const { page, rotation } = await entryPage(entries[i]), vp1 = page.getViewport({ scale: 1, rotation }), K = quality, vpK = page.getViewport({ scale: K, rotation });
+    // this page on the slide: scaled to fit and centred
+    const k = Math.min(SW * 72 / vp1.width, SH * 72 / vp1.height), ox = (SW - vp1.width * k / 72) / 2, oy = (SH - vp1.height * k / 72) / 2;
+    const full = await O.renderFull(page, vpK);
+    let pieces = await O.pdfPieces(page, vp1, { fonts: true }), bg, items = [];
+    const segsOf = (ps) => O.toLines(ps, 0.35).flatMap((l) => l.segs);
+    if (pieces.length) {
+      const bare = await O.renderNoText(page, vpK), segs = segsOf(pieces);
+      const cols = segs.map((s) => O.inkColour(full, bare, { x0: s.x0, y0: s.base - s.fs * 0.85, x1: s.x1, y1: s.base + s.fs * 0.25 }, K));
+      const shown = cols.filter((c) => c.ink > 0.004).length;
+      if (shown < segs.length * 0.2) {
+        // a scan with its own hidden OCR text: wipe the words off the picture, then put them back as text
+        scanned++;
+        const bx = segs.map((s) => ({ x0: s.x0, y0: s.base - s.fs * 0.8, x1: s.x1, y1: s.base + s.fs * 0.22 }));
+        items = segs.map((s, j) => ({ s, colour: O.inkColour(full, null, bx[j], K).hex }));
+        const copy = document.createElement("canvas"); copy.width = full.width; copy.height = full.height; copy.getContext("2d").drawImage(full, 0, 0); O.wipe(copy, bx, K); bg = copy;
+      } else {
+        bg = bare;
+        // only text the no-text picture really lost becomes a text box: hidden text, and text drawn as shapes
+        // (still in the picture), are left alone
+        items = segs.map((s, j) => ({ s, colour: cols[j].hex, ink: cols[j].ink })).filter((x) => x.ink > 0.004);
+      }
+    } else if (scans === "ocr") {
+      const words = O.ocrPieces(await ocrWords(full), K, fixNums);
+      if (words.length) {
+        scanned++;
+        const segs = segsOf(words), bx = segs.map((s) => ({ x0: s.x0, y0: Math.min(...s.runs.map((r) => r.top)), x1: s.x1, y1: Math.max(...s.runs.map((r) => r.bot)) }));
+        items = segs.map((s, j) => ({ s, colour: O.inkColour(full, null, bx[j], K).hex }));
+        const copy = document.createElement("canvas"); copy.width = full.width; copy.height = full.height; copy.getContext("2d").drawImage(full, 0, 0); O.wipe(copy, bx, K); bg = copy;
+      } else bg = full;
+    } else bg = full;
+    const slide = pptx.addSlide();
+    // the picture: only when the page has anything besides its text; PNG for drawings, JPEG for photos and scans
+    const g = bg.getContext("2d", { willReadFrequently: true }), px = g.getImageData(0, 0, bg.width, bg.height).data;
+    let ink = 0, mid = 0; for (let q = 0; q < px.length; q += 16) { const l = px[q] + px[q + 1] + px[q + 2]; if (l < 744) { ink++; if (l > 120 && l < 690) mid++; } }
+    if (ink) {
+      const photo = mid > (px.length / 16) * 0.08 || scanned && items.length;
+      const data = bg.toDataURL(photo ? "image/jpeg" : "image/png", 0.9);
+      slide.addImage({ data, x: ox, y: oy, w: vp1.width * k / 72, h: vp1.height * k / 72 });
+    }
+    for (const { s, colour } of items) {
+      const runs = [];
+      for (const r of s.runs) {
+        const f = r.font || {}, last = runs[runs.length - 1];
+        if (last && last.f.face === f.face && !!last.f.bold === !!f.bold && !!last.f.italic === !!f.italic && Math.abs(last.fs - r.fs) < 0.3) last.text += r.str;
+        else runs.push({ text: r.str, f, fs: r.fs });
+      }
+      const size = (fs) => Math.max(1, Math.round(fs * k * 2) / 2);
+      slide.addText(runs.map((r) => ({ text: r.text, options: { fontFace: r.f.face || "Arial", bold: !!r.f.bold, italic: !!r.f.italic, fontSize: size(r.fs), color: colour } })), {
+        x: ox + s.x0 * k / 72, y: oy + (s.base - s.fs * 0.9) * k / 72, w: Math.max(0.1, (s.x1 - s.x0) * k / 72 * 1.06 + s.fs * k / 72 * 0.3), h: Math.max(0.1, s.fs * 1.2 * k / 72),
+        margin: 0, valign: "top", align: "left", wrap: false, fontFace: (runs[0].f.face || "Arial"), fontSize: size(s.fs), color: colour, isTextBox: true });
+      boxes++;
+    }
+  }
+  // PptxGenJS stores the parts uncompressed (and its own compression option is broken in 3.12): packed again with DEFLATE,
+  // same parts in the same order, often 3 to 6 times smaller
+  const stored = await pptx.write({ outputType: "blob" }), JSZip = await ensureJsZip();
+  const blob = await (await JSZip.loadAsync(stored)).generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 }, mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" });
+  return { blob, boxes, scanned };
+}
+function officePanel(kind) {
+  const xl = kind === "xlsx";
+  panelShell(xl ? "PDF → Excel" : "PDF → PowerPoint", `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.45">${xl
+      ? "Makes an Excel workbook (.xlsx) in your browser. Tables keep their rows and columns, amounts become real numbers and dates real dates (so they add up and sort), and bold stays bold. Account numbers and figures with leading zeros stay as typed."
+      : "Makes a PowerPoint deck (.pptx) in your browser: one slide per page that looks just like it, with every line of text in its own editable text box in the page's font, size and colour. Scanned pages can be read so their text is editable too."}</div>
+    ${xl ? '<div class="row"><label>Sheets</label><select id="pe_of_layout" style="flex:1"><option value="pages">One sheet per page</option><option value="one">All pages on one sheet</option></select></div>' : ""}
+    <div class="row"><label>Scanned pages</label><select id="pe_of_scan" style="flex:1"><option value="ocr">Read the text (OCR)</option><option value="picture">${xl ? "Skip them" : "Keep as a picture"}</option></select></div>
+    <button class="btn" id="pe_of_go">Convert → .${kind}</button>
+    <div id="pe_of_prog" style="font-size:11px;color:var(--muted);margin-top:6px"></div>`);
+  $("pe_of_go").onclick = () => withBusy("Converting…", async () => {
+    if (!pages.length) return note("Open a PDF first.", true);
+    const prog = $("pe_of_prog"), list = selected.size ? pages.filter((_, i) => selected.has(i)) : pages, opts = { scans: $("pe_of_scan").value, layout: xl ? $("pe_of_layout").value : undefined };
+    const r = xl ? await pdfToXlsx(list, opts, (m) => (prog.textContent = m)) : await pdfToPptx(list, opts, (m) => (prog.textContent = m));
+    const name = ((sources[0] && sources[0].name) || "document").replace(/\.pdf$/i, "") + "." + kind;
+    dl(name, r.blob); prog.textContent = "";
+    note("Saved " + name + " (" + list.length + " page" + (list.length > 1 ? "s" : "") + (r.scanned ? ", " + r.scanned + " scanned page" + (r.scanned > 1 ? "s" : "") + " read with OCR" : "") + ").");
+  });
+}
 function openWord() {
   panelShell("PDF → Word", `
     <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Makes an editable Word document (.docx) in your browser. Paragraphs, headings, bold and italic are kept; layouts with columns or tables come out as plain paragraphs.</div>
@@ -1441,7 +1569,7 @@ const UPS_MODELS = {
 const upscalers = {};
 function loadScriptSri(src, integrity) {
   if (scriptCache.has(src)) return scriptCache.get(src);
-  const p = new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; if (integrity) { s.integrity = integrity; s.crossOrigin = "anonymous"; } s.onload = res; s.onerror = () => rej(new Error("Could not load the upscaling model")); document.head.appendChild(s); });
+  const p = new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; if (integrity) { s.integrity = integrity; s.crossOrigin = "anonymous"; } s.onload = res; s.onerror = () => rej(new Error("Could not load " + (/pptxgen/.test(src) ? "the PowerPoint maker" : "the upscaling model") + " - check the internet connection and try again.")); document.head.appendChild(s); });
   scriptCache.set(src, p); return p;
 }
 async function getUpscaler(q) {
@@ -2030,6 +2158,14 @@ export function initPdfEditor() {
     openTool(t);
   };
   window.__cal2AddPdfFiles = (files) => addFiles(files);
+  // the editor's Download → Excel / PowerPoint: a temporary source, converted, then removed
+  window.__cal2OfficeFromBytes = async (kind, bytes, name, onProg) => {
+    const src = { id: "of" + Date.now(), name: (name || "document") + ".pdf", bytes: new Uint8Array(bytes) };
+    sources.push(src);
+    try { const d = await jsDoc(src); const list = []; for (let i = 0; i < d.numPages; i++) list.push({ srcId: src.id, srcIndex: i, rot: 0, red: [] });
+      return (kind === "xlsx" ? await pdfToXlsx(list, {}, onProg || (() => {})) : await pdfToPptx(list, {}, onProg || (() => {}))).blob; }
+    finally { sources = sources.filter((q) => q !== src); jsDocs.delete(src.id); }
+  };
   // the editor's Download → Word: a temporary source, converted, then removed (the PDF tools' pages are untouched)
   window.__cal2DocxFromBytes = async (bytes, name, onProg) => {
     const src = { id: "docx" + Date.now(), name: (name || "document") + ".pdf", bytes: new Uint8Array(bytes) };

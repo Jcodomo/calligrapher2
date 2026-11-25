@@ -115,6 +115,9 @@ async function round(seed, log) {
   await sleep(150);
   const check = async (what) => {
     await view("pages");
+    // a file dropped in the Files view may still be loading: give the pages up to 8 s to arrive (a drop that was
+    // lost still fails)
+    await until(() => $$("#pw .pw-page").length === model.length, 8000);
     const ui = uiTags(), want = model.map((p) => p.name);
     if (ui.join("|") !== want.join("|")) errs.push(`after ${what}: screen shows ${ui.length} pages [${ui.join(",")}], expected ${want.length} [${want.join(",")}]`);
   };
