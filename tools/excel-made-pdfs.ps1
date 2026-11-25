@@ -1,5 +1,5 @@
 # Makes sample workbooks in real Excel (sample data only), saves the expected cell values as JSON and exports each to PDF.
-param([string]$Out = (Join-Path $PSScriptRoot "..web_txl"), [int]$Seed = 7)
+param([string]$Out = (Join-Path $PSScriptRoot "..\web\_t\xl"), [int]$Seed = 7)
 New-Item -ItemType Directory -Force $Out | Out-Null
 $rand = New-Object System.Random $Seed
 $xl = New-Object -ComObject Excel.Application
