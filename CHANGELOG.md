@@ -5,6 +5,18 @@ OCR & fonts, Handwriting & signatures, Forms & signing, Site & layout, and Fixes
 The same list is on the site at https://jcodomo.github.io/calligrapher2/changelog.html
 (rebuilt with `node tools/changelog-page.mjs`).
 
+## 2026-11-27
+
+### Forms & signing
+- **Signing block (new).** Fill & Sign > Signing block puts Ghost Calligrapher's own signature block on the page: "Signed by", the signature, the signer's printed name under it, and a signing code. The signature is typed in a script font of your choice (or written by the handwriting engine); the name comes from the side panel and can be changed in the bar above the page. The frame and ink colours can be changed.
+- **The signing code is real:** the first 16 characters of the SHA-256 fingerprint of the document as it was opened, before signing. The full fingerprint goes into the downloaded PDF's properties, so anyone with the original file can check that it is the document that was signed.
+- **Match a typed signature's font.** Match a signature, then drag a box around a typed signature already on the page: its script font is found and used for this signer (and new signing blocks). On a test page with typed signatures in seven script fonts, 7 of 7 were matched.
+- **Every date the same.** All the dates on a document show one signing time: change the date, time or time zone of one and the others follow (untick "Every date the same" to set one on its own). New dates, date fields and "+ Date beside it" on a signing block use that time. Dates are now set in a typewriter-style font by default (any font can still be picked), in the form 11/27/2026 | 8:33 AM PST.
+- The typed-signature script font is listed as "Signature script".
+
+### Tests
+- New: tools/stress-signing.js (sample names only): placing a signing block, the name, the signing code checked against the original file's SHA-256, two dates kept the same, and font matching of typed signatures in seven script fonts.
+
 ## 2026-11-25
 
 ### PDF tools

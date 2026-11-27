@@ -238,9 +238,9 @@ let itemSeq = 1;
 let formNoticeTok = -1;
 let fieldValues = {};       // the PDF's own form fields: name -> value
 
-// Fonts for text/date items. "DocuSign" is a slanted script like DocuSign's stamp.
+// Fonts for text and date items: "Signature script" is a slanted script for typed signatures.
 const DOC_FONTS = [
-  { name: "DocuSign", css: "'Dancing Script', 'Segoe Script', cursive" },
+  { name: "Signature script", css: "'Dancing Script', 'Segoe Script', cursive" },
   { name: "Script", css: "'Great Vibes', cursive" },
   { name: "Handwritten", css: "'Caveat', cursive" },
   { name: "Marker", css: "'Homemade Apple', cursive" },
@@ -629,7 +629,7 @@ const REF_W = 800;                 // thickness units are px on an 800-px-wide p
 const DRAW_TOOLS = new Set(["pen", "highlight", "line", "arrow", "underline", "strike", "blur"]);
 const FREEHAND = (k) => k === "pen" || k === "highlight" || k === "blur";
 const UNDER = (k) => k === "highlight" || k === "blur";   // drawn under the objects on the page
-const CLICK_TOOLS = new Set(["text", "sig", "handwrite", "date", "check", "note", "field:text", "field:date", "field:check", "field:sig"]);
+const CLICK_TOOLS = new Set(["text", "sig", "sigblock", "handwrite", "date", "check", "note", "field:text", "field:date", "field:check", "field:sig"]);
 const BOX_TOOLS = new Set(["shape:rect", "shape:ellipse", "whiteout", "redact"]);
 const STICKY_TOOLS = new Set(["check"]);
 const PALETTE = ["#000000", "#1b1b1f", "#5f6368", "#ffffff", "#e23b3b", "#f0a500", "#ffd400", "#1f9d55", "#0b7285", "#398dff", "#11295b", "#7c5cff"];
@@ -1782,7 +1782,7 @@ function addTextItem(x, y) {
   requestAnimationFrame(() => { const el = document.querySelector(`#ed_pages .ditem[data-id="${it.id}"]`); if (el) startTboxEdit(it, el); });
   return it;
 }
-// DocuSign-style timestamp: "MM/DD/YYYY | H:MM AM/PM TZ".
+// Signing timestamp: "MM/DD/YYYY | H:MM AM/PM TZ".
 const TZ_LIST = ["PST", "PDT", "MST", "MDT", "CST", "CDT", "EST", "EDT", "AKST", "AKDT", "HST", "GMT", "UTC", "BST", "CET", "CEST", "EET", "IST", "JST", "KST", "AEST", "AEDT", "NZST"];
 function pad2(n) { return String(n).padStart(2, "0"); }
 // the handwriting seed box takes any text: a number is used as is, anything else ("Mom's card") becomes a number
@@ -1791,7 +1791,7 @@ function localTzAbbr() {
   try { const m = new Date().toLocaleTimeString("en-US", { timeZoneName: "short" }).match(/[A-Z]{2,5}$/); return (m && m[0]) || "UTC"; }
   catch { return "UTC"; }
 }
-function fmtDocuSign(dateStr, timeStr, tz) {
+function fmtStamp(dateStr, timeStr, tz) {
   const [y, m, d] = (dateStr || "").split("-").map(Number);
   let [hh, mm] = (timeStr || "0:0").split(":").map(Number);
   if (!y || !m || !d) return "";
@@ -1805,9 +1805,93 @@ function nowParts() {
 }
 function addDateItem(x, y) {
   if (!doc) return null;
-  const { date, time, tz } = nowParts();
-  const it = pushItem({ type: "text", isDate: true, date, time, tz, nw: 0.36, ar: 0.11, text: fmtDocuSign(date, time, tz), font: 0 }, x, y);
+  const { date, time, tz } = signMoment();
+  const it = pushItem({ type: "text", isDate: true, date, time, tz, nw: 0.36, ar: 0.11, text: fmtStamp(date, time, tz), font: 6 }, x, y);
   render(); return it;
+}
+// ---- signing block: "Signed by", the signature, the printed name and the document's signing code ---------------
+// Ghost Calligrapher's own signature block. The signature is typed in a script font (or written by the handwriting
+// engine); the printed name sits under it. The code is the start of the SHA-256 fingerprint of the document as it was
+// opened (before signing), so anyone with the original file can check that this is the document that was signed; the
+// full fingerprint is also written into the PDF's properties. The time it carries is the document's signing time,
+// the same one every date on the document shows.
+const SIG_FONTS = FONT_LIB.filter((f) => f.cat === "Handwriting").map((f) => f.name);
+const SB = { font: "Dancing Script", accent: "#5b3df5" };
+let docSignMoment = null;          // { date, time, tz }: the signing time every date on this document shows
+function signMoment() {
+  if (docSignMoment) return docSignMoment;
+  const d = docItems.find((it) => it.isDate && it.date);
+  return (docSignMoment = d ? { date: d.date, time: d.time, tz: d.tz } : nowParts());
+}
+let sigPickFor = null;
+function startSigPick(e, ov, dispW, dispH, pi) {
+  e.preventDefault(); try { ov.setPointerCapture(e.pointerId); } catch (_) {}
+  const r = ov.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  const ghost = document.createElement("div"); ghost.style.cssText = `position:absolute;left:${sx}px;top:${sy}px;width:0;height:0;border:1.5px dashed var(--sel);pointer-events:none`; ov.appendChild(ghost);
+  let b = { x: sx, y: sy, w: 0, h: 0 };
+  const mv = (ev) => { const x = ev.clientX - r.left, y = ev.clientY - r.top; b = { x: Math.min(sx, x), y: Math.min(sy, y), w: Math.abs(x - sx), h: Math.abs(y - sy) }; Object.assign(ghost.style, { left: b.x + "px", top: b.y + "px", width: b.w + "px", height: b.h + "px" }); };
+  const up = () => {
+    ov.removeEventListener("pointermove", mv); ov.removeEventListener("pointerup", up); ghost.remove(); setEdTool("select");
+    const it = docItems.find((x) => x.id === sigPickFor); if (!it) return; selId = it.id;
+    matchSignatureFont(it, pi, { x: b.x / dispW, y: b.y / dispH, w: b.w / dispW, h: b.h / dispH });
+  };
+  ov.addEventListener("pointermove", mv); ov.addEventListener("pointerup", up);
+}
+async function regenBlock(it) {
+  clearTimeout(it._t); it._t = setTimeout(async () => {
+    try { const p = params(Math.round((doc ? doc.w : 800) * 0.5)); p.seed = it.seed || seedVal(); const g = await generateSig(it.name || " ", p, "signature"); it.svg = g.svg; render(); } catch (e) { toast("Could not write the signature: " + (e.message || e)); }
+  }, 250);
+}
+async function docFingerprint() {
+  const parts = docSources.map((s) => s.bytes).filter(Boolean);
+  const all = new Uint8Array(parts.reduce((n, b) => n + b.length, 0)); let k = 0; for (const b of parts) { all.set(b, k); k += b.length; }
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", all));
+  return [...h].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+function signerName() { const t = sigText("signature"); return t && t.trim() ? t.trim() : ""; }
+async function addSigBlock(x, y) {
+  if (!doc) return null;
+  const name = signerName() || "Your Name";
+  const it = pushItem({ type: "sigblock", name, style: "font", sigFont: SB.font, accent: SB.accent, color: "#1d1d1f", nw: 0.34, ar: 0.36, label: "Signed by", showCode: true, code: "", seed: seedVal() }, x, y);
+  render();
+  try { it.hash = await docFingerprint(); it.code = it.hash.slice(0, 16); render(); } catch (_) {}
+  if (name === "Your Name") toast("Type the signer's name in the bar above the page.");
+  return it;
+}
+// the block drawn on a canvas, at (x, y) with size w x h: the same drawing on screen and in every download
+async function drawSigBlock(ctx, it, x, y, w, h) {
+  const acc = it.accent || SB.accent, ink = itemColor(it), lw = Math.max(1, h * 0.014), r = h * 0.07;
+  ctx.save();
+  ctx.strokeStyle = acc; ctx.lineWidth = lw; roundRectPath(ctx, x + lw, y + lw, w - lw * 2, h - lw * 2, r); ctx.stroke();
+  const pad = w * 0.045;
+  ctx.fillStyle = acc; ctx.textBaseline = "alphabetic"; ctx.font = `600 ${h * 0.095}px "Source Sans 3", Arial, sans-serif`;
+  ctx.fillText(it.label || "Signed by", x + pad, y + h * 0.17);
+  // the signature
+  const sx = x + pad, sy = y + h * 0.2, sw = w - pad * 2, sh = h * 0.46;
+  if (it.style === "hand" && it.svg) {
+    try { const img = await svgToImage(it.svg.replace("<svg ", `<svg style="color:${ink}" `)); const k = Math.min(sw / img.width, sh / img.height); ctx.drawImage(img, sx, sy + (sh - img.height * k) / 2, img.width * k, img.height * k); } catch (_) {}
+  } else {
+    const fam = it.sigFont || SB.font; try { await document.fonts.load(`${h}px "${fam}"`, it.name || "A"); } catch (_) {}
+    let fs = sh * 0.95; ctx.font = `${fs}px "${fam}", cursive`; const tw = ctx.measureText(it.name || "").width; if (tw > sw) { fs *= sw / tw; ctx.font = `${fs}px "${fam}", cursive`; }
+    ctx.fillStyle = ink; ctx.fillText(it.name || "", sx, sy + sh * 0.74);
+  }
+  ctx.fillStyle = ink; ctx.font = `${h * 0.115}px Arial, "Arimo", sans-serif`;
+  ctx.fillText(it.name || "", x + pad, y + h * 0.8);
+  if (it.showCode !== false && it.code) { ctx.fillStyle = "#6b6b76"; ctx.font = `${h * 0.075}px "Cousine", "Courier New", monospace`; ctx.fillText(`Ghost Calligrapher · ${it.code}…`, x + pad, y + h * 0.93); }
+  ctx.restore();
+}
+// match the script font of a typed signature already on the page: drag a box over it
+async function matchSignatureFont(it, pi, box) {
+  const page = await hiResPage(pi), W = page.width, H = page.height;
+  const bx = Math.max(0, Math.floor(box.x * W)), by = Math.max(0, Math.floor(box.y * H)), bw = Math.min(W - bx, Math.ceil(box.w * W)), bh = Math.min(H - by, Math.ceil(box.h * H));
+  if (bw < 8 || bh < 8) { toast("Drag a box around the signature."); return; }
+  const crop = document.createElement("canvas"); crop.width = bw; crop.height = bh; crop.getContext("2d").drawImage(page, bx, by, bw, bh, 0, 0, bw, bh);
+  toast("Matching the signature's font…");
+  const list = await identifyFont(crop, it.name, SIG_FONTS);
+  if (!list.length) { toast("No ink found in that box - drag it around the signature."); return; }
+  it.sigFont = list[0].family; it.style = "font"; SB.font = it.sigFont; ensureFont(it.sigFont);
+  it.fontMatches = list.slice(0, 5).map((m) => ({ family: m.family, pct: m.pct }));
+  render(); toast(`Closest signature font: ${it.sigFont} (${list[0].pct}% match). New signing blocks use it too.`);
 }
 function markGlyph(m) { return m === "x" ? "X" : "✓"; }
 function addCheckItem(x, y) {
@@ -1819,7 +1903,7 @@ function addCheckItem(x, y) {
 function addFieldItem(kind, x, y) {
   if (!doc) return null;
   let it;
-  if (kind === "date") { const { date, time, tz } = nowParts(); it = pushItem({ type: "text", isField: true, fieldKind: "date", isDate: true, label: "Date", date, time, tz, text: fmtDocuSign(date, time, tz), nw: 0.36, ar: 0.12, font: 0 }, x, y); }
+  if (kind === "date") { const { date, time, tz } = signMoment(); it = pushItem({ type: "text", isField: true, fieldKind: "date", isDate: true, label: "Date", date, time, tz, text: fmtStamp(date, time, tz), nw: 0.36, ar: 0.12, font: 6 }, x, y); }
   else if (kind === "check") it = pushItem({ type: "text", isField: true, fieldKind: "check", label: "", checked: false, text: "", nw: 0.04, ar: 1, font: 5 }, x, y);
   else if (kind === "sig") it = pushItem({ type: "text", isField: true, fieldKind: "sig", label: "Signature", text: "", nw: 0.3, ar: 0.16, font: 0 }, x, y);
   else it = pushItem({ type: "text", isField: true, fieldKind: "text", label: "Text", text: "", nw: 0.28, ar: 0.14, font: 5 }, x, y);
@@ -2094,6 +2178,7 @@ function onPagePointerDown(e, ov, pi, dispW, dispH) {
   closePops();
   if (pi !== curPage) setCurPage(pi, false);
   if (edTool === "wm-pick") { pickWmColor(e, ov, pi, dispW, dispH); return; }
+  if (edTool === "sigpick") { startSigPick(e, ov, dispW, dispH, pi); return; }
   if (edTool === "wm-brush") { startWmBrush(e, ov, pi, dispW, dispH); return; }
   if (DRAW_TOOLS.has(edTool)) { startDraw(e, ov, dispW, dispH, pi); return; }
   if (BOX_TOOLS.has(edTool)) { startBoxCreate(e, ov, dispW, dispH, pi); return; }
@@ -2115,6 +2200,7 @@ function placeAt(tool, pi, x, y) {
   else if (tool === "date") addDateItem(x, y);
   else if (tool === "check") addCheckItem(x, y);
   else if (tool === "note") addNoteItem(x, y);
+  else if (tool === "sigblock") addSigBlock(x, y);
   else if (tool.startsWith("field:")) addFieldItem(tool.split(":")[1], x, y);
 }
 // Drag out a rectangle / ellipse / whiteout / redaction box (a click makes a default one).
@@ -2203,6 +2289,11 @@ function itemEl(it, dispW, dispH) {
   else if (it.type === "shape") el.innerHTML = shapeSVG(it, w, h);
   else if (it.type === "white") el.style.background = it.color || "#fff";
   else if (it.type === "redact") el.style.background = "#000";
+  else if (it.type === "sigblock") {
+    const dpr = Math.min(3, window.devicePixelRatio || 1), cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round(w * dpr)); cv.height = Math.max(1, Math.round(h * dpr)); cv.style.cssText = "width:100%;height:100%;display:block;pointer-events:none";
+    el.appendChild(cv); drawSigBlock(cv.getContext("2d"), it, 0, 0, cv.width, cv.height);
+  }
   else if (it.type === "note") {
     el.innerHTML = `<div class="dnote" style="--nc:${it.color || "#ffd54f"}">${NOTE_ICON}</div>`;
     if (it.id === selId) {
@@ -2903,6 +2994,20 @@ function renderProps() {
     if (it.dynamic) add(pcell(pbtn("↻ New hand", false, newHand, "Re-roll this handwriting"), pbtn("Edit words ›", false, () => { openSide(true); $("text").focus(); }, "Change the words in the side panel")));
     add(dupDel()); return;
   }
+  if (it && it.type === "sigblock") {
+    const nm = mk("input", { type: "text", value: it.name || "", placeholder: "Signer's name", title: "The signer's name: the signature and the printed name under it" });
+    nm.oninput = () => { it.name = nm.value; if (it.style === "hand") regenBlock(it); else render(); }; nm.onkeydown = (e) => e.stopPropagation();
+    const opts = [["hand", "Handwriting (Ghost)"], ...SIG_FONTS.map((f) => [f, f])];
+    const st = selBox(opts, it.style === "hand" ? "hand" : it.sigFont || SB.font, (v) => { if (v === "hand") { it.style = "hand"; regenBlock(it); } else { it.style = "font"; it.sigFont = v; SB.font = v; ensureFont(v); render(); } }, "Signature style");
+    const match = pbtn("⌖ Match a signature", false, () => { sigPickFor = it.id; setEdTool("sigpick"); toast("Drag a box around a typed signature on the page: its font is matched for this signer."); }, "Find the font of a typed signature already on the page");
+    add(pcell(mk("label", {}, "Name"), nm));
+    add(pcell(st, match));
+    if (it.fontMatches) add(pcell(mk("small", {}, "Close: " + it.fontMatches.map((m) => m.family + " " + m.pct + "%").join(", "))));
+    add(pcell(colorBtn(itemColor(it), false, (c) => { it.color = c; render(); }, "Ink colour"), colorBtn(it.accent || SB.accent, false, (c) => { it.accent = c; SB.accent = c; render(); }, "Frame colour")));
+    add(pcell(pbtn(it.showCode !== false ? "☑ Signing code" : "☐ Signing code", it.showCode !== false, () => { it.showCode = it.showCode === false; render(); }, "The start of the document's SHA-256 fingerprint, taken before signing"),
+      pbtn("+ Date beside it", false, () => { const m = signMoment(); const d = pushItem({ type: "text", isDate: true, ...m, nw: 0.3, ar: 0.11, text: fmtStamp(m.date, m.time, m.tz), font: 6, page: it.page }, Math.min(0.98, it.nx + it.nw + 0.17), it.ny + it.nw * it.ar * pageAspect(it.page) * 0.45); render(); }, "A date with the document's signing time, to the right of the block")));
+    add(opacityCell(() => it.opacity ?? 1, (v) => { it.opacity = v; })); add(dupDel()); return;
+  }
   if (it && it.isDate) {
     // typed dates and times in any common form ("9/15/26", "Sep 15", "today", "3pm"); the calendar button still works
     const dI = mk("input", { type: "text", value: showDate(it.date), title: "Date — e.g. 9/15/2026, Sep 15 2026, today, +30", className: "datebox", autocomplete: "off" });
@@ -2911,7 +3016,13 @@ function renderProps() {
     const calB = pbtn('<svg class="i" viewBox="0 0 20 20"><rect x="3" y="4.5" width="14" height="12" rx="1.5"/><path d="M3 8.5h14M7 3v3M13 3v3"/></svg>', false, () => { try { cal.showPicker(); } catch (_) { cal.click(); } }, "Pick from a calendar");
     const zones = TZ_LIST.includes(localTzAbbr()) ? TZ_LIST : [localTzAbbr(), ...TZ_LIST];
     const zS = selBox(zones.map((z) => [z, z]), it.tz || "UTC", () => apply(), "Time zone");
-    const apply = () => { it.tz = zS.value || it.tz; it.text = fmtDocuSign(it.date, it.time, it.tz); render(); };
+    // every date on the document shows the same signing time (untick to set this one on its own)
+    const apply = () => {
+      it.tz = zS.value || it.tz; it.text = fmtStamp(it.date, it.time, it.tz);
+      if (TD.syncDates !== false) { docSignMoment = { date: it.date, time: it.time, tz: it.tz }; for (const o of docItems) if (o.isDate && o !== it) { Object.assign(o, docSignMoment); o.text = fmtStamp(o.date, o.time, o.tz); } }
+      render();
+    };
+    const syncB = pbtn(TD.syncDates !== false ? "☑ Every date the same" : "☐ Every date the same", TD.syncDates !== false, () => { TD.syncDates = TD.syncDates === false; if (TD.syncDates) apply(); else render(); }, "All the dates on this document show the same date, time and time zone");
     const typed = (inp, parse, show, key) => { const v = parse(inp.value); inp.classList.toggle("bad", v == null && inp.value.trim() !== ""); if (v != null) { it[key] = v; apply(); } return v; };
     dI.oninput = () => { if (parseLooseDate(dI.value)) typed(dI, parseLooseDate, showDate, "date"); else dI.classList.remove("bad"); };
     dI.onchange = () => { if (typed(dI, parseLooseDate, showDate, "date") != null) dI.value = showDate(it.date); else dI.value = showDate(it.date); };
@@ -2919,7 +3030,7 @@ function renderProps() {
     tI.onchange = () => { typed(tI, parseLooseTime, showTime, "time"); tI.value = showTime(it.time); };
     cal.onchange = () => { if (cal.value) { it.date = cal.value; dI.value = showDate(it.date); apply(); } };
     dI.onkeydown = tI.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") e.target.blur(); };
-    add(pcell(dI, calB, cal, tI, zS));
+    add(pcell(dI, calB, cal, tI, zS)); add(pcell(syncB));
     add(pcell(selBox(DOC_FONTS.map((f, i) => [String(i), f.name]), String(it.font || 0), (v) => { it.font = +v; render(); }, "Font")));
     add(pcell(colorBtn(itemColor(it), false, (c) => { it.color = c; render(); }, "Colour")));
     add(opacityCell(() => it.opacity ?? 1, (v) => { it.opacity = v; })); add(dupDel()); return;
@@ -3080,7 +3191,7 @@ async function openDocBytes(u8, name, kind) {
   toast("Opening " + (name || "document") + "…");
   const token = ++loadToken;
   docName = name || "document"; docRecentId = null; clearTimeout(workTimer); docFp = null; document.getElementById("recog")?.remove();
-  docSources = []; docPages = []; docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {};
+  docSources = []; docPages = []; docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {}; docSignMoment = null;
   pagesSig = ""; curPage = 0; edZoom = 1; orgSel.clear(); textBlocks.clear(); ocrBlocks.clear(); closePanelTool();
   pw.on = ""; pw.sel.clear(); pw.cuts.clear(); document.body.dataset.pw = "";   // a new document starts outside Merge / Split
   await addSource(u8, name, kind);
@@ -3101,7 +3212,7 @@ function closeDoc() {
   docRecentId = null;
   loadToken++;
   doc = null; docSources = []; docPages = []; pagesSig = ""; curPage = 0;
-  docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {}; edTool = "select"; orgSel.clear(); textBlocks.clear(); ocrBlocks.clear();
+  docItems = []; docDraws = []; selId = null; selDraw = null; fieldValues = {}; docSignMoment = null; edTool = "select"; orgSel.clear(); textBlocks.clear(); ocrBlocks.clear();
   closePanelTool();
   ["ed_pages", "ed_thumbs", "org_grid"].forEach((id) => { if ($(id)) $(id).innerHTML = ""; });
   resetHistory();
@@ -3474,7 +3585,8 @@ async function drawDocItemToCtx(ctx, it, W, H, res) {
     ctx.drawImage(img, x, y, w, h);
   } else if (it.type === "img") {
     try { ctx.drawImage(await loadImg(it.src), x, y, w, h); } catch (_) {}
-  } else if (it.type === "white") { ctx.fillStyle = it.color || "#fff"; ctx.fillRect(x, y, w, h); }
+  } else if (it.type === "sigblock") { await drawSigBlock(ctx, it, x, y, w, h); }
+  else if (it.type === "white") { ctx.fillStyle = it.color || "#fff"; ctx.fillRect(x, y, w, h); }
   else if (it.type === "redact") { ctx.globalAlpha = 1; ctx.fillStyle = "#000"; ctx.fillRect(x, y, w, h); }
   else if (it.type === "shape") {
     const sw = it.color === "none" ? 0 : Math.max(1, (it.sw || 3 / REF_W) * W);
@@ -3686,6 +3798,7 @@ async function exportPDF() {
         toast("Building PDF…");
         const { pdf } = await buildOutputPdf({ flat: true });
         try { pdf.getForm().updateFieldAppearances(); pdf.getForm().flatten(); } catch (_) {}
+        writeSigningInfo(L, pdf);
         download(fname, await pdfBlob(await finishPdf(pdf, L, idx)));
         toast("Saved " + fname + ".");
         return;
@@ -4000,6 +4113,10 @@ async function buildOutputPdf(opts = {}) {   // opts.flat: added fields are writ
   }
   return { pdf, nf, nn };
 }
+function writeSigningInfo(L, pdf) {
+  const b = docItems.find((it) => it.type === "sigblock" && it.hash); if (!b) return;
+  try { const info = pdf.getInfoDict(); info.set(L.PDFName.of("GhostCalligrapherSigning"), L.PDFHexString.fromText(`Signed with Ghost Calligrapher. Signing code ${b.code} = first 16 characters of SHA-256 ${b.hash} of the document before signing.`)); } catch (_) {}
+}
 async function buildDocumentBytes() { const { pdf } = await buildOutputPdf(); return pdf.save(); }
 // every page as a picture, zipped (PNG for Exact, JPG otherwise), with the chosen look
 async function exportAllImages() {
@@ -4076,6 +4193,7 @@ async function exportFillablePDF() {
     snapshotNow(); const idx = await exportPageList(); if (!idx.length) return;
     toast("Building your PDF…");
     const { pdf, nf, nn } = await buildOutputPdf();
+    writeSigningInfo(await pdfLibReady(), pdf);
     await finishPdf(pdf, await pdfLibReady(), idx, { keepPaper: true });   // re-fitting pages onto new paper would drop the fields
     const bytes = await applyPdfMeta(pdf).save({ useObjectStreams: true }), fname = outName(baseName() + "-editable", "pdf");
     download(fname, new Blob([bytes], { type: "application/pdf" }));
