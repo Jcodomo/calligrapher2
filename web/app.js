@@ -1,7 +1,7 @@
 // Calligrapher 2.0 front-end. Rust/WASM engine + document signing + scan finish.
 // WASM C ABI: alloc / dealloc / generate / result_ptr + linear `memory`.
 
-import { initPdfEditor } from "./pdfedit.js?v=53";
+import { initPdfEditor } from "./pdfedit.js?v=54";
 import { saveRecent, saveRecentWork, listRecents, getRecent, delRecent, makeRecentCard, listMemory, saveMemory, forgetMemory } from "./recents.js?v=3";
 import { primeFromStrokes, supportedChar } from "./neural.js?v=2";
 import { FONT_LIB, FONT_CATS, fontEntry, ensureFont, ensureFontsIn, matchPdfFont, addUserFont, removeUserFont } from "./fonts.js?v=3";
@@ -1848,7 +1848,7 @@ async function docFingerprint() {
   const h = new Uint8Array(await crypto.subtle.digest("SHA-256", all));
   return [...h].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
 }
-function signerName() { const t = sigText("signature"); return t && t.trim() ? t.trim() : ""; }
+function signerName() { const t = (sigText("signature") || "").trim(); return t && t.length <= 40 && t.split(/\s+/).length <= 4 && !/[.!?]$/.test(t) ? t : ""; }   // a name, not the side panel's sample sentence
 async function addSigBlock(x, y) {
   if (!doc) return null;
   const name = signerName() || "Your Name";
@@ -1862,10 +1862,10 @@ async function addSigBlock(x, y) {
 async function drawSigBlock(ctx, it, x, y, w, h) {
   const acc = it.accent || SB.accent, ink = itemColor(it), lw = Math.max(1, h * 0.014), r = h * 0.07;
   ctx.save();
-  ctx.strokeStyle = acc; ctx.lineWidth = lw; roundRectPath(ctx, x + lw, y + lw, w - lw * 2, h - lw * 2, r); ctx.stroke();
+  if (it.frame !== false) { ctx.strokeStyle = acc; ctx.lineWidth = lw; roundRectPath(ctx, x + lw, y + lw, w - lw * 2, h - lw * 2, r); ctx.stroke(); }
   const pad = w * 0.045;
-  ctx.fillStyle = acc; ctx.textBaseline = "alphabetic"; ctx.font = `600 ${h * 0.095}px "Source Sans 3", Arial, sans-serif`;
-  ctx.fillText(it.label || "Signed by", x + pad, y + h * 0.17);
+  const label = it.label == null ? "Signed by" : it.label;
+  if (label) { ctx.fillStyle = acc; ctx.textBaseline = "alphabetic"; ctx.font = `600 ${h * 0.095}px "Source Sans 3", Arial, sans-serif`; ctx.fillText(label, x + pad, y + h * 0.17); }
   // the signature
   const sx = x + pad, sy = y + h * 0.2, sw = w - pad * 2, sh = h * 0.46;
   if (it.style === "hand" && it.svg) {
@@ -1875,10 +1875,16 @@ async function drawSigBlock(ctx, it, x, y, w, h) {
     let fs = sh * 0.95; ctx.font = `${fs}px "${fam}", cursive`; const tw = ctx.measureText(it.name || "").width; if (tw > sw) { fs *= sw / tw; ctx.font = `${fs}px "${fam}", cursive`; }
     ctx.fillStyle = ink; ctx.fillText(it.name || "", sx, sy + sh * 0.74);
   }
-  ctx.fillStyle = ink; ctx.font = `${h * 0.115}px Arial, "Arimo", sans-serif`;
-  ctx.fillText(it.name || "", x + pad, y + h * 0.8);
-  if (it.showCode !== false && it.code) { ctx.fillStyle = "#6b6b76"; ctx.font = `${h * 0.075}px "Cousine", "Courier New", monospace`; ctx.fillText(`Ghost Calligrapher · ${it.code}…`, x + pad, y + h * 0.93); }
+  if (it.showName !== false) { ctx.fillStyle = ink; ctx.font = `${h * 0.115}px Arial, "Arimo", sans-serif`; ctx.fillText(it.name || "", x + pad, y + h * 0.8); }
+  const foot = sigBlockFooter(it);
+  if (foot) { ctx.fillStyle = "#6b6b76"; ctx.font = `${h * 0.075}px "Cousine", "Courier New", monospace`; let fsz = h * 0.075; const fw = ctx.measureText(foot).width; if (fw > w - pad * 2) { fsz *= (w - pad * 2) / fw; ctx.font = `${fsz}px "Cousine", "Courier New", monospace`; } ctx.fillText(foot, x + pad, y + h * 0.93); }
   ctx.restore();
+}
+// the small line at the foot of the block: your own words if you changed them (empty = no line), else the signing code
+function sigBlockFooter(it) {
+  if (it.footer != null) return it.footer;
+  if (it.showCode === false || !it.code) return "";
+  return `Ghost Calligrapher · ${it.code}…`;
 }
 // match the script font of a typed signature already on the page: drag a box over it
 async function matchSignatureFont(it, pi, box) {
@@ -2434,23 +2440,37 @@ function snapMove(it, el, tg, dispW, dispH, guides) {
 function startMove(it, el, e, dispW, dispH, wasSel, fromGrip) {
   try { el.setPointerCapture(e.pointerId); } catch (_) {}
   const sx = e.clientX, sy = e.clientY, ox = it.nx, oy = it.ny;
-  let moved = false, tg = null, guides = null;
+  let moved = false, tg = null, guides = null, dropPg = null;
+  // objects can be dragged onto another page: the page being dragged from is lifted above the others, and the page
+  // under the pointer is outlined; let go there and the object moves to that page (Edit Text lines stay with theirs)
+  const ownPg = el.closest(".pg"), canHop = !it.tedit;
+  const pageUnder = (ev) => { if (!canHop) return null; const hit = document.elementsFromPoint(ev.clientX, ev.clientY).find((x) => x.classList && x.classList.contains("pg") && x.dataset.page != null && x !== ownPg); return hit || null; };
   const mv = (ev) => {
     if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 3) return;
+    if (!moved && ownPg && canHop) ownPg.style.zIndex = "6";
+    const pu = pageUnder(ev); if (pu !== dropPg) { if (dropPg) dropPg.classList.remove("droptarget"); dropPg = pu; if (dropPg) dropPg.classList.add("droptarget"); }
     if (!moved && el.parentNode) {
       tg = snapTargets(it, el, dispW, dispH);
       guides = { v: mk("div", { className: "snapg v" }), h: mk("div", { className: "snapg h" }) };
       guides.v.style.display = guides.h.style.display = "none"; el.parentNode.append(guides.v, guides.h);
     }
     moved = true;
-    it.nx = Math.max(-0.1, Math.min(0.98, ox + (ev.clientX - sx) / dispW));
-    it.ny = Math.max(-0.1, Math.min(0.98, oy + (ev.clientY - sy) / dispH));
+    const far = canHop ? 4 : 0;   // free to leave the page while over another one
+    it.nx = Math.max(-0.1 - far, Math.min(0.98 + far, ox + (ev.clientX - sx) / dispW));
+    it.ny = Math.max(-0.1 - far, Math.min(0.98 + far, oy + (ev.clientY - sy) / dispH));
     if (guides) { if (ev.altKey) guides.v.style.display = guides.h.style.display = "none"; else snapMove(it, el, tg, dispW, dispH, guides); }
     el.style.left = it.nx * dispW + "px"; el.style.top = it.ny * dispH + "px";
   };
   const up = (ev) => {
     el.removeEventListener("pointermove", mv); el.removeEventListener("pointerup", up);
     if (guides) { guides.v.remove(); guides.h.remove(); guides = null; }
+    if (ownPg) ownPg.style.zIndex = "";
+    if (dropPg) dropPg.classList.remove("droptarget");
+    if (moved && canHop) {
+      const target = dropPg && dropPg.isConnected ? dropPg : null;
+      if (target && +target.dataset.page !== (it.page || 0)) { moveItemToPage(it, el, +target.dataset.page, target); return; }
+      it.nx = Math.max(-0.1, Math.min(0.98, it.nx)); it.ny = Math.max(-0.1, Math.min(0.98, it.ny));   // let go off any page: back on its own
+    }
     if (!moved && !fromGrip) {
       if (it.tbox) {            // one click edits a text box right away, caret where you clicked
         const cx = ev.clientX, cy = ev.clientY;
@@ -2465,6 +2485,18 @@ function startMove(it, el, e, dispW, dispH, wasSel, fromGrip) {
     render();
   };
   el.addEventListener("pointermove", mv); el.addEventListener("pointerup", up);
+}
+// an object let go over another page: it goes there, at the spot it was dropped, the same size on the paper
+function moveItemToPage(it, el, to, pgEl) {
+  const from = it.page || 0, ov = pgEl.querySelector(".pgov") || pgEl, r = ov.getBoundingClientRect(), b = el.getBoundingClientRect();
+  const pf = docPages[from], pt = docPages[to];
+  if (pf && pt && pf.w && pt.w) it.nw = Math.min(0.98, it.nw * pf.w / pt.w);
+  const hFrac = it.nw * it.ar * (pt ? pt.w / pt.h : 1);
+  it.page = to;
+  it.nx = Math.max(0, Math.min(1 - it.nw, (b.left - r.left) / r.width));
+  it.ny = Math.max(0, Math.min(1 - Math.min(1, hFrac), (b.top - r.top) / r.height));
+  selId = it.id; setCurPage(to, false); render();
+  toast(`Moved to page ${to + 1}.`);
 }
 function startResize(it, el, corner, e, dispW, dispH) {
   try { el.setPointerCapture(e.pointerId); } catch (_) {}
@@ -3004,7 +3036,13 @@ function renderProps() {
     add(pcell(st, match));
     if (it.fontMatches) add(pcell(mk("small", {}, "Close: " + it.fontMatches.map((m) => m.family + " " + m.pct + "%").join(", "))));
     add(pcell(colorBtn(itemColor(it), false, (c) => { it.color = c; render(); }, "Ink colour"), colorBtn(it.accent || SB.accent, false, (c) => { it.accent = c; SB.accent = c; render(); }, "Frame colour")));
-    add(pcell(pbtn(it.showCode !== false ? "☑ Signing code" : "☐ Signing code", it.showCode !== false, () => { it.showCode = it.showCode === false; render(); }, "The start of the document's SHA-256 fingerprint, taken before signing"),
+    const txt = (val, ph, title, set) => { const e = mk("input", { type: "text", value: val, placeholder: ph, title }); e.oninput = () => { set(e.value); render(); }; e.onkeydown = (ev) => ev.stopPropagation(); return e; };
+    add(pcell(mk("label", {}, "Label"), txt(it.label == null ? "Signed by" : it.label, "(no label)", "The words at the top of the block; empty for none", (v) => { it.label = v; })));
+    add(pcell(mk("label", {}, "Footer"), txt(sigBlockFooter(it), "(no footer)", "The small line at the foot: the signing code, your own words, or empty for none", (v) => { it.footer = v; }),
+      pbtn("↺", false, () => { delete it.footer; it.showCode = true; propsSig = ""; render(); }, "Back to the signing code")));
+    add(pcell(pbtn(it.showName !== false ? "☑ Printed name" : "☐ Printed name", it.showName !== false, () => { it.showName = it.showName === false; propsSig = ""; render(); }, "The name in plain letters under the signature"),
+      pbtn(it.frame !== false ? "☑ Frame" : "☐ Frame", it.frame !== false, () => { it.frame = it.frame === false; propsSig = ""; render(); }, "The box around the block")));
+    add(pcell(
       pbtn("+ Date beside it", false, () => { const m = signMoment(); const d = pushItem({ type: "text", isDate: true, ...m, nw: 0.3, ar: 0.11, text: fmtStamp(m.date, m.time, m.tz), font: 6, page: it.page }, Math.min(0.98, it.nx + it.nw + 0.17), it.ny + it.nw * it.ar * pageAspect(it.page) * 0.45); render(); }, "A date with the document's signing time, to the right of the block")));
     add(opacityCell(() => it.opacity ?? 1, (v) => { it.opacity = v; })); add(dupDel()); return;
   }
@@ -3022,7 +3060,7 @@ function renderProps() {
       if (TD.syncDates !== false) { docSignMoment = { date: it.date, time: it.time, tz: it.tz }; for (const o of docItems) if (o.isDate && o !== it) { Object.assign(o, docSignMoment); o.text = fmtStamp(o.date, o.time, o.tz); } }
       render();
     };
-    const syncB = pbtn(TD.syncDates !== false ? "☑ Every date the same" : "☐ Every date the same", TD.syncDates !== false, () => { TD.syncDates = TD.syncDates === false; if (TD.syncDates) apply(); else render(); }, "All the dates on this document show the same date, time and time zone");
+    const syncB = pbtn(TD.syncDates !== false ? "☑ Every date the same" : "☐ Every date the same", TD.syncDates !== false, () => { TD.syncDates = TD.syncDates === false; propsSig = ""; if (TD.syncDates) apply(); else render(); }, "All the dates on this document show the same date, time and time zone");
     const typed = (inp, parse, show, key) => { const v = parse(inp.value); inp.classList.toggle("bad", v == null && inp.value.trim() !== ""); if (v != null) { it[key] = v; apply(); } return v; };
     dI.oninput = () => { if (parseLooseDate(dI.value)) typed(dI, parseLooseDate, showDate, "date"); else dI.classList.remove("bad"); };
     dI.onchange = () => { if (typed(dI, parseLooseDate, showDate, "date") != null) dI.value = showDate(it.date); else dI.value = showDate(it.date); };
@@ -4274,7 +4312,9 @@ function marchingSquares(mask, w, h) {
   const val = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : mask[y * w + x]);
   const segs = [];
   const push = (p, q) => segs.push([p[0], p[1], q[0], q[1]]);
-  for (let y = 0; y < h - 1; y++) for (let x = 0; x < w - 1; x++) {
+  // from -1: everything outside the picture is paper, so ink touching the edge still gets a closed outline (an open one
+  // was closed with a straight line across the letters, drawing filled triangles)
+  for (let y = -1; y < h; y++) for (let x = -1; x < w; x++) {
     const tl = val(x, y), tr = val(x + 1, y), br = val(x + 1, y + 1), bl = val(x, y + 1);
     const idx = tl | (tr << 1) | (br << 2) | (bl << 3);
     if (idx === 0 || idx === 15) continue;
@@ -5194,9 +5234,10 @@ const fxNoise = (i, seed) => (Math.sin(i * 0.71 + seed * 12.9898) + Math.sin(i *
 function traceSig(source, fx) {
   const maxD = 880;
   let w = source.naturalWidth || source.width, h = source.naturalHeight || source.height;
-  const sc = Math.min(1, maxD / Math.max(w, h)); w = Math.max(1, Math.round(w * sc)); h = Math.max(1, Math.round(h * sc));
+  // small pictures (a signature cut from a screenshot) are enlarged smoothly first, so thin strokes trace as clean curves
+  const sc = Math.min(maxD / Math.max(w, h), Math.max(1, Math.min(4, 640 / Math.max(w, h)))); w = Math.max(1, Math.round(w * sc)); h = Math.max(1, Math.round(h * sc));
   const c = document.createElement("canvas"); c.width = w; c.height = h;
-  const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, w, h); cx.drawImage(source, 0, 0, w, h);
+  const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, w, h); cx.imageSmoothingQuality = "high"; cx.drawImage(source, 0, 0, w, h);
   const d = cx.getImageData(0, 0, w, h).data;
   const lum = new Float32Array(w * h);
   for (let i = 0, p = 0; i < w * h; i++, p += 4) lum[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
@@ -5212,6 +5253,8 @@ function traceSig(source, fx) {
   const local = new Float32Array(w * h);
   let mask = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; local[i] = boxMean(integ, x, y, rad); if (lum[i] < cut && local[i] - lum[i] > margin) mask[i] = 1; }
+  let framed = false;
+  if (fx.lines !== false) { const rr = removeRules(mask, w, h); mask = rr.mask; framed = rr.framed; }
   mask = despeckle(mask, w, h);
   // thickness: grow or shrink the ink by whole pixels
   const morph = (m, grow) => {
@@ -5238,12 +5281,12 @@ function traceSig(source, fx) {
   if (area < 24) return { err: "No clear ink found — raise the threshold, or drag a box around the signature.", mask, w, h };
   const minArea = Math.max(8, w * h * 0.00004);
   const passes = 1 + Math.round(fx.smooth / 100 * 2), eps = 0.25 + (1 - fx.exact / 100) * 2.6;
-  const R = fx.real / 100, rough = R * 0.55;
+  const R = fx.real / 100, vs = fx.vseed || 0, rough = Math.max(R * 0.55, vs ? 0.45 : 0);
   let loops = marchingSquares(mask, w, h).map((L, li) => {
     if (L.length > 1 && L[0][0] === L[L.length - 1][0] && L[0][1] === L[L.length - 1][1]) L = L.slice(0, -1);
     for (let n = 0; n < passes; n++) L = chaikin(L);
     L = simplifyLoop(L, eps);
-    if (rough > 0.02) L = L.map((p, i) => [p[0] + fxNoise(i, li + 1) * rough, p[1] + fxNoise(i + 50, li + 3) * rough]);
+    if (rough > 0.02) L = L.map((p, i) => [p[0] + fxNoise(i + vs * 31, li + 1 + vs) * rough, p[1] + fxNoise(i + 50 + vs * 17, li + 3 + vs) * rough]);
     return L;
   }).filter((L) => L.length > 3 && polyArea(L) > minArea);
   if (!loops.length) return { err: "Could not trace clean strokes — try a different threshold or a sharper picture.", mask, w, h };
@@ -5259,8 +5302,10 @@ function traceSig(source, fx) {
   for (const L of loops) {
     let s = "M" + (L[0][0] - minx + 1).toFixed(1) + " " + (L[0][1] - miny + 1).toFixed(1);
     for (let i = 1; i < L.length; i++) s += "L" + (L[i][0] - minx + 1).toFixed(1) + " " + (L[i][1] - miny + 1).toFixed(1);
-    body += '<path d="' + s + 'Z"/>';
+    body += s + "Z";
   }
+  // one path: the even-odd rule only makes holes (the inside of an o, the gaps between letters and a line) within a path
+  body = '<path d="' + body + '"/>';
   // realism: keep the pen's own shading (darker where it pressed) plus a little paper grain
   let defs = "", maskAttr = "";
   if (R > 0.03) {
@@ -5279,8 +5324,74 @@ function traceSig(source, fx) {
     defs = `<defs><mask id="${id}" maskUnits="userSpaceOnUse" x="0" y="0" width="${vbw}" height="${vbh}"><image x="1" y="1" width="${bw}" height="${bhh}" href="${href}" xlink:href="${href}" preserveAspectRatio="none"/></mask></defs>`;
     maskAttr = ` mask="url(#${id})"`;
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${vbw}" height="${vbh}" viewBox="0 0 ${vbw} ${vbh}" fill="currentColor" stroke="none">${defs}<g fill-rule="evenodd"${maskAttr}>${body}</g></svg>`;
-  return { svg, w: vbw, h: vbh, metrics: { slant, thickness }, mask, mw: w, mh: h };
+  const turn = vs ? ((((vs * 7919) % 1000) / 1000) - 0.5) * 2.4 : 0, tr = turn ? ` transform="rotate(${turn.toFixed(2)} ${(vbw / 2).toFixed(1)} ${(vbh / 2).toFixed(1)})"` : "";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${vbw}" height="${vbh}" viewBox="0 0 ${vbw} ${vbh}" fill="currentColor" stroke="none" overflow="visible">${defs}<g fill-rule="evenodd"${maskAttr}${tr}>${body}</g></svg>`;
+  return { svg, w: vbw, h: vbh, metrics: { slant, thickness }, mask, mw: w, mh: h, framed };
+}
+// The picture itself as the signature, with its background made see-through: how much darker than the paper around
+// it each pixel is decides how solid it stays (Threshold = how strongly the background is removed, Smoothness = how
+// soft the edges are). The traced ink (ruled lines and specks already taken out) decides what is kept at all.
+function cutPhoto(src, r, fx, ink, keep) {
+  const W = src.width, H = src.height, c = document.createElement("canvas"); c.width = W; c.height = H;
+  const g = c.getContext("2d", { willReadFrequently: true }); g.fillStyle = "#fff"; g.fillRect(0, 0, W, H); g.drawImage(src, 0, 0);
+  const img = g.getImageData(0, 0, W, H), d = img.data, lum = new Float32Array(W * H);
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) lum[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+  const integ = new Float64Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) { let rs = 0; for (let x = 0; x < W; x++) { rs += lum[y * W + x]; integ[(y + 1) * (W + 1) + (x + 1)] = integ[y * (W + 1) + (x + 1)] + rs; } }
+  const rad = Math.max(6, Math.round(Math.min(W, H) * 0.08));
+  const mean = (x, y) => { const x0 = Math.max(0, x - rad), y0 = Math.max(0, y - rad), x1 = Math.min(W - 1, x + rad), y1 = Math.min(H - 1, y + rad); return (integ[(y1 + 1) * (W + 1) + (x1 + 1)] - integ[y0 * (W + 1) + (x1 + 1)] - integ[(y1 + 1) * (W + 1) + x0] + integ[y0 * (W + 1) + x0]) / ((x1 - x0 + 1) * (y1 - y0 + 1)); };
+  // what to keep: the traced ink, grown a little, at this picture's size
+  const mc = document.createElement("canvas"); mc.width = r.mw; mc.height = r.mh; const mg = mc.getContext("2d"), md = mg.createImageData(r.mw, r.mh);
+  for (let y = 0; y < r.mh; y++) for (let x = 0; x < r.mw; x++) { let on = 0; for (let dy = -2; dy <= 2 && !on; dy++) for (let dx = -2; dx <= 2; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < r.mw && yy < r.mh && r.mask[yy * r.mw + xx]) { on = 1; break; } } if (on) { const p = (y * r.mw + x) * 4; md.data[p + 3] = 255; } }
+  mg.putImageData(md, 0, 0);
+  const gc = document.createElement("canvas"); gc.width = W; gc.height = H; const gg = gc.getContext("2d", { willReadFrequently: true }); gg.imageSmoothingQuality = "high"; gg.drawImage(mc, 0, 0, W, H);
+  const gate = gg.getImageData(0, 0, W, H).data;
+  const margin = (1 - fx.thresh / 255) * 44 + 4, soft = 4 + fx.smooth * 0.6, inkRGB = cssRgb(ink).map((v) => Math.round(v * 255));
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, p = i * 4, a = Math.max(0, Math.min(1, (mean(x, y) - lum[i] - margin * 0.5) / soft)) * (gate[p + 3] / 255);
+    if (!keep) { d[p] = inkRGB[0]; d[p + 1] = inkRGB[1]; d[p + 2] = inkRGB[2]; }
+    d[p + 3] = Math.round(a * 255);
+    if (a > 0.04) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  if (x1 < 0) return { err: "Nothing left after removing the background - lower the Threshold." };
+  g.putImageData(img, 0, 0);
+  const pad = 4; x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(W - 1, x1 + pad); y1 = Math.min(H - 1, y1 + pad);
+  const o = document.createElement("canvas"); o.width = x1 - x0 + 1; o.height = y1 - y0 + 1; o.getContext("2d").drawImage(c, x0, y0, o.width, o.height, 0, 0, o.width, o.height);
+  const url = o.toDataURL("image/png");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${o.width}" height="${o.height}" viewBox="0 0 ${o.width} ${o.height}"><image width="${o.width}" height="${o.height}" href="${url}" xlink:href="${url}"/></svg>`;
+  return { svg, w: o.width, h: o.height, metrics: r.metrics, mask: r.mask, mw: r.mw, mh: r.mh, photo: true };
+}
+// Straight ruled lines are not part of a signature: the signing line it was written on, the sides of a box drawn
+// around it. A row (column) of ink longer than half the picture, at most a few pixels thick, is taken out, except
+// where a pen stroke crosses it (ink just above and just below), so letters stay whole.
+function removeRules(mask, w, h) {
+  const m = mask.slice(); let framed = false;
+  const maxT = Math.max(3, Math.round(Math.min(w, h) * 0.07));
+  // how much of a row is line-like: its longest unbroken run, or (a grey, anti-aliased line breaks into pieces) all its ink
+  const longest = (n, len, at) => { let best = 0, run = 0, all = 0; for (let k = 0; k < len; k++) { if (at(n, k)) { run++; all++; if (run > best) best = run; } else run = 0; } return Math.max(best, all >= len * 0.6 ? all * 0.85 : 0); };
+  const sweep = (N, len, at, clear, need) => {
+    for (let n = 0; n < N;) {
+      if (longest(n, len, at) < len * need) { n++; continue; }
+      let e = n; while (e < N && longest(e, len, at) >= len * need * 0.6) e++;
+      if (e - n <= maxT) { for (let k = 0; k < len; k++) { const a = n - 2 >= 0 && at(n - 2, k), b = e + 1 < N && at(e + 1, k); if (!(a && b)) for (let q = n; q < e; q++) clear(q, k); } framed = true; }
+      n = e;
+    }
+  };
+  sweep(h, w, (y, x) => m[y * w + x], (y, x) => { m[y * w + x] = 0; }, 0.5);
+  // box sides: nearly the full height, near the left or right edge (a tall letter in a tight crop is neither)
+  sweep(w, h, (x, y) => (x < w * 0.15 || x > w * 0.85 ? m[y * w + x] : 0), (x, y) => { m[y * w + x] = 0; }, 0.9);
+  return { mask: m, framed };
+}
+// A typed signature (a name set in a script font, as e-signing tools draw it) is recognised: the cleaned ink is
+// matched against the handwriting fonts, using the words it says.
+async function readTypedSignature(r, words) {
+  if (!r || r.err || !words) return null;
+  const c = document.createElement("canvas"); c.width = r.mw; c.height = r.mh; const g = c.getContext("2d"), d = g.createImageData(r.mw, r.mh);
+  for (let i = 0; i < r.mask.length; i++) { const v = r.mask[i] ? 0 : 255; d.data[i * 4] = d.data[i * 4 + 1] = d.data[i * 4 + 2] = v; d.data[i * 4 + 3] = 255; }
+  g.putImageData(d, 0, 0);
+  const list = await identifyFont(c, words, SIG_FONTS);
+  return list.length ? list : null;
 }
 
 // ---- the import window: pick the area, fine-tune, save -----------------------------
@@ -5290,8 +5401,9 @@ async function openSigStudio(file) {
   $("sx_warn").textContent = "";
   if (!dlg.open) dlg.showModal();
   if (file) {
-    sx.src = null; sx.pdf = null; sx.crop = null; sx.result = null;
+    sx.src = null; sx.pdf = null; sx.crop = null; sx.result = null; sx.zoom = 1; sx.pan = { x: 0, y: 0 }; sx.upCache = null; sx.vseed = 0;
     $("sx_out").innerHTML = '<span class="sx-wait">Reading…</span>';
+    if ($("sx_words") && !$("sx_words").value) $("sx_words").value = signerName();
     const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name || "");
     dlg.classList.toggle("pdf", isPdf);
     try {
@@ -5331,8 +5443,10 @@ function sxDraw() {
   cv.width = Math.max(1, Math.round(rr.width * dpr)); cv.height = Math.max(1, Math.round(rr.height * dpr));
   const x = cv.getContext("2d"); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, rr.width, rr.height);
   if (!sx.src) return;
-  const s = Math.min(rr.width / sx.src.width, rr.height / sx.src.height), ox = (rr.width - sx.src.width * s) / 2, oy = (rr.height - sx.src.height * s) / 2;
-  sx.view = { s, ox, oy };
+  const fitS = Math.min(rr.width / sx.src.width, rr.height / sx.src.height), s = fitS * (sx.zoom || 1);
+  const ox = (rr.width - sx.src.width * s) / 2 + (sx.pan ? sx.pan.x : 0), oy = (rr.height - sx.src.height * s) / 2 + (sx.pan ? sx.pan.y : 0);
+  sx.view = { s, ox, oy, fitS };
+  const zv = $("sx_zoomv"); if (zv) zv.textContent = (sx.zoom || 1) === 1 ? "Fit" : Math.round((sx.zoom || 1) * 100) + "%";
   x.drawImage(sx.src, ox, oy, sx.src.width * s, sx.src.height * s);
   const c = sx.crop || { x: 0, y: 0, w: sx.src.width, h: sx.src.height };
   const cx0 = ox + c.x * s, cy0 = oy + c.y * s, cw = c.w * s, ch = c.h * s;
@@ -5351,17 +5465,50 @@ function sxDraw() {
   }
   if (sx.crop) { x.strokeStyle = "#398dff"; x.lineWidth = 2; x.setLineDash([6, 4]); x.strokeRect(cx0, cy0, cw, ch); x.setLineDash([]); }
 }
+// the crop, made bigger if asked: sharp resampling, or the AI model (downloaded once)
+async function sxUpscaled(crop) {
+  const up = sx.up || "1"; if (up === "1" || !window.__cal2Upscale) return crop;
+  const key = [sx.page, JSON.stringify(sx.crop), up, crop.width, crop.height].join("|");
+  if (sx.upCache && sx.upCache.key === key) return sx.upCache.canvas;
+  $("sx_out").innerHTML = `<span class="sx-wait">${up === "ai" ? "Upscaling with AI (the model downloads once)…" : "Upscaling…"}</span>`;
+  const factor = up === "ai" ? 4 : +up, maxSide = 2600, f = Math.min(factor, maxSide / Math.max(crop.width, crop.height));
+  let out = crop;
+  try { if (f > 1.05) out = await window.__cal2Upscale(crop, f, up === "ai" ? "fast" : "classic"); } catch (e) { toast("Upscaling could not run (" + (e.message || e) + "); using the picture as it is."); }
+  sx.upCache = { key, canvas: out };
+  return out;
+}
 function sxProcess() {
   clearTimeout(sx.timer);
-  sx.timer = setTimeout(() => {
+  sx.timer = setTimeout(async () => {
     if (!sx.src) return;
-    const r = traceSig(sxCropCanvas(), sigFx);
-    sx.result = r;
+    const tok = (sx.tok = (sx.tok || 0) + 1), src = await sxUpscaled(sxCropCanvas()); if (tok !== sx.tok) return;
+    const fx = { ...sigFx, vseed: sx.vseed || 0 };
+    let r = traceSig(src, fx);
+    if (!r.err && sx.mode === "photo") { const pr = cutPhoto(src, r, fx, sx.color, !!sx.keepColors); r = pr.err ? { ...r, err: pr.err } : { ...pr, framed: r.framed }; }
+    sx.result = r; sxReadTyped();
     const out = $("sx_out");
     if (r.err) { out.innerHTML = `<span class="sx-wait">${escapeHTML(r.err)}</span>`; }
     else out.innerHTML = r.svg.replace(/ width="[\d.]+" height="[\d.]+"/, ' width="100%" height="100%"').replace("<svg ", `<svg style="color:${sx.color}" `);
+    const info = $("sx_info"); if (info && !r.err) info.textContent = `${r.photo ? "Picture, background removed" : "Traced strokes"} · ${r.w} × ${r.h} px${sx.up && sx.up !== "1" ? " · upscaled " + (sx.up === "ai" ? "4× (AI)" : sx.up + "×") : ""}${r.framed ? " · ruled lines removed" : ""}`;
     sxDraw();
   }, 60);
+}
+// "Does this look typed?": the closest handwriting font for the words in the box; a clear match can be used for typed
+// signatures and signing blocks from now on
+function sxReadTyped() {
+  clearTimeout(sx.typedTimer); const box = $("sx_typed"); if (!box) return;
+  const words = ($("sx_words").value || "").trim(), r = sx.result;
+  if (!words) { box.innerHTML = "Type what the signature says to check whether it is a typed (font) signature."; return; }
+  box.textContent = "Reading the signature…";
+  sx.typedTimer = setTimeout(async () => {
+    const list = await readTypedSignature(r, words).catch(() => null); if (sx.result !== r) return;
+    if (!list) { box.textContent = "No signature to read in the box."; return; }
+    const best = list[0], close = list.slice(1, 4).map((m) => m.family + " " + m.pct + "%").join(", ");
+    if (best.pct >= 60 || (best.pct >= 45 && list[1] && best.pct - list[1].pct >= 5)) {   // a clear winner over the next font
+      box.innerHTML = `Looks typed in <b>${escapeHTML(best.family)}</b> (${best.pct}% match; next: ${escapeHTML(close)}). <button class="btn" id="sx_usefont" style="width:auto;padding:3px 10px">Use ${escapeHTML(best.family)} for typed signatures</button>`;
+      $("sx_usefont").onclick = () => { SB.font = best.family; ensureFont(best.family); for (const it of docItems) if (it.type === "sigblock" && it.style !== "hand") it.sigFont = best.family; render(); toast(`Typed signatures and signing blocks now use ${best.family}.`); };
+    } else box.textContent = `Reads as handwritten (no handwriting font is a close match; nearest: ${best.family} ${best.pct}%, ${close}). It will be used as the picture traced here.`;
+  }, 400);
 }
 function sxSave(use) {
   const r = sx.result;
@@ -5370,7 +5517,7 @@ function sxSave(use) {
   $("sig_threshold").value = sigFx.thresh; refreshLabels();
   sigSVG = r.svg; sigBox = { w: r.w, h: r.h };
   $("sig_controls").style.display = "";
-  addSavedSig({ name: "Imported signature", svg: r.svg, w: r.w, h: r.h, color: sx.color });
+  addSavedSig({ name: r.photo ? "Imported signature (picture)" : "Imported signature", svg: r.svg, w: r.w, h: r.h, color: sx.color });
   $("sigx").close();
   if (!use) { toast("Signature saved — find it under Saved signatures."); return; }
   toggles.usesig = true; syncToggles();
@@ -5398,6 +5545,22 @@ function sxWire() {
   $("sx_prev").onclick = async () => { if (sx.pdf && sx.page > 1) { await sxPage(sx.page - 1); sxProcess(); } };
   $("sx_next").onclick = async () => { if (sx.pdf && sx.page < sx.pages) { await sxPage(sx.page + 1); sxProcess(); } };
   $("sx_defaults").onclick = () => fxReset($("sx_fx"), sxProcess);
+  // the viewer: zoom with the wheel or the buttons, pan with Shift- or middle-drag
+  const zoomTo = (z, cxp, cyp) => { const v = sx.view; if (!v || !sx.src) return; const r = cv.getBoundingClientRect(); const px = cxp == null ? r.width / 2 : cxp, py = cyp == null ? r.height / 2 : cyp;
+    const sxp = (px - v.ox) / v.s, syp = (py - v.oy) / v.s; sx.zoom = Math.max(1, Math.min(16, z)); const s2 = v.fitS * sx.zoom;
+    const baseX = (r.width - sx.src.width * s2) / 2, baseY = (r.height - sx.src.height * s2) / 2; sx.pan = sx.zoom === 1 ? { x: 0, y: 0 } : { x: px - sxp * s2 - baseX, y: py - syp * s2 - baseY }; sxDraw(); };
+  cv.addEventListener("wheel", (e) => { if (!sx.src) return; e.preventDefault(); const r = cv.getBoundingClientRect(); zoomTo((sx.zoom || 1) * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+  cv.addEventListener("pointerdown", (e) => { if (!sx.src || !(e.shiftKey || e.button === 1)) return; e.preventDefault(); e.stopImmediatePropagation(); sx.drag = null; const p0 = { x: e.clientX, y: e.clientY }, pan0 = { ...(sx.pan || { x: 0, y: 0 }) }; try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+    const mv = (ev) => { sx.pan = { x: pan0.x + ev.clientX - p0.x, y: pan0.y + ev.clientY - p0.y }; sxDraw(); }; const up = () => { cv.removeEventListener("pointermove", mv); cv.removeEventListener("pointerup", up); }; cv.addEventListener("pointermove", mv); cv.addEventListener("pointerup", up); }, true);
+  $("sx_zin").onclick = () => zoomTo((sx.zoom || 1) * 1.5); $("sx_zout").onclick = () => zoomTo((sx.zoom || 1) / 1.5); $("sx_fit").onclick = () => { sx.zoom = 1; sx.pan = { x: 0, y: 0 }; sxDraw(); };
+  $("sx_mode").onchange = () => { sx.mode = $("sx_mode").value; $("sx_keep_l").style.display = sx.mode === "photo" ? "" : "none"; sxProcess(); };
+  $("sx_up").onchange = () => { sx.up = $("sx_up").value; sxProcess(); };
+  $("sx_keep").onchange = () => { sx.keepColors = $("sx_keep").checked; sxProcess(); };
+  $("sx_var").onclick = () => { sx.vseed = 1 + Math.floor(Math.random() * 997); sxProcess(); };
+  $("sx_lines").checked = sigFx.lines !== false;
+  $("sx_lines").onchange = () => { sigFx.lines = $("sx_lines").checked; lsSet("cal2_sigfx", sigFx); sxProcess(); };
+  $("sx_words").oninput = () => sxReadTyped();
+  $("sx_words").onkeydown = (e) => e.stopPropagation();
   $("sx_file").onclick = () => $("sig_file").click();
   const inks = $("sx_ink"); inks.innerHTML = "";
   DP_INKS.forEach((col, i) => { const b = document.createElement("div"); b.className = "sw" + (i === 0 ? " sel" : ""); b.style.background = col; b.title = col; b.onclick = () => { sx.color = col; inks.querySelectorAll(".sw").forEach((q) => q.classList.toggle("sel", q === b)); sxProcess(); }; inks.appendChild(b); });
@@ -6244,7 +6407,9 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   window.__cal2SetEdMode = (m) => { if (doc) setEdMode(m); };
   window.__cal2SetDocTool = (t) => { if (doc) setEdTool(t); };
   window.__cal2Toast = toast;
-window.__cal2IdentifyFont = (crop, text) => identifyFont(crop, text);
+window.__cal2TraceSig = (img, fx) => traceSig(img, { ...SIGFX_DEF, ...(fx || {}) });   // used by the import tests
+  window.__cal2ReadTyped = (img, words) => readTypedSignature(traceSig(img, { ...SIGFX_DEF }), words);
+window.__cal2IdentifyFont = (crop, text, families) => identifyFont(crop, text, families || MATCH_FAMILIES);
   window.__cal2DebugItem = (id) => { const it = docItems.find((q) => q.id === id); return it && { text: it.text, orig: it.orig, editing: editingId === id }; };   // used by the editing stress test
   window.__cal2ApplyTier = applyTier;
   window.__cal2Rerender = () => render(false);

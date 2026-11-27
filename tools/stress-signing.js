@@ -95,3 +95,92 @@ export async function run() {
   const pass = out.filter((o) => o.pass).length;
   return { summary: `${pass}/${out.length} passed`, fails: out.filter((o) => !o.pass), out };
 }
+
+// Signature import: typed signatures cropped tight (ink touching the edges), with the signing line through them and
+// a box around some. The traced signature must cover the letters and nothing else (no filled triangles or holes),
+// the ruled lines must be gone, and the typed signature's font must be read.
+export async function runImport() {
+  const out = [], ok = (name, cond, info = "") => { out.push({ name, pass: !!cond, info: String(info).slice(0, 300) }); return !!cond; };
+  for (const f of FONTS) { const e = document.createElement("link"); e.rel = "stylesheet"; e.href = `https://fonts.googleapis.com/css2?family=${f.replace(/ /g, "+")}&display=swap`; document.head.append(e); }
+  const load = (u) => new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.src = u; });
+  let read = 0;
+  for (let k = 0; k < FONTS.length; k++) {
+    const f = FONTS[k], boxed = k % 2 === 1;
+    await document.fonts.load(`80px "${f}"`, NAME);
+    // the letters alone (the truth), then the picture people import: grey paper, a signing line, maybe a box
+    const W = 760, H = 170, truth = document.createElement("canvas"); truth.width = W; truth.height = H; const tg = truth.getContext("2d");
+    tg.fillStyle = "#fff"; tg.fillRect(0, 0, W, H); tg.fillStyle = "#000"; tg.font = `92px "${f}"`; tg.fillText(NAME, 30, 128);
+    const pic = document.createElement("canvas"); pic.width = W; pic.height = H; const pg = pic.getContext("2d");
+    pg.fillStyle = "#dfdfdf"; pg.fillRect(0, 0, W, H); pg.drawImage(truth, 0, 0); pg.globalCompositeOperation = "multiply"; pg.drawImage(truth, 0, 0); pg.globalCompositeOperation = "source-over";
+    pg.fillStyle = "#222"; pg.fillRect(0, 122, W, 3);
+    if (boxed) { pg.strokeStyle = "#5b3df5"; pg.lineWidth = 3; pg.strokeRect(2, 2, W - 4, H - 4); }
+    // crop tight: cut through the tops and bottoms of the tallest letters
+    const ink = (() => { const d = tg.getImageData(0, 0, W, H).data; let y0 = H, y1 = 0; for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (d[(y * W + x) * 4] < 128) { if (y < y0) y0 = y; if (y > y1) y1 = y; } return { y0, y1 }; })();
+    const cy0 = boxed ? 0 : ink.y0 + 3, cy1 = boxed ? H : ink.y1 - 3, crop = document.createElement("canvas"); crop.width = W; crop.height = cy1 - cy0; crop.getContext("2d").drawImage(pic, 0, cy0, W, cy1 - cy0, 0, 0, W, cy1 - cy0);
+    const t = window.__cal2TraceSig(crop, { real: 0, lines: window.__LINES !== false });
+    if (!ok(`import ${f}${boxed ? " (in a box)" : ""}: traced`, !t.err, t.err)) continue;
+    // draw the traced signature back over the crop's area and compare with the letters alone
+    const img = await load("data:image/svg+xml;charset=utf-8," + encodeURIComponent(t.svg.replace("<svg ", '<svg style="color:#000" ')));
+    const tm = t.mask, mw = t.mw, mh = t.mh;
+    let bx0 = mw, by0 = mh, bx1 = 0, by1 = 0; for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) if (tm[y * mw + x]) { if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+    const R = document.createElement("canvas"); R.width = mw; R.height = mh; const rg = R.getContext("2d"); rg.fillStyle = "#fff"; rg.fillRect(0, 0, mw, mh); rg.drawImage(img, bx0 - 1, by0 - 1, t.w, t.h);
+    const T = document.createElement("canvas"); T.width = mw; T.height = mh; T.getContext("2d").drawImage(truth, 0, cy0, W, cy1 - cy0, 0, 0, mw, mh);
+    const a = rg.getImageData(0, 0, mw, mh).data, b = T.getContext("2d").getImageData(0, 0, mw, mh).data;
+    let both = 0, extra = 0, truthN = 0; for (let i = 0; i < a.length; i += 4) { const A = a[i] < 128, B = b[i] < 128; if (B) truthN++; if (A && B) both++; if (A && !B) extra++; }
+    ok(`import ${f}${boxed ? " (in a box)" : ""}: covers the letters`, both / truthN > (f === "Sacramento" ? 0.65 : 0.8), `${(100 * both / truthN).toFixed(1)}% of the letters` + (f === "Sacramento" ? " (hairline strokes lying exactly on the signing line go with it)" : ""));
+    ok(`import ${f}${boxed ? " (in a box)" : ""}: nothing extra (no filled shapes, line and box gone)`, extra / truthN < 0.25, `extra ink ${(100 * extra / truthN).toFixed(1)}% of the letters' ink`);
+    const list = await window.__cal2ReadTyped(crop, NAME);
+    if (list && list[0].family === f) read++;
+    ok(`import ${f}: read as typed in its font`, list && list[0].family === f && (list[0].pct >= 60 || (list[0].pct >= 45 && list[1] && list[0].pct - list[1].pct >= 5)), list ? list.slice(0, 3).map((m) => m.family + " " + m.pct + "%").join(", ") : "none");
+  }
+  const pass = out.filter((o) => o.pass).length;
+  return { summary: `${pass}/${out.length} passed; fonts read ${read}/${FONTS.length}`, fails: out.filter((o) => !o.pass), out };
+}
+
+// The signature viewer: zoom, the picture itself with its background removed (own colours or re-inked), upscaling,
+// a new variation, and Save & use placing it on the open document.
+export async function runViewer() {
+  const out = [], ok = (name, cond, info = "") => { out.push({ name, pass: !!cond, info: String(info).slice(0, 300) }); return !!cond; };
+  const l = document.createElement("link"); l.rel = "stylesheet"; l.href = "https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap"; document.head.append(l);
+  await sleep(800); await document.fonts.load('80px "Great Vibes"', NAME).catch(() => {});
+  // a blue pen signature on cream paper with a grey signing line, as a phone photo might show it
+  const c = document.createElement("canvas"); c.width = 700; c.height = 200; const g = c.getContext("2d");
+  g.fillStyle = "#f3ecd9"; g.fillRect(0, 0, 700, 200); g.fillStyle = "#1d3fb8"; g.font = '96px "Great Vibes"'; g.fillText(NAME, 40, 140);
+  g.fillStyle = "#777"; g.fillRect(0, 150, 700, 2);
+  const file = new File([await new Promise((r) => c.toBlob(r, "image/png"))], "photo.png", { type: "image/png" });
+  const D = await makeDoc(); await window.__cal2OpenDocBytes(D.bytes, "viewer.pdf", "pdf"); location.hash = "#/edit?" + Date.now(); await until(() => ov0(), 15000); await sleep(400);
+  const orig = HTMLInputElement.prototype.click;
+  HTMLInputElement.prototype.click = function () { if (this.type !== "file") return orig.call(this); HTMLInputElement.prototype.click = orig; const dt = new DataTransfer(); dt.items.add(file); this.files = dt.files; this.dispatchEvent(new Event("change", { bubbles: true })); };
+  window.__cal2PickSignatureImage();
+  const svgOut = async (pred, ms = 15000) => until(() => { const s = $("#sx_out svg"); return s && pred(s) && s; }, ms);
+  const pixels = async (svg) => { const img = await new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.src = svg.querySelector(":scope > image").getAttribute("href"); }); const k = document.createElement("canvas"); k.width = img.width; k.height = img.height; const kg = k.getContext("2d"); kg.drawImage(img, 0, 0); return kg.getImageData(0, 0, k.width, k.height).data; };
+  ok("viewer: opens with the traced signature", await svgOut((s) => s.querySelector("path")), ($("#sx_out") || {}).textContent);
+  $("#sx_zin").click(); await sleep(100); ok("viewer: zooms in", /%/.test($("#sx_zoomv").textContent), $("#sx_zoomv").textContent);
+  $("#sx_fit").click(); await sleep(100); ok("viewer: back to fit", $("#sx_zoomv").textContent === "Fit", $("#sx_zoomv").textContent);
+  const sel = (id, v) => { const e = $(id); e.value = v; e.dispatchEvent(new Event("change", { bubbles: true })); };
+  sel("#sx_mode", "photo");
+  const ph = await svgOut((s) => s.querySelector(":scope > image"));
+  if (ok("viewer: picture mode gives the picture", ph)) {
+    const px = await pixels(ph), n = px.length / 4;
+    let clear = 0, solid = 0, blueish = 0; for (let i = 0; i < px.length; i += 4) { if (px[i + 3] < 10) clear++; else if (px[i + 3] > 200) { solid++; if (px[i + 2] > px[i] + 40) blueish++; } }
+    ok("viewer: the paper is see-through", clear / n > 0.6, `${(100 * clear / n).toFixed(0)}% clear, ${(100 * solid / n).toFixed(1)}% solid ink`);
+    ok("viewer: re-inked in the chosen ink (black)", solid > 200 && blueish / solid < 0.1, `${blueish}/${solid} blue`);
+    const keep = $("#sx_keep"); keep.checked = true; keep.dispatchEvent(new Event("change", { bubbles: true }));
+    const ph2 = await svgOut((s) => s.querySelector(":scope > image") && s.querySelector(":scope > image").getAttribute("href") !== ph.querySelector(":scope > image").getAttribute("href"));
+    if (ph2) { const p2 = await pixels(ph2); let s2 = 0, b2 = 0; for (let i = 0; i < p2.length; i += 4) if (p2[i + 3] > 200) { s2++; if (p2[i + 2] > p2[i] + 40) b2++; } ok("viewer: keeps the picture's own (blue) ink when asked", s2 > 200 && b2 / s2 > 0.6, `${b2}/${s2} blue`); }
+    else ok("viewer: keeps the picture's own ink when asked", false, "no new picture");
+  }
+  const w0 = +(((($("#sx_info") || {}).textContent || "").match(/(\d+) ×/) || [])[1] || 0);
+  sel("#sx_up", "2");
+  const up = await until(() => { const m = (($("#sx_info") || {}).textContent || "").match(/(\d+) × \d+ px · upscaled 2×/); return m && +m[1]; }, 20000);
+  ok("viewer: 2× upscale makes it bigger", up && up > w0 * 1.6, `${w0} -> ${up}`);
+  sel("#sx_up", "1"); sel("#sx_mode", "trace");
+  const t1 = await svgOut((s) => !!s.querySelector("path")); const d1 = t1 && t1.querySelector("path").getAttribute("d");
+  $("#sx_var").click();
+  const t2 = await svgOut((s) => s.querySelector("path") && s.querySelector("path").getAttribute("d") !== d1);
+  ok("viewer: a new variation is a little different", t2, t2 ? "differs" : "same");
+  const before = $$("#ed_pages .ditem").length; $("#sx_place").click(); await sleep(900);
+  ok("viewer: Save & use puts it on the page", $$("#ed_pages .ditem").length === before + 1 && !$("#sigx").open, `${before} -> ${$$("#ed_pages .ditem").length}`);
+  const pass = out.filter((o) => o.pass).length;
+  return { summary: `${pass}/${out.length} passed`, fails: out.filter((o) => !o.pass), out };
+}

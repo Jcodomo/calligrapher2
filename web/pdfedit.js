@@ -2162,6 +2162,8 @@ export function initPdfEditor() {
     openTool(t);
   };
   window.__cal2AddPdfFiles = (files) => addFiles(files);
+  // the signature viewer's upscaling: sharp resampling ("classic") or the ESRGAN model ("fast"), any picture
+  window.__cal2Upscale = (canvas, factor, engine) => enhanceOne(canvas, { inW: canvas.width * factor, dpi: 1, engine: engine || "classic", despeckle: false, whiten: false, gray: false, sharpen: engine === "classic" ? 0.35 : 0.15 });
   // the editor's Download → Excel / PowerPoint: a temporary source, converted, then removed
   window.__cal2OfficeFromBytes = async (kind, bytes, name, onProg) => {
     const src = { id: "of" + Date.now(), name: (name || "document") + ".pdf", bytes: new Uint8Array(bytes) };

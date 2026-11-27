@@ -7,7 +7,18 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 
 ## 2026-11-27
 
+### Editor
+- **Drag objects onto another page.** Pictures, signatures, signing blocks, text boxes, dates, ticks and shapes can be dragged off one page and dropped on the page above or below (or any other page in view): the page under the pointer is outlined, the object lands where it is dropped and keeps its size on the paper (also onto a page of another size), and Undo brings it back. Lines changed with Edit text stay on their own page.
+
+### Handwriting & signatures
+- **Signature import no longer draws filled triangles.** Two tracing faults: a stroke touching the edge of the picture (any tightly cut signature) left an open outline that was closed with a straight line across the letters, and holes (the inside of an o, the gaps between letters and a line) were painted solid because every outline was its own path. Outlines now always close, and they are drawn as one path so holes stay holes.
+- **Ruled lines and boxes are taken out:** the signing line a signature was written on, and the sides of a box drawn around it, are removed from the ink (where a pen stroke crosses them it is kept, so letters stay whole). On by default; "Remove ruled lines and boxes" turns it off. On test signatures cut tight with a line through them, stray ink fell from 26-260% of the letters' ink to 9-24%.
+- **Small pictures trace cleanly:** a signature cut from a screenshot (a few hundred pixels wide) is enlarged smoothly before tracing, so thin strokes come out as whole, smooth curves instead of broken pieces.
+- **Typed signatures are recognised:** type what the signature says ("It says") and the import window tells you whether it is a typed (font) signature and which handwriting font it is set in, with "Use <font> for typed signatures" for signing blocks. On test signatures typed in seven script fonts, all seven were read.
+- **The import window is a signature viewer:** zoom with the mouse wheel or the + / - buttons and move around with Shift-drag; keep the result as clean traced strokes or as the picture itself with its background made see-through (Threshold sets how strongly the background is removed, Smoothness how soft the edges are; keep the picture's own ink colours or re-ink it); upscale 2x or 4x (sharp resampling) or 4x with AI (the same ESRGAN model as Clean up & upscale, downloaded once); "New variation" draws the same signature with a slight natural difference. Save & use puts it on the page.
+
 ### Forms & signing
+- **Every part of a signing block can be changed or taken off:** the label (type other words, or clear it for none), the footer line (the signing code, your own words, or none), the printed name and the frame.
 - **Signing block (new).** Fill & Sign > Signing block puts Ghost Calligrapher's own signature block on the page: "Signed by", the signature, the signer's printed name under it, and a signing code. The signature is typed in a script font of your choice (or written by the handwriting engine); the name comes from the side panel and can be changed in the bar above the page. The frame and ink colours can be changed.
 - **The signing code is real:** the first 16 characters of the SHA-256 fingerprint of the document as it was opened, before signing. The full fingerprint goes into the downloaded PDF's properties, so anyone with the original file can check that it is the document that was signed.
 - **Match a typed signature's font.** Match a signature, then drag a box around a typed signature already on the page: its script font is found and used for this signer (and new signing blocks). On a test page with typed signatures in seven script fonts, 7 of 7 were matched.
@@ -15,6 +26,7 @@ The same list is on the site at https://jcodomo.github.io/calligrapher2/changelo
 - The typed-signature script font is listed as "Signature script".
 
 ### Tests
+- tools/stress-signing.js also checks signature import (seven fonts, cut tight, with a signing line and a box: letters kept, nothing extra, the typed font read) and the viewer (zoom, background removed, own colours or re-inked, 2x upscale, variations, Save & use); tools/stress-pagehop.js checks dragging objects between pages (same-size and landscape pages, editor and PDF, Undo).
 - New: tools/stress-signing.js (sample names only): placing a signing block, the name, the signing code checked against the original file's SHA-256, two dates kept the same, and font matching of typed signatures in seven script fonts.
 
 ## 2026-11-25

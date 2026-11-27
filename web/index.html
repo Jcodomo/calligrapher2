@@ -462,6 +462,7 @@
   .pg{position:relative;background:#fff;box-shadow:var(--page-shadow);flex:none}
   .pg>img{display:block;width:100%;height:100%;user-select:none;-webkit-user-drag:none}
   .pgov{position:absolute;left:0;top:0;overflow:visible;touch-action:none}
+  .pg.droptarget{outline:3px dashed var(--sel);outline-offset:3px}
   .pgnav{position:sticky;top:calc(50% - 22px);height:0;width:100%;justify-content:space-between;pointer-events:none;z-index:6;align-self:stretch}
   .pgnav button{pointer-events:auto;width:44px;height:44px;border-radius:50%;border:1px solid var(--line2);background:var(--surface);color:var(--text);cursor:pointer;box-shadow:var(--pop-shadow);font-size:20px;margin:0 -8px}
   .pgnav button:hover{color:var(--accent)}
@@ -1234,8 +1235,17 @@ jumps over the lazy dog</textarea>
       </div>
       <div class="sx-out" id="sx_out"></div>
     </div>
+    <div class="dp-tools" style="gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px">
+      <span>View</span><button class="btn" id="sx_zout" style="width:auto;padding:3px 10px" title="Zoom out">−</button><span id="sx_zoomv" style="min-width:42px;text-align:center">Fit</span><button class="btn" id="sx_zin" style="width:auto;padding:3px 10px" title="Zoom in (or use the mouse wheel; Shift-drag to move around)">+</button><button class="btn" id="sx_fit" style="width:auto;padding:3px 10px">Fit</button>
+      <label>Result <select id="sx_mode"><option value="trace">Clean pen strokes (traced)</option><option value="photo">The picture itself, background removed</option></select></label>
+      <label id="sx_keep_l" style="display:none"><input type="checkbox" id="sx_keep"> Keep the picture's own colours</label>
+      <label>Upscale <select id="sx_up"><option value="1">Original size</option><option value="2">2× sharper</option><option value="4">4× sharper</option><option value="ai">4× with AI (downloads once)</option></select></label>
+      <button class="btn" id="sx_var" style="width:auto;padding:3px 10px" title="A slightly different version: the same signature with a natural variation">New variation</button>
+      <span id="sx_info" style="color:var(--muted);font-size:12px"></span>
+    </div>
     <div class="fx" id="sx_fx"></div>
-    <div class="dp-tools"><span class="swatches" id="sx_ink"></span><span class="spacer"></span><button class="btn" id="sx_defaults">Reset sliders</button></div>
+    <div class="dp-tools"><span class="swatches" id="sx_ink"></span><span class="spacer"></span><label style="display:flex;gap:6px;align-items:center;font-size:12.5px"><input type="checkbox" id="sx_lines" checked> Remove ruled lines and boxes</label><button class="btn" id="sx_defaults">Reset sliders</button></div>
+    <div class="dp-tools" style="gap:8px;align-items:center;flex-wrap:wrap"><label style="font-size:12.5px">It says</label><input type="text" id="sx_words" placeholder="The name in the signature" style="flex:0 1 220px;min-width:120px"><span id="sx_typed" style="font-size:12px;color:var(--muted);flex:1 1 260px"></span></div>
     <div class="note" style="margin-top:8px">Use only a signature you're authorized to use.</div>
     <div class="dp-warn" id="sx_warn"></div>
   </div>
@@ -1249,7 +1259,7 @@ jumps over the lazy dog</textarea>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="./rapid-ocr.js?v=2"></script>
-<script type="module" src="./app.js?v=102"></script>
+<script type="module" src="./app.js?v=103"></script>
 <script type="module" src="./convert.js?v=1"></script>
 <script type="module" src="./shell.js?v=17"></script>
 </body>
