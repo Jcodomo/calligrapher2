@@ -137,6 +137,63 @@ export async function runImport() {
   return { summary: `${pass}/${out.length} passed; fonts read ${read}/${FONTS.length}`, fails: out.filter((o) => !o.pass), out };
 }
 
+// The keep / erase brush: a signature with a faint stroke the threshold misses and a dark smudge. Keep painted over the
+// faint stroke brings it back, Erase painted over the smudge takes it out, Undo stroke and Clear put things back, and
+// the picture result (background removed) follows the brush too.
+export async function runBrush() {
+  const out = [], ok = (name, cond, info = "") => { out.push({ name, pass: !!cond, info: String(info).slice(0, 300) }); return !!cond; };
+  const l = document.createElement("link"); l.rel = "stylesheet"; l.href = "https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap"; document.head.append(l);
+  await sleep(800); await document.fonts.load('80px "Great Vibes"', NAME).catch(() => {});
+  const W = 800, H = 220, c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
+  g.fillStyle = "#f6f3ea"; g.fillRect(0, 0, W, H); g.fillStyle = "#151515"; g.font = '96px "Great Vibes"'; g.fillText(NAME, 40, 140);
+  // a faint flourish (light grey, too faint for the threshold) and a dark smudge
+  const FAINT = { x0: 470, y0: 160, x1: 760, y1: 200 }, SMUDGE = { x0: 640, y0: 30, x1: 700, y1: 80 };
+  g.strokeStyle = "#e0dbce"; g.lineWidth = 5; g.beginPath(); g.moveTo(480, 185); g.bezierCurveTo(560, 160, 650, 205, 750, 175); g.stroke();
+  g.fillStyle = "#2a2a2a"; g.beginPath(); g.ellipse(670, 55, 24, 18, 0.3, 0, Math.PI * 2); g.fill();
+  const file = new File([await new Promise((r) => c.toBlob(r, "image/png"))], "brush.png", { type: "image/png" });
+  const D = await makeDoc(); await window.__cal2OpenDocBytes(D.bytes, "brush.pdf", "pdf"); location.hash = "#/edit?" + Date.now(); await until(() => ov0(), 15000); await sleep(300);
+  const orig = HTMLInputElement.prototype.click;
+  HTMLInputElement.prototype.click = function () { if (this.type !== "file") return orig.call(this); HTMLInputElement.prototype.click = orig; const dt = new DataTransfer(); dt.items.add(file); this.files = dt.files; this.dispatchEvent(new Event("change", { bubbles: true })); };
+  window.__cal2PickSignatureImage();
+  await until(() => window.__cal2SxState().result && !window.__cal2SxState().result.err, 15000); await sleep(300);
+  // share of a source-picture box that the traced ink covers
+  const cover = (box) => { const st = window.__cal2SxState(), r = st.result, kx = r.mw / st.src.w, ky = r.mh / st.src.h; let n = 0, t = 0;
+    for (let y = Math.floor(box.y0 * ky); y < Math.ceil(box.y1 * ky); y++) for (let x = Math.floor(box.x0 * kx); x < Math.ceil(box.x1 * kx); x++) { t++; if (r.mask[y * r.mw + x]) n++; } return n / Math.max(1, t); };
+  const settle = async () => { const r0 = window.__cal2SxState().result; await until(() => window.__cal2SxState().result !== r0, 8000); await sleep(150); };
+  const cv = $("#sx_src");
+  const paint = async (mode, pts, size = 30) => {
+    if (mode !== "same") { const b = $(mode === "keep" ? "#sx_bkeep" : "#sx_berase"); if (b.getAttribute("aria-pressed") !== "true") b.click(); }
+    const bs = $("#sx_bsize"); bs.value = size; bs.dispatchEvent(new Event("input", { bubbles: true }));
+    const v = window.__cal2SxState().view, r = cv.getBoundingClientRect(), at = ([x, y]) => [r.left + v.ox + x * v.s, r.top + v.oy + y * v.s];
+    const [sx0, sy0] = at(pts[0]); cv.dispatchEvent(new PointerEvent("pointerdown", { clientX: sx0, clientY: sy0, bubbles: true, pointerId: 1, buttons: 1, button: 0 }));
+    for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i]; for (let k = 1; k <= 8; k++) { const [px, py] = at([a[0] + (b[0] - a[0]) * k / 8, a[1] + (b[1] - a[1]) * k / 8]); cv.dispatchEvent(new PointerEvent("pointermove", { clientX: px, clientY: py, bubbles: true, pointerId: 1, buttons: 1 })); } }
+    const [ex, ey] = at(pts[pts.length - 1]); cv.dispatchEvent(new PointerEvent("pointerup", { clientX: ex, clientY: ey, bubbles: true, pointerId: 1 }));
+    await settle();
+  };
+  const faint0 = cover(FAINT), smudge0 = cover(SMUDGE), letters0 = cover({ x0: 40, y0: 60, x1: 460, y1: 150 });
+  ok("brush: before - the faint flourish is missed, the smudge is kept", faint0 < 0.01 && smudge0 > 0.3, `faint ${(faint0 * 100).toFixed(1)}%, smudge ${(smudge0 * 100).toFixed(0)}%`);
+  await paint("keep", [[480, 185], [560, 172], [650, 195], [750, 175]], 26);
+  const faint1 = cover(FAINT);
+  ok("brush: Keep brings the faint flourish back", faint1 > faint0 + 0.03, `faint ${(faint0 * 100).toFixed(1)}% -> ${(faint1 * 100).toFixed(1)}%`);
+  await paint("erase", [[650, 40], [690, 70], [660, 65], [685, 45]], 46);
+  const smudge1 = cover(SMUDGE);
+  ok("brush: Erase takes the smudge out", smudge1 < 0.02, `smudge ${(smudge0 * 100).toFixed(0)}% -> ${(smudge1 * 100).toFixed(1)}%`);
+  ok("brush: the letters are untouched", Math.abs(cover({ x0: 40, y0: 60, x1: 460, y1: 150 }) - letters0) < 0.02, `${(letters0 * 100).toFixed(1)}% -> ${(cover({ x0: 40, y0: 60, x1: 460, y1: 150 }) * 100).toFixed(1)}%`);
+  // the picture result follows the brush
+  const sel = (id, v) => { const e = $(id); e.value = v; e.dispatchEvent(new Event("change", { bubbles: true })); };
+  sel("#sx_mode", "photo"); await settle();
+  const ph = await until(() => { const s = $("#sx_out svg"); return s && s.querySelector(":scope > image") && s; }, 8000);
+  ok("brush: the picture result is made with the brush too", ph && cover(SMUDGE) < 0.02, ph ? "picture" : "none");
+  sel("#sx_mode", "trace"); await settle();
+  $("#sx_bundo").click(); await settle();
+  ok("brush: Undo stroke brings the smudge back", cover(SMUDGE) > 0.3 && cover(FAINT) > faint0 + 0.03, `smudge ${(cover(SMUDGE) * 100).toFixed(0)}%, faint ${(cover(FAINT) * 100).toFixed(1)}%`);
+  $("#sx_bclear").click(); await settle();
+  ok("brush: Clear puts it back as it was", Math.abs(cover(FAINT) - faint0) < 0.005 && window.__cal2SxState().strokes === 0, `faint ${(cover(FAINT) * 100).toFixed(1)}%`);
+  $("#sx_x").click();
+  const pass = out.filter((o) => o.pass).length;
+  return { summary: `${pass}/${out.length} passed`, fails: out.filter((o) => !o.pass), out };
+}
+
 // The signature viewer: zoom, the picture itself with its background removed (own colours or re-inked), upscaling,
 // a new variation, and Save & use placing it on the open document.
 export async function runViewer() {

@@ -1241,6 +1241,11 @@ jumps over the lazy dog</textarea>
       <label id="sx_keep_l" style="display:none"><input type="checkbox" id="sx_keep"> Keep the picture's own colours</label>
       <label>Upscale <select id="sx_up"><option value="1">Original size</option><option value="2">2× sharper</option><option value="4">4× sharper</option><option value="ai">4× with AI (downloads once)</option></select></label>
       <button class="btn" id="sx_var" style="width:auto;padding:3px 10px" title="A slightly different version: the same signature with a natural variation">New variation</button>
+      <span style="display:inline-flex;gap:6px;align-items:center" title="Paint on the picture: Keep brings back ink that was missed (faint strokes, a stroke on the signing line), Erase takes out smudges and stray marks. Shift-drag still moves around.">
+        <span>Brush</span><button class="btn" id="sx_bkeep" style="width:auto;padding:3px 10px" aria-pressed="false">Keep</button><button class="btn" id="sx_berase" style="width:auto;padding:3px 10px" aria-pressed="false">Erase</button>
+        <input type="range" id="sx_bsize" min="6" max="90" value="24" style="width:80px" aria-label="Brush size">
+        <button class="btn" id="sx_bundo" style="width:auto;padding:3px 10px" disabled title="Undo the last stroke (Ctrl+Z)">Undo stroke</button><button class="btn" id="sx_bclear" style="width:auto;padding:3px 10px" disabled>Clear</button>
+      </span>
       <span id="sx_info" style="color:var(--muted);font-size:12px"></span>
     </div>
     <div class="fx" id="sx_fx"></div>
@@ -1259,7 +1264,7 @@ jumps over the lazy dog</textarea>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="./rapid-ocr.js?v=2"></script>
-<script type="module" src="./app.js?v=103"></script>
+<script type="module" src="./app.js?v=104"></script>
 <script type="module" src="./convert.js?v=1"></script>
 <script type="module" src="./shell.js?v=17"></script>
 </body>

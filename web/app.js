@@ -5255,6 +5255,7 @@ function traceSig(source, fx) {
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; local[i] = boxMean(integ, x, y, rad); if (lum[i] < cut && local[i] - lum[i] > margin) mask[i] = 1; }
   let framed = false;
   if (fx.lines !== false) { const rr = removeRules(mask, w, h); mask = rr.mask; framed = rr.framed; }
+  if (fx.brush) applyBrush(mask, lum, local, w, h, fx.brush, (1 - fx.thresh / 255) * 44 + 4);
   mask = despeckle(mask, w, h);
   // thickness: grow or shrink the ink by whole pixels
   const morph = (m, grow) => {
@@ -5346,10 +5347,11 @@ function cutPhoto(src, r, fx, ink, keep) {
   mg.putImageData(md, 0, 0);
   const gc = document.createElement("canvas"); gc.width = W; gc.height = H; const gg = gc.getContext("2d", { willReadFrequently: true }); gg.imageSmoothingQuality = "high"; gg.drawImage(mc, 0, 0, W, H);
   const gate = gg.getImageData(0, 0, W, H).data;
-  const margin = (1 - fx.thresh / 255) * 44 + 4, soft = 4 + fx.smooth * 0.6, inkRGB = cssRgb(ink).map((v) => Math.round(v * 255));
+  const margin = (1 - fx.thresh / 255) * 44 + 4, soft = 4 + fx.smooth * 0.6, inkRGB = cssRgb(ink).map((v) => Math.round(v * 255)), br = fx.brush ? brushArrays(fx.brush, W, H) : null;
   let x0 = W, y0 = H, x1 = -1, y1 = -1;
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const i = y * W + x, p = i * 4, a = Math.max(0, Math.min(1, (mean(x, y) - lum[i] - margin * 0.5) / soft)) * (gate[p + 3] / 255);
+    const i = y * W + x, p = i * 4, kept = br && br.keep[i];
+    const a = br && br.erase[i] ? 0 : Math.max(0, Math.min(1, (mean(x, y) - lum[i] - margin * (kept ? 0.15 : 0.5)) / soft)) * (kept ? Math.max(gate[p + 3], 255) / 255 : gate[p + 3] / 255);
     if (!keep) { d[p] = inkRGB[0]; d[p + 1] = inkRGB[1]; d[p + 2] = inkRGB[2]; }
     d[p + 3] = Math.round(a * 255);
     if (a > 0.04) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
@@ -5361,6 +5363,25 @@ function cutPhoto(src, r, fx, ink, keep) {
   const url = o.toDataURL("image/png");
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${o.width}" height="${o.height}" viewBox="0 0 ${o.width} ${o.height}"><image width="${o.width}" height="${o.height}" href="${url}" xlink:href="${url}"/></svg>`;
   return { svg, w: o.width, h: o.height, metrics: r.metrics, mask: r.mask, mw: r.mw, mh: r.mh, photo: true };
+}
+// The keep / erase brush: strokes painted on the picture (red = keep, blue = erase, later strokes over earlier ones),
+// at the size of the picture being traced. Keep brings back faint ink the threshold missed (anything a little darker
+// than the paper around it), including a pen stroke lying on a removed signing line; erase takes everything out.
+function brushArrays(cv, w, h) {
+  if (!cv) return null;
+  const c = document.createElement("canvas"); c.width = w; c.height = h; const g = c.getContext("2d", { willReadFrequently: true });
+  g.imageSmoothingEnabled = false; g.drawImage(cv, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data, keep = new Uint8Array(w * h), erase = new Uint8Array(w * h); let any = false;
+  for (let i = 0; i < w * h; i++) { const p = i * 4; if (d[p + 3] < 100) continue; any = true; if (d[p] > d[p + 2]) keep[i] = 1; else erase[i] = 1; }
+  return any ? { keep, erase } : null;
+}
+function applyBrush(mask, lum, local, w, h, brush, margin) {
+  const b = brushArrays(brush, w, h); if (!b) return;
+  const lenient = Math.max(4, margin * 0.3);
+  for (let i = 0; i < w * h; i++) {
+    if (b.erase[i]) mask[i] = 0;
+    else if (b.keep[i] && local[i] - lum[i] > lenient && lum[i] < 250) mask[i] = 1;
+  }
 }
 // Straight ruled lines are not part of a signature: the signing line it was written on, the sides of a box drawn
 // around it. A row (column) of ink longer than half the picture, at most a few pixels thick, is taken out, except
@@ -5401,7 +5422,7 @@ async function openSigStudio(file) {
   $("sx_warn").textContent = "";
   if (!dlg.open) dlg.showModal();
   if (file) {
-    sx.src = null; sx.pdf = null; sx.crop = null; sx.result = null; sx.zoom = 1; sx.pan = { x: 0, y: 0 }; sx.upCache = null; sx.vseed = 0;
+    sx.src = null; sx.pdf = null; sx.crop = null; sx.result = null; sx.zoom = 1; sx.pan = { x: 0, y: 0 }; sx.upCache = null; sx.vseed = 0; sx.strokes = []; sx.brush = "off"; sxBrushUi();
     $("sx_out").innerHTML = '<span class="sx-wait">Reading…</span>';
     if ($("sx_words") && !$("sx_words").value) $("sx_words").value = signerName();
     const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name || "");
@@ -5420,7 +5441,7 @@ async function openSigStudio(file) {
       }
     } catch (err) { $("sx_warn").textContent = (err && err.message) || "Could not open that file."; return; }
   }
-  $("sx_hint").textContent = sx.pdf ? "Drag a box around the signature on the page. Red shows the ink that will be kept." : "Drag a box around the signature to leave out anything else. Red shows the ink that will be kept.";
+  $("sx_hint").textContent = sx.pdf ? "Drag a box around the signature on the page. Red shows the ink that will be kept; paint with the Keep (green) or Erase (blue) brush to fix what it missed or caught." : "Drag a box around the signature to leave out anything else. Red shows the ink that will be kept; paint with the Keep (green) or Erase (blue) brush to fix what it missed or caught.";
   requestAnimationFrame(() => { sxDraw(); sxProcess(); });
 }
 async function sxPage(n) {
@@ -5464,6 +5485,31 @@ function sxDraw() {
     x.drawImage(o, cx0, cy0, cw, ch);
   }
   if (sx.crop) { x.strokeStyle = "#398dff"; x.lineWidth = 2; x.setLineDash([6, 4]); x.strokeRect(cx0, cy0, cw, ch); x.setLineDash([]); }
+  if (sx.strokes && sx.strokes.length) {
+    x.save(); x.lineCap = "round"; x.lineJoin = "round";
+    for (const st of sx.strokes) {
+      x.strokeStyle = x.fillStyle = st.mode === "keep" ? "rgba(31,170,90,.45)" : "rgba(40,110,255,.45)"; x.lineWidth = Math.max(1, st.size * s);
+      const P = st.pts.map(([a, b]) => [ox + a * s, oy + b * s]);
+      if (P.length === 1) { x.beginPath(); x.arc(P[0][0], P[0][1], x.lineWidth / 2, 0, Math.PI * 2); x.fill(); }
+      else { x.beginPath(); x.moveTo(P[0][0], P[0][1]); for (let k = 1; k < P.length; k++) x.lineTo(P[k][0], P[k][1]); x.stroke(); }
+    }
+    x.restore();
+  }
+  if (sx.brush && sx.brush !== "off" && sx.hover) { x.save(); x.strokeStyle = sx.brush === "keep" ? "#1faa5a" : "#286eff"; x.lineWidth = 1.5; x.beginPath(); x.arc(sx.hover.x, sx.hover.y, (sx.brushSize || 24) / 2, 0, Math.PI * 2); x.stroke(); x.restore(); }
+}
+// the brush strokes (kept in the source picture's pixels) drawn for the crop, at the size of the picture being traced
+function sxBrushCanvas(W, H) {
+  if (!sx.strokes || !sx.strokes.length || !sx.src) return null;
+  const r = sx.crop || { x: 0, y: 0, w: sx.src.width, h: sx.src.height }, kx = W / r.w, ky = H / r.h;
+  const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
+  g.lineCap = "round"; g.lineJoin = "round";
+  for (const s of sx.strokes) {
+    g.strokeStyle = s.mode === "keep" ? "rgb(255,0,0)" : "rgb(0,0,255)"; g.fillStyle = g.strokeStyle; g.lineWidth = Math.max(1, s.size * kx);
+    const P = s.pts.map(([x, y]) => [(x - r.x) * kx, (y - r.y) * ky]);
+    if (P.length === 1) { g.beginPath(); g.arc(P[0][0], P[0][1], g.lineWidth / 2, 0, Math.PI * 2); g.fill(); continue; }
+    g.beginPath(); g.moveTo(P[0][0], P[0][1]); for (let k = 1; k < P.length; k++) g.lineTo(P[k][0], P[k][1]); g.stroke();
+  }
+  return c;
 }
 // the crop, made bigger if asked: sharp resampling, or the AI model (downloaded once)
 async function sxUpscaled(crop) {
@@ -5477,12 +5523,18 @@ async function sxUpscaled(crop) {
   sx.upCache = { key, canvas: out };
   return out;
 }
+function sxBrushUi() {
+  const on = (id, v) => { const b = $(id); if (b) { b.classList.toggle("primary", v); b.setAttribute("aria-pressed", String(v)); } };
+  on("sx_bkeep", sx.brush === "keep"); on("sx_berase", sx.brush === "erase");
+  const n = (sx.strokes || []).length; if ($("sx_bundo")) $("sx_bundo").disabled = !n; if ($("sx_bclear")) $("sx_bclear").disabled = !n;
+  const cv = $("sx_src"); if (cv) cv.style.cursor = sx.brush && sx.brush !== "off" ? "none" : "";
+}
 function sxProcess() {
   clearTimeout(sx.timer);
   sx.timer = setTimeout(async () => {
     if (!sx.src) return;
     const tok = (sx.tok = (sx.tok || 0) + 1), src = await sxUpscaled(sxCropCanvas()); if (tok !== sx.tok) return;
-    const fx = { ...sigFx, vseed: sx.vseed || 0 };
+    const fx = { ...sigFx, vseed: sx.vseed || 0, brush: sxBrushCanvas(src.width, src.height) };
     let r = traceSig(src, fx);
     if (!r.err && sx.mode === "photo") { const pr = cutPhoto(src, r, fx, sx.color, !!sx.keepColors); r = pr.err ? { ...r, err: pr.err } : { ...pr, framed: r.framed }; }
     sx.result = r; sxReadTyped();
@@ -5533,6 +5585,17 @@ function sxWire() {
   fxSliders($("sx_fx"), ["thresh", "smooth", "exact", "real", "weight"], sxProcess);
   const cv = $("sx_src");
   const toSrc = (e) => { const r = cv.getBoundingClientRect(), v = sx.view; return { x: Math.max(0, Math.min(sx.src.width, (e.clientX - r.left - v.ox) / v.s)), y: Math.max(0, Math.min(sx.src.height, (e.clientY - r.top - v.oy) / v.s)) }; };
+  cv.addEventListener("pointerdown", (e) => {
+    if (!sx.src || !sx.view || !sx.brush || sx.brush === "off" || e.shiftKey || e.button === 1) return;
+    e.preventDefault(); e.stopImmediatePropagation(); try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+    const p0 = toSrc(e), st = { mode: sx.brush, size: (sx.brushSize || 24) / sx.view.s, pts: [[p0.x, p0.y]] };
+    (sx.strokes = sx.strokes || []).push(st); sxDraw();
+    const mv = (ev) => { const p = toSrc(ev); st.pts.push([p.x, p.y]); const r = cv.getBoundingClientRect(); sx.hover = { x: ev.clientX - r.left, y: ev.clientY - r.top }; sxDraw(); };
+    const up = () => { cv.removeEventListener("pointermove", mv); cv.removeEventListener("pointerup", up); cv.removeEventListener("pointercancel", up); sxBrushUi(); sxProcess(); };
+    cv.addEventListener("pointermove", mv); cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", up);
+  }, true);
+  cv.addEventListener("pointermove", (e) => { if (!sx.brush || sx.brush === "off") return; const r = cv.getBoundingClientRect(); sx.hover = { x: e.clientX - r.left, y: e.clientY - r.top }; if (!sx.drag) sxDraw(); });
+  cv.addEventListener("pointerleave", () => { if (sx.hover) { sx.hover = null; sxDraw(); } });
   cv.addEventListener("pointerdown", (e) => { if (!sx.src || !sx.view) return; e.preventDefault(); try { cv.setPointerCapture(e.pointerId); } catch (_) {} sx.drag = toSrc(e); });
   cv.addEventListener("pointermove", (e) => {
     if (!sx.drag) return; const p = toSrc(e);
@@ -5542,6 +5605,7 @@ function sxWire() {
   const end = () => { if (sx.drag) { sx.drag = null; sxProcess(); } };
   cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
   $("sx_reset").onclick = () => { sx.crop = null; sxProcess(); };
+  $("sx_prev").addEventListener("click", () => { sx.strokes = []; sxBrushUi(); }, true); $("sx_next").addEventListener("click", () => { sx.strokes = []; sxBrushUi(); }, true);
   $("sx_prev").onclick = async () => { if (sx.pdf && sx.page > 1) { await sxPage(sx.page - 1); sxProcess(); } };
   $("sx_next").onclick = async () => { if (sx.pdf && sx.page < sx.pages) { await sxPage(sx.page + 1); sxProcess(); } };
   $("sx_defaults").onclick = () => fxReset($("sx_fx"), sxProcess);
@@ -5557,6 +5621,13 @@ function sxWire() {
   $("sx_up").onchange = () => { sx.up = $("sx_up").value; sxProcess(); };
   $("sx_keep").onchange = () => { sx.keepColors = $("sx_keep").checked; sxProcess(); };
   $("sx_var").onclick = () => { sx.vseed = 1 + Math.floor(Math.random() * 997); sxProcess(); };
+  // the keep / erase brush
+  const setBrush = (m) => { sx.brush = sx.brush === m ? "off" : m; sxBrushUi(); sxDraw(); };
+  $("sx_bkeep").onclick = () => setBrush("keep"); $("sx_berase").onclick = () => setBrush("erase");
+  $("sx_bsize").oninput = () => { sx.brushSize = +$("sx_bsize").value; sxDraw(); };
+  $("sx_bundo").onclick = () => { if (sx.strokes && sx.strokes.length) { sx.strokes.pop(); sxBrushUi(); sxDraw(); sxProcess(); } };
+  $("sx_bclear").onclick = () => { sx.strokes = []; sxBrushUi(); sxDraw(); sxProcess(); };
+  $("sigx").addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && sx.strokes && sx.strokes.length && document.activeElement && document.activeElement.tagName !== "INPUT") { e.preventDefault(); $("sx_bundo").click(); } });
   $("sx_lines").checked = sigFx.lines !== false;
   $("sx_lines").onchange = () => { sigFx.lines = $("sx_lines").checked; lsSet("cal2_sigfx", sigFx); sxProcess(); };
   $("sx_words").oninput = () => sxReadTyped();
@@ -6408,6 +6479,7 @@ function typingInField(e) { const t = e.target; return t && (t.isContentEditable
   window.__cal2SetDocTool = (t) => { if (doc) setEdTool(t); };
   window.__cal2Toast = toast;
 window.__cal2TraceSig = (img, fx) => traceSig(img, { ...SIGFX_DEF, ...(fx || {}) });   // used by the import tests
+  window.__cal2SxState = () => ({ result: sx.result, src: sx.src && { w: sx.src.width, h: sx.src.height }, view: sx.view, strokes: (sx.strokes || []).length });   // used by the brush test
   window.__cal2ReadTyped = (img, words) => readTypedSignature(traceSig(img, { ...SIGFX_DEF }), words);
 window.__cal2IdentifyFont = (crop, text, families) => identifyFont(crop, text, families || MATCH_FAMILIES);
   window.__cal2DebugItem = (id) => { const it = docItems.find((q) => q.id === id); return it && { text: it.text, orig: it.orig, editing: editingId === id }; };   // used by the editing stress test
